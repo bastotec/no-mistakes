@@ -148,7 +148,8 @@ func newAxiRunCmd() *cobra.Command {
 			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
 			"--existing-pr URL binds this run to an open github.com PR, including an upstream\n" +
 			"PR when origin is your fork. The clean source branch head must already be\n" +
-			"published and match the PR. Validation failure never creates another PR.\n" +
+			"published and match the PR. The run integrates with the branch that PR targets.\n" +
+			"Validation failure never creates another PR.\n" +
 			"Cannot be combined with --skip, --base-branch, or launch-receipt flags.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
@@ -190,14 +191,10 @@ func newAxiRunCmd() *cobra.Command {
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string) error {
-	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait)
+	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait, "")
 }
 
-func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, target ...string) error {
-	existingPR := ""
-	if len(target) > 0 {
-		existingPR = target[0]
-	}
+func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, existingPR string) error {
 	if existingPR != "" {
 		if _, _, err := github.ExistingPRTarget(existingPR); err != nil {
 			return emitError(cmd, 2, err.Error())

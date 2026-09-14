@@ -154,7 +154,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// out-of-band or stale-mirror commit fails loudly instead of silently dropping it.
 	// A bare --force-with-lease offers no protection when pushing to a URL (no
 	// remote-tracking refs), so the anchor is explicit.
-	lastSeen := lastKnownBranchTip(ctx, sctx, branch, usingFork)
+	lastSeen := lastKnownBranchTip(ctx, sctx, branch, branchTrackedInPushNamespace(sctx))
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
 	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
 	if err != nil {

@@ -117,9 +117,74 @@ func TestExistingPRLaunchPinsTargetAndFailsClosed(t *testing.T) {
 	}
 }
 
+// The integration branch of an explicit run is the branch its pull request
+// actually targets. Reading the repository default instead rebases, pushes and
+// reports against another branch than the one CI merges into.
+func TestExistingPRLaunchIntegratesWithTheValidatedBaseBranch(t *testing.T) {
+	bin := t.TempDir()
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	const target = "https://github.com/upstream/widgets/pull/168"
+	const prBase = "release/2.0"
+	var calls atomic.Int32
+	observed := &existingPRObserveStep{calls: &calls, target: target, base: prBase}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{observed} })
+	repo, _ := setupTestGitRepo(t, p, d, "explicit-pr-base")
+	repo, err := d.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "new.txt"), []byte("new committed work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "new work")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	payload := fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","base":{"ref":%q,"repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, target, prBase, head)
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", payload)
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.RerunResult
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "validate existing upstream PR", URL: target}, &result); err != nil {
+		t.Fatal(err)
+	}
+	run := waitForRunTerminalState(t, d, result.RunID)
+	if run.Status != types.RunCompleted || run.PRBaseBranch == nil || *run.PRBaseBranch != prBase {
+		t.Fatalf("run did not adopt the pull request base: %+v", run)
+	}
+
+	// A rerun reads the base back from the live pull request rather than
+	// inheriting it as an operator override, which explicit runs refuse.
+	gitCmd(t, p.RepoDir(repo.ID), "update-ref", "refs/heads/feature", head)
+	var rerun ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: run.ID}, &rerun); err != nil {
+		t.Fatal(err)
+	}
+	inherited := waitForRunTerminalState(t, d, rerun.RunID)
+	if inherited.Status != types.RunCompleted || inherited.PRBaseBranch == nil || *inherited.PRBaseBranch != prBase {
+		t.Fatalf("rerun lost the pull request base: %+v", inherited)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("step calls=%d", calls.Load())
+	}
+}
+
 type existingPRObserveStep struct {
 	calls  *atomic.Int32
 	target string
+	base   string
 }
 
 func (s *existingPRObserveStep) Name() types.StepName { return types.StepReview }
@@ -127,6 +192,9 @@ func (s *existingPRObserveStep) Execute(ctx *pipeline.StepContext) (*pipeline.St
 	s.calls.Add(1)
 	if ctx.Run.ExistingPRURL == nil || *ctx.Run.ExistingPRURL != s.target || ctx.Run.PRURL == nil || *ctx.Run.PRURL != s.target {
 		return nil, fmt.Errorf("target missing before first step")
+	}
+	if s.base != "" && (ctx.Run.PRBaseBranch == nil || *ctx.Run.PRBaseBranch != s.base) {
+		return nil, fmt.Errorf("step ran against %v, not the pull request base %s", ctx.Run.PRBaseBranch, s.base)
 	}
 	return &pipeline.StepOutcome{}, nil
 }

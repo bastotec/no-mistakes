@@ -331,8 +331,9 @@ type RunInfo struct {
 	Error            *string         `json:"error,omitempty"`
 	CIReady          bool            `json:"ci_ready,omitempty"`
 	CIReadyNoCI      bool            `json:"ci_ready_no_ci,omitempty"`
-	// PRBaseBranch is the per-run PR target override, if the operator set
-	// --base-branch when starting this run.
+	// PRBaseBranch is the per-run PR target branch, if the operator set
+	// --base-branch when starting this run or an explicit PR target supplied
+	// the branch it is open against.
 	PRBaseBranch  *string `json:"pr_base_branch,omitempty"`
 	ExistingPRURL *string `json:"existing_pr_url,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the

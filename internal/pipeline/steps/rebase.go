@@ -34,8 +34,8 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
 		branchTarget = "origin/" + branch
-		if strings.TrimSpace(sctx.Repo.ForkURL) != "" {
-			pushRemote = sctx.Repo.PushURL()
+		if branchTrackedInPushNamespace(sctx) {
+			pushRemote = resolvePushURL(sctx)
 			branchTarget = forkBranchTrackingRef(branch)
 		}
 	}
@@ -64,7 +64,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// (the original #281/#305 hazard, in the force-push path). Leaving it stale is
 	// what lets the push step's content check catch that case.
 	if !forcePush && branch != "" && branch != defaultBranch {
-		if strings.TrimSpace(sctx.Repo.ForkURL) == "" && existingPRURL(sctx) == "" {
+		if !branchTrackedInPushNamespace(sctx) {
 			if err := fetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
 				sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", branch, err))
 			}
@@ -390,6 +390,16 @@ func isForcePushAgainstRemote(ctx context.Context, workDir, remote, branch, loca
 
 func forkBranchTrackingRef(branch string) string {
 	return forkBranchRefPrefix + branch
+}
+
+// branchTrackedInPushNamespace reports whether the pushed branch is tracked
+// outside refs/remotes/origin/. A configured fork and an explicit PR target
+// both publish the branch to a repository other than the one the integration
+// refs are fetched from, so the branch keeps its own tracking namespace: the
+// fetch destination must be a fully qualified ref, and origin/<branch> must
+// stay free for the integration repository.
+func branchTrackedInPushNamespace(sctx *pipeline.StepContext) bool {
+	return strings.TrimSpace(sctx.Repo.ForkURL) != "" || existingPRURL(sctx) != ""
 }
 
 func isRemoteBranchRewritten(ctx context.Context, workDir, remoteRef string) bool {

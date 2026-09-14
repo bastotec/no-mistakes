@@ -890,7 +890,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 				inheritedPRURL = inheritablePRURL(runs[0])
 			}
 		}
-		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, inheritedPRURL)
+		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, inheritedPRURL, "")
 		if err != nil {
 			return "", err
 		}
@@ -1082,7 +1082,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	storedPRBaseBranch := strings.TrimSpace(prBaseBranch)
-	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil {
+	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil && explicitRunTarget(selectedRun) == "" {
+		// An explicit target's base is not an operator override to inherit; the
+		// replacement run reads it back from the live pull request.
 		storedPRBaseBranch = strings.TrimSpace(*selectedRun.PRBaseBranch)
 	}
 	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), explicitRunTarget(selectedRun))
@@ -1167,15 +1169,15 @@ func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) e
 // A non-empty intent is stamped onto the run as agent-supplied, so the intent
 // step uses it instead of inferring from transcripts.
 func (m *RunManager) startRun(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, prBaseBranch string) (string, error) {
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, "")
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, db.RunIntentSourceAgent, prBaseBranch, "", "")
 }
 
 // startRunWithIntentSource is the common run-creation path. source is empty
 // when no intent is supplied, RunIntentSourceAgent for a new explicit
 // override, and RunIntentSourceRerun for inherited explicit intent.
-func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch, inheritedPRURL string, existingPR ...string) (string, error) {
+func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, prBaseBranch, inheritedPRURL, existingPR string) (string, error) {
 	return m.withBranchLock(repo.ID, branch, func() (string, error) {
-		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, inheritedPRURL, existingPR...)
+		return m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, intent, source, "", "", "", prBaseBranch, inheritedPRURL, existingPR)
 	})
 }
 
@@ -1190,7 +1192,7 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
-func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL string, existingPR ...string) (string, error) {
+func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL, existingPR string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1216,7 +1218,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		repo = refreshed
 	}
 
-	if len(existingPR) > 0 && existingPR[0] != "" && (len(skipSteps) != 0 || strings.TrimSpace(prBaseBranch) != "") {
+	if existingPR != "" && (len(skipSteps) != 0 || strings.TrimSpace(prBaseBranch) != "") {
 		return "", fmt.Errorf("explicit PR runs cannot skip steps or retarget the base")
 	}
 	// Cancel any active run for this repo+branch.
@@ -1240,7 +1242,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", err
 	}
 
-	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, existingPR...)
+	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, existingPR)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -1396,9 +1398,24 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("resolve forge profile: %w", err)
 	}
 
-	if _, err := steps.ValidateExistingPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}, headSHA); err != nil {
+	explicitPR, err := steps.ValidateExistingPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}, headSHA)
+	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		return "", err
+	}
+	// The run integrates with the branch the explicit pull request actually
+	// targets, not the repository default: rebase, PR and CI all read this.
+	if explicitPR != nil {
+		base, err := normalizeRunPRBaseBranch(explicitPR.BaseBranch)
+		if err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		if err := m.db.SetRunPRBaseBranch(run.ID, base); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		run.PRBaseBranch = &base
 	}
 
 	// Create agent. In demo mode, newPipelineAgent returns a no-op agent, and it

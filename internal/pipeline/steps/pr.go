@@ -248,6 +248,12 @@ func retargetExistingPRIfNeeded(sctx *pipeline.StepContext, host scm.Host, exist
 	if requested == "" || existing == nil {
 		return nil
 	}
+	// An explicit target's base is the forge's, not a per-run request: the
+	// operator cannot pass --base-branch with it, so a difference here means
+	// the PR moved under the run. Never retarget someone else's review object.
+	if existingPRURL(sctx) != "" {
+		return nil
+	}
 	actual := strings.TrimSpace(existing.BaseBranch)
 	if actual == requested {
 		return nil

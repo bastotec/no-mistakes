@@ -78,9 +78,10 @@ type Run struct {
 	LaunchValidationGeneration *string
 	LaunchIntentDigest         *string
 	LaunchReceiptClaimedAt     *int64
-	// PRBaseBranch is a per-run override for the integration/PR target branch.
-	// It is set by the operator (axi run --base-branch) and takes precedence
-	// over pr.base_branch in repo config for this run only.
+	// PRBaseBranch is the per-run integration/PR target branch. It is set by
+	// the operator (axi run --base-branch), or read from the pull request an
+	// explicit target names, and takes precedence over pr.base_branch in repo
+	// config for this run only.
 	PRBaseBranch *string
 	// ExistingPRURL is an explicit operator target, never a discovery hint.
 	ExistingPRURL *string
@@ -122,13 +123,13 @@ func (d *DB) InsertRun(repoID, branch, headSHA, baseSHA string) (*Run, error) {
 }
 
 func (d *DB) InsertRunWithIntent(repoID, branch, headSHA, baseSHA string, intent *RunIntent, prBaseBranch string) (*Run, error) {
-	return d.InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA, intent, "", "", "", prBaseBranch)
+	return d.InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA, intent, "", "", "", prBaseBranch, "")
 }
 
 // InsertRunWithIntentAndLaunchNonce persists an optional proof binding. The
 // partial unique index remains the duplicate defense across daemon processes;
 // callers additionally serialize selection under their branch lock.
-func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch string, existingPR ...string) (*Run, error) {
+func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA string, intent *RunIntent, launchNonce, validationGeneration, intentDigest, prBaseBranch, existingPR string) (*Run, error) {
 	ts := now()
 	version := buildinfo.CurrentVersion()
 	buildSHA := buildinfo.Commit
@@ -162,9 +163,8 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 	}
 	// Persist the constraint in the creation statement: crash recovery must
 	// never observe an explicit launch as an ordinary discovery run.
-	if len(existingPR) > 0 && existingPR[0] != "" {
-		target := existingPR[0]
-		r.ExistingPRURL, r.PRURL = &target, &target
+	if existingPR != "" {
+		r.ExistingPRURL, r.PRURL = &existingPR, &existingPR
 	}
 	_, err := d.sql.Exec(
 		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, existing_pr_url, pr_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -467,6 +467,17 @@ func (d *DB) UpdateRunStatus(id string, status types.RunStatus) error {
 
 // UpdateRunPRURL sets the PR URL on a run. A delayed PR-step write must not
 // regress terminal lifecycle truth already observed by the CI monitor.
+// SetRunPRBaseBranch records the integration branch this run must use. It is
+// written after launch only for an explicit PR target, whose base branch is
+// the forge's answer rather than an operator request.
+func (d *DB) SetRunPRBaseBranch(id, branch string) error {
+	ts := now()
+	if _, err := d.sql.Exec(`UPDATE runs SET pr_base_branch = ?, updated_at = ? WHERE id = ?`, branch, ts, id); err != nil {
+		return fmt.Errorf("set run pr base branch: %w", err)
+	}
+	return nil
+}
+
 func (d *DB) UpdateRunPRURL(id, prURL string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET pr_url = ?, pr_state = CASE WHEN pr_state IN ('merged', 'closed') THEN pr_state ELSE 'open' END, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, prURL, ts, ts, id)
