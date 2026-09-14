@@ -754,11 +754,10 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // not settle) is wrapped in errAttestationWriteFailed and returned.
 func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult, remoteHead string) error {
 	if existingPRURL(sctx) != "" {
-		pr, err := ValidateExistingPR(sctx, remoteHead)
+		host, pr, err := ValidateExistingPR(sctx, remoteHead)
 		if err != nil {
 			return err
 		}
-		host, _ := buildHost(sctx, resolvedProvider(sctx))
 		if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log, attestationPolicyFrom(sctx)); err != nil {
 			return fmt.Errorf("%w: %v", errAttestationWriteFailed, err)
 		}

@@ -465,8 +465,6 @@ func (d *DB) UpdateRunStatus(id string, status types.RunStatus) error {
 	return nil
 }
 
-// UpdateRunPRURL sets the PR URL on a run. A delayed PR-step write must not
-// regress terminal lifecycle truth already observed by the CI monitor.
 // SetRunPRBaseBranch records the integration branch this run must use. It is
 // written after launch only for an explicit PR target, whose base branch is
 // the forge's answer rather than an operator request.
@@ -478,6 +476,8 @@ func (d *DB) SetRunPRBaseBranch(id, branch string) error {
 	return nil
 }
 
+// UpdateRunPRURL sets the PR URL on a run. A delayed PR-step write must not
+// regress terminal lifecycle truth already observed by the CI monitor.
 func (d *DB) UpdateRunPRURL(id, prURL string) error {
 	ts := now()
 	_, err := d.sql.Exec(`UPDATE runs SET pr_url = ?, pr_state = CASE WHEN pr_state IN ('merged', 'closed') THEN pr_state ELSE 'open' END, pr_state_observed_at = ?, updated_at = ? WHERE id = ?`, prURL, ts, ts, id)

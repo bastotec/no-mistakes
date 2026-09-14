@@ -17,28 +17,34 @@ func existingPRURL(sctx *pipeline.StepContext) string {
 
 // ValidateExistingPR is shared by launch, pre-push and publication. An explicit
 // target is a constraint, not a suggestion: unavailable validation never skips.
-func ValidateExistingPR(sctx *pipeline.StepContext, head string) (*scm.PR, error) {
+// The returned host is the validated one, so callers never rebuild it and can
+// never reach it without the validation that proved the target.
+func ValidateExistingPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm.PR, error) {
 	raw := existingPRURL(sctx)
 	if raw == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
 	if sctx.Run.PRURL == nil || *sctx.Run.PRURL != raw {
-		return nil, fmt.Errorf("explicit PR differs from persisted publication identity")
+		return nil, nil, fmt.Errorf("explicit PR differs from persisted publication identity")
 	}
 	host, reason := buildHost(sctx, resolvedProvider(sctx))
 	if host == nil {
-		return nil, fmt.Errorf("validate explicit PR: %s", reason)
+		return nil, nil, fmt.Errorf("validate explicit PR: %s", reason)
 	}
 	gh, ok := host.(*github.Host)
 	if !ok {
-		return nil, fmt.Errorf("explicit PR is supported only for GitHub")
+		return nil, nil, fmt.Errorf("explicit PR is supported only for GitHub")
 	}
 	if err := host.Available(sctx.Ctx); err != nil {
-		return nil, fmt.Errorf("validate explicit PR: %w", err)
+		return nil, nil, fmt.Errorf("validate explicit PR: %w", err)
 	}
 	pushURL := resolvePushURL(sctx)
 	if scm.ResolveHost(sctx.Ctx, pushURL) != "github.com" {
-		return nil, fmt.Errorf("explicit PR source must be a github.com push repository")
+		return nil, nil, fmt.Errorf("explicit PR source must be a github.com push repository")
 	}
-	return gh.ValidateExistingPR(sctx.Ctx, raw, github.RepoSlug(pushURL), sctx.Run.Branch, head)
+	pr, err := gh.ValidateExistingPR(sctx.Ctx, raw, github.RepoSlug(pushURL), sctx.Run.Branch, head)
+	if err != nil {
+		return nil, nil, err
+	}
+	return host, pr, nil
 }

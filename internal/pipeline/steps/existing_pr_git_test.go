@@ -11,7 +11,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 )
 
-func TestExplicitPRIntegrationFetchDoesNotRedirectPush(t *testing.T) {
+// refs/remotes/origin/ lives in the gate repository every worktree and run of
+// the registered repository shares, so an explicit target's foreign integration
+// branch must land elsewhere: an ordinary run that reads origin/<default> must
+// still see its own repository, including after an explicit run fetched.
+func TestExplicitPRIntegrationFetchLeavesSharedOriginRefsAlone(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
 	parent := t.TempDir()
@@ -20,6 +24,7 @@ func TestExplicitPRIntegrationFetchDoesNotRedirectPush(t *testing.T) {
 	gitCmd(t, fork, "init", "--bare")
 	gitCmd(t, dir, "remote", "add", "origin", fork)
 	gitCmd(t, dir, "push", "origin", "main", "feature")
+	forkMain := gitCmd(t, dir, "rev-parse", "main")
 	gitCmd(t, dir, "checkout", "main")
 	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("upstream-only"), 0600); err != nil {
 		t.Fatal(err)
@@ -28,15 +33,27 @@ func TestExplicitPRIntegrationFetchDoesNotRedirectPush(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "upstream advancement")
 	parentHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", parent, "main")
+	gitCmd(t, dir, "reset", "--hard", forkMain)
 	gitCmd(t, dir, "checkout", "feature")
 	gitCmd(t, dir, "config", "url."+parent+".insteadOf", "https://github.com/upstream/widgets.git")
+	gitCmd(t, dir, "config", "url."+fork+".insteadOf", fixtureSourceURL)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 	pinFixturePR(t, sctx)
 	if err := fetchRunUpstreamBranch(context.Background(), sctx, "main"); err != nil {
 		t.Fatal(err)
 	}
-	if got := gitCmd(t, dir, "rev-parse", "origin/main"); got != parentHead {
+	if got := gitCmd(t, dir, "rev-parse", runIntegrationRef(sctx, "main")); got != parentHead {
 		t.Fatalf("integration fetch read fork: %s want %s", got, parentHead)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/remotes/origin/main"); got != forkMain {
+		t.Fatalf("explicit integration fetch moved the shared origin ref to %s, want %s", got, forkMain)
+	}
+	ordinary := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	if err := fetchRunUpstreamBranch(context.Background(), ordinary, "main"); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "origin/main"); got != forkMain {
+		t.Fatalf("ordinary run integrated with the explicit target's repository: %s want %s", got, forkMain)
 	}
 	if got := resolvePushURL(sctx); got != fixtureSourceURL {
 		t.Fatalf("push target changed: %s", got)
@@ -60,6 +77,7 @@ func TestExplicitPRRebaseTracksSourceBranchOutsideOrigin(t *testing.T) {
 	gitCmd(t, fork, "init", "--bare")
 	gitCmd(t, dir, "remote", "add", "origin", fork)
 	gitCmd(t, dir, "push", "origin", "main", "feature")
+	forkMain := gitCmd(t, dir, "rev-parse", "main")
 	gitCmd(t, dir, "checkout", "main")
 	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("upstream-only"), 0600); err != nil {
 		t.Fatal(err)
@@ -68,6 +86,7 @@ func TestExplicitPRRebaseTracksSourceBranchOutsideOrigin(t *testing.T) {
 	gitCmd(t, dir, "commit", "-m", "upstream advancement")
 	parentHead := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "push", parent, "main")
+	gitCmd(t, dir, "reset", "--hard", forkMain)
 	gitCmd(t, dir, "checkout", "feature")
 	gitCmd(t, dir, "config", "url."+parent+".insteadOf", "https://github.com/upstream/widgets.git")
 	gitCmd(t, dir, "config", "url."+fork+".insteadOf", fixtureSourceURL)
@@ -82,8 +101,11 @@ func TestExplicitPRRebaseTracksSourceBranchOutsideOrigin(t *testing.T) {
 	if got := gitCmd(t, dir, "rev-parse", "refs/remotes/no-mistakes-push/feature"); got != head {
 		t.Fatalf("source branch tracking ref = %s want %s", got, head)
 	}
-	if got := gitCmd(t, dir, "rev-parse", "refs/remotes/origin/main"); got != parentHead {
+	if got := gitCmd(t, dir, "rev-parse", runIntegrationRef(sctx, "main")); got != parentHead {
 		t.Fatalf("integration ref = %s want %s", got, parentHead)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "refs/remotes/origin/main"); got != forkMain {
+		t.Fatalf("rebase moved the shared origin ref to %s, want %s", got, forkMain)
 	}
 	if _, err := gitRun(dir, "merge-base", "--is-ancestor", parentHead, "HEAD"); err != nil {
 		t.Fatalf("branch was not rebased onto the integration branch: %v", err)

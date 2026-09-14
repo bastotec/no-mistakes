@@ -14,19 +14,19 @@ import (
 // ExistingPRTarget accepts a canonical github.com PR URL. Cross-host account
 // routing and other providers are deliberately not inferred from user input.
 func ExistingPRTarget(raw string) (repo, number string, err error) {
-	u, e := url.Parse(raw)
-	if e != nil || u == nil || u.Scheme != "https" || u.Host != "github.com" || u.User != nil || u.RawPath != "" {
-		return "", "", fmt.Errorf("--existing-pr requires a canonical https://github.com/owner/repo/pull/number URL")
+	n, err := parsePullRequestURL(raw, "github.com", "")
+	if err != nil {
+		return "", "", err
 	}
-	n, e := parsePullRequestURL(raw, "github.com", "")
-	if e != nil {
-		return "", "", e
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", "", err
 	}
 	parts := strings.Split(strings.Trim(u.Path, "/"), "/")
 	repo = parts[0] + "/" + parts[1]
 	number = strconv.Itoa(n)
 	if raw != "https://github.com/"+repo+"/pull/"+number {
-		return "", "", fmt.Errorf("existing PR URL must be canonical")
+		return "", "", fmt.Errorf("--existing-pr requires a canonical https://github.com/owner/repo/pull/number URL")
 	}
 	return repo, number, nil
 }

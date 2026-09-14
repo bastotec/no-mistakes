@@ -10,6 +10,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 const fixtureExistingPR = "https://github.com/upstream/widgets/pull/168"
@@ -17,6 +18,19 @@ const fixtureSourceURL = "https://github.com/contributor/widgets.git"
 
 func existingPRFixture(head string) string {
 	return fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","merged":false,"base":{"ref":"main","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, fixtureExistingPR, head)
+}
+
+// The PR step always runs after the gates, so its evidence appendix has step
+// results to report.
+func recordCompletedReviewStep(t *testing.T, sctx *pipeline.StepContext) {
+	t.Helper()
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func pinFixturePR(t *testing.T, sctx *pipeline.StepContext) {
@@ -69,12 +83,17 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 			pinFixturePR(t, sctx)
+			recordCompletedReviewStep(t, sctx)
 			env, log := fakeGH(t, "https://github.com/contributor/widgets/pull/2")
 			payload := existingPRFixture(head)
 			if tc.replace != "" {
 				payload = strings.Replace(payload, tc.replace, tc.with, 1)
 			}
-			sctx.Env = append(env, "FAKE_CLI_EXISTING_PR_JSON="+payload, "FAKE_CLI_EXISTING_PR_ENDPOINT=repos/upstream/widgets/pulls/168")
+			bodyFile := filepath.Join(t.TempDir(), "body.md")
+			if err := os.WriteFile(bodyFile, []byte("## Overview\n\nUpstream author narrative.\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Env = append(env, "FAKE_CLI_EXISTING_PR_JSON="+payload, "FAKE_CLI_EXISTING_PR_ENDPOINT=repos/upstream/widgets/pulls/168", "FAKE_CLI_PR_BODY_FILE="+bodyFile)
 			if tc.unavailable {
 				sctx.Env = append(sctx.Env, "FAKE_CLI_EXISTING_PR_ERROR=unavailable")
 			}
@@ -102,6 +121,52 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 				t.Fatalf("lost durable target: %+v %v", stored, e)
 			}
 		})
+	}
+}
+
+// An explicit target is somebody else's review object: the run may append its
+// own evidence, never replace the author's narrative or title - including the
+// first association, where no template and no prior appendix exist.
+func TestPRStep_ExplicitTargetKeepsAuthorTitleAndBody(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	pinFixturePR(t, sctx)
+	sctx.Config.PR.TitleFormat = "PROJ-123: %s"
+	recordCompletedReviewStep(t, sctx)
+	author := "## Overview\n\nHand-written upstream narrative.\n\nCloses https://github.com/upstream/widgets/issues/7\n"
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, logFile := fakeGH(t, "")
+	sctx.Env = append(env,
+		"FAKE_CLI_EXISTING_PR_JSON="+existingPRFixture(head),
+		"FAKE_CLI_EXISTING_PR_ENDPOINT=repos/upstream/widgets/pulls/168",
+		"FAKE_CLI_PR_BODY_FILE="+bodyFile,
+		"FAKE_CLI_PR_TITLE=Author title",
+	)
+	out, execErr := (&PRStep{}).Execute(sctx)
+	if execErr != nil || out.PRURL != fixtureExistingPR {
+		t.Fatalf("out=%+v err=%v", out, execErr)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := parsePROwnedBody(string(body))
+	if err != nil || !parts.managed {
+		t.Fatalf("pipeline evidence is not separately owned: %+v, %v", parts, err)
+	}
+	if strings.TrimSpace(parts.before) != strings.TrimSpace(author) {
+		t.Fatalf("author narrative was rewritten:\n%s", body)
+	}
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logs), "--title") {
+		t.Fatalf("author title was rewritten:\n%s", logs)
 	}
 }
 

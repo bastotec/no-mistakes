@@ -65,7 +65,7 @@ func resolveRunDefaultBranchTip(ctx context.Context, sctx *pipeline.StepContext,
 		if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
 			return unresolvedDefaultBranchTip(ctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch), false
 		}
-		sha, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "origin/"+defaultBranch)
+		sha, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", runIntegrationRef(sctx, defaultBranch))
 		if err == nil && strings.TrimSpace(sha) != "" {
 			return strings.TrimSpace(sha), true
 		}
@@ -204,16 +204,18 @@ func fetchRunUpstreamBranch(ctx context.Context, sctx *pipeline.StepContext, bra
 }
 
 func fetchRunUpstreamBranchInner(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
-	upstreamURL := resolveUpstreamURL(sctx)
 	if target := existingPRURL(sctx); target != "" {
-		// Integration refs belong to the explicit PR's repository, while
-		// push routing and trusted-config selection remain unchanged.
+		// Integration refs belong to the explicit PR's repository, while push
+		// routing and trusted-config selection remain unchanged. They are kept
+		// out of refs/remotes/origin/, which the gate shares with every other
+		// worktree and run of the registered repository.
 		repo, _, err := github.ExistingPRTarget(target)
 		if err != nil {
 			return err
 		}
-		upstreamURL = "https://github.com/" + repo + ".git"
+		return git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, "https://github.com/"+repo+".git", branch, runIntegrationRef(sctx, branch))
 	}
+	upstreamURL := resolveUpstreamURL(sctx)
 	originURL, err := git.GetRemoteURL(ctx, sctx.WorkDir, "origin")
 	if err == nil && upstreamURL == originURL {
 		return git.FetchRemoteBranch(ctx, sctx.WorkDir, "origin", branch)

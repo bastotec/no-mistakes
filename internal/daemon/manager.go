@@ -1398,7 +1398,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("resolve forge profile: %w", err)
 	}
 
-	explicitPR, err := steps.ValidateExistingPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}, headSHA)
+	_, explicitPR, err := steps.ValidateExistingPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}, headSHA)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		return "", err

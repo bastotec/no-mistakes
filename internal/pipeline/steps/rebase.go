@@ -26,10 +26,27 @@ func (s *RebaseStep) Name() types.StepName { return types.StepRebase }
 
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
+// explicitIntegrationRefPrefix keeps an explicit PR target's integration branch
+// in its own remote-tracking namespace. refs/remotes/origin/ lives in the gate
+// repository shared by every worktree and run of the registered repository, so
+// a foreign repository's commits must never land there.
+const explicitIntegrationRefPrefix = "refs/remotes/no-mistakes-upstream/"
+
+// runIntegrationRef names the ref this run's integration branch is fetched
+// into. Every read of it is preceded by that fetch in the same call, so the
+// value is never inherited from another run.
+func runIntegrationRef(sctx *pipeline.StepContext, branch string) string {
+	if existingPRURL(sctx) != "" {
+		return explicitIntegrationRefPrefix + branch
+	}
+	return "origin/" + branch
+}
+
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	defaultBranch := effectivePRBaseBranch(sctx)
+	integrationRef := runIntegrationRef(sctx, defaultBranch)
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -78,10 +95,10 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR may bundle another
 	// workstream's unpushed work. Surface the ambiguity for a human decision.
-	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch); outcome != nil {
+	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, integrationRef); outcome != nil {
 		return outcome, nil
 	}
-	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, defaultBranch, sctx.Run.BaseSHA) {
+	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, integrationRef, sctx.Run.BaseSHA) {
 		findingsJSON, _ := json.Marshal(Findings{
 			Items: []Finding{{
 				Severity:    "warning",
@@ -96,10 +113,10 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}, nil
 	}
 
-	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget)
+	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget, integrationRef)
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
-		targets = forcePushRebaseTargets(branch, defaultBranch)
+		targets = forcePushRebaseTargets(branch, defaultBranch, integrationRef)
 	}
 
 	merging := mergesMovedBase(sctx)
@@ -178,16 +195,16 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 
 // rebaseTargets returns the ordered list of refs to rebase onto.
 func rebaseTargets(branch, defaultBranch string) []string {
-	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch)
+	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch, "origin/"+defaultBranch)
 }
 
-func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string {
+func rebaseTargetsForBranch(branch, defaultBranch, branchTarget, integrationRef string) []string {
 	var targets []string
 	if branch != "" && branch != defaultBranch {
 		targets = append(targets, branchTarget)
 	}
 	if branch != defaultBranch {
-		targets = append(targets, "origin/"+defaultBranch)
+		targets = append(targets, integrationRef)
 	}
 	return targets
 }
@@ -195,11 +212,11 @@ func rebaseTargetsForBranch(branch, defaultBranch, branchTarget string) []string
 // forcePushRebaseTargets returns rebase targets for a force push. The pushed
 // branch target is skipped because it may contain autofix commits from prior
 // pipeline runs that the force push intended to discard.
-func forcePushRebaseTargets(branch, defaultBranch string) []string {
+func forcePushRebaseTargets(branch, defaultBranch, integrationRef string) []string {
 	if branch == defaultBranch {
 		return nil
 	}
-	return []string{"origin/" + defaultBranch}
+	return []string{integrationRef}
 }
 
 // effectivePRBaseBranch resolves the branch used as the integration base for
@@ -233,7 +250,7 @@ func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
 // evidence of an additional bundled workstream.
 // Detection is best-effort - if the local default tip advanced past the branch
 // point, or the working repo cannot be read, it returns nil rather than guess.
-func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch string) *pipeline.StepOutcome {
+func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch, remoteRef string) *pipeline.StepOutcome {
 	if branch == "" || branch == defaultBranch {
 		return nil
 	}
@@ -249,7 +266,6 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	if localTip == "" {
 		return nil
 	}
-	remoteRef := "origin/" + defaultBranch
 	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", remoteRef+"^{commit}"); err != nil {
 		return nil
 	}
@@ -333,11 +349,11 @@ func isAncestor(ctx context.Context, workDir, ancestor, descendant string) bool 
 	return err == nil
 }
 
-func remoteDefaultBranchAdvanced(ctx context.Context, workDir, defaultBranch, baseSHA string) bool {
+func remoteDefaultBranchAdvanced(ctx context.Context, workDir, remoteRef, baseSHA string) bool {
 	if baseSHA == "" || git.IsZeroSHA(baseSHA) {
 		return false
 	}
-	remoteSHA, err := git.Run(ctx, workDir, "rev-parse", "--verify", "origin/"+defaultBranch)
+	remoteSHA, err := git.Run(ctx, workDir, "rev-parse", "--verify", remoteRef)
 	if err != nil {
 		return false
 	}

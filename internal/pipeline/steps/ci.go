@@ -290,6 +290,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
+	var explicitHost scm.Host
 	if existingPRURL(sctx) != "" {
 		// A retained, unpublished repair can already have advanced HeadSHA.
 		// Validate the last durable publication, not that local repair.
@@ -300,7 +301,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if published == nil || published.LastPushedSHA == nil {
 			return nil, fmt.Errorf("explicit PR has no durable published head for CI")
 		}
-		if _, err := ValidateExistingPR(sctx, *published.LastPushedSHA); err != nil {
+		explicitHost, _, err = ValidateExistingPR(sctx, *published.LastPushedSHA)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -313,20 +315,18 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		return nil, err
 	}
 	provider := resolvedProvider(sctx)
-	host, skipReason := buildHost(sctx, provider)
+	host := explicitHost
 	if host == nil {
-		if existingPRURL(sctx) != "" {
-			return nil, fmt.Errorf("explicit PR host unavailable: %s", skipReason)
+		var skipReason string
+		host, skipReason = buildHost(sctx, provider)
+		if host == nil {
+			sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
+			return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 		}
-		sctx.Log(fmt.Sprintf("skipping CI: %s", skipReason))
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
-	}
-	if err := host.Available(ctx); err != nil {
-		if existingPRURL(sctx) != "" {
-			return nil, err
+		if err := host.Available(ctx); err != nil {
+			sctx.Log(fmt.Sprintf("skipping CI: %v", err))
+			return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 		}
-		sctx.Log(fmt.Sprintf("skipping CI: %v", err))
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 	}
 
 	// Get PR URL from run record

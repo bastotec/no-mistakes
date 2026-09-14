@@ -70,7 +70,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	explicit, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA)
+	explicitHost, explicit, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA)
 	if err != nil {
 		return nil, err
 	}
@@ -85,20 +85,18 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 	provider := resolvedProvider(sctx)
-	host, skipReason := buildHost(sctx, provider)
+	host := explicitHost
 	if host == nil {
-		if explicit != nil {
-			return nil, fmt.Errorf("explicit PR host unavailable: %s", skipReason)
+		var skipReason string
+		host, skipReason = buildHost(sctx, provider)
+		if host == nil {
+			sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
+			return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 		}
-		sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
-	}
-	if err := host.Available(ctx); err != nil {
-		if explicit != nil {
-			return nil, err
+		if err := host.Available(ctx); err != nil {
+			sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
+			return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 		}
-		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 	}
 
 	// Capture live author content before model drafting. An unreadable
@@ -142,7 +140,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		updated := existing
 		// Removing pr.template must not switch an already owned body back to
 		// destructive drafting. Its live author narrative still wins.
-		if template != "" || hasPRAppendixMarkers(live.Body) {
+		if template != "" || hasPRAppendixMarkers(live.Body) || explicit != nil {
 			if _, err := parsePROwnedBody(live.Body); err != nil {
 				return nil, err
 			}
@@ -155,7 +153,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				}
 				emptyNarrative = neutralizeAttestationMarkers(draft.Body)
 				title = draft.Title
-			} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
+			} else if explicit == nil && sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
 				if err != nil {
 					return nil, err
@@ -168,7 +166,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			if _, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA); err != nil {
+			if _, _, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA); err != nil {
 				return nil, err
 			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit); err != nil {
@@ -182,13 +180,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			if _, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA); err != nil {
-				return nil, err
-			}
 			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
-			if err != nil && explicit != nil {
-				return nil, err
-			}
 			if err != nil {
 				sctx.Log(fmt.Sprintf("warning: failed to update PR: %v", err))
 				updated = existing
