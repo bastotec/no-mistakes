@@ -164,7 +164,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// This protocol has single-publisher scope: the daemon's
 	// startRunWithIntentSourceLocked enforces one active run per repo branch, so
 	// coordination with independent authorized publishers is outside its scope.
-	if err := attestHeadBeforePush(sctx, headBeingPushed, attestationSteps); err != nil {
+	if err := attestHeadBeforePush(sctx, headBeingPushed, attestationSteps, decision.remoteSHA); err != nil {
 		return err
 	}
 

@@ -42,6 +42,16 @@ func handleFakeCLI(mode string) {
 		}
 	}
 	logFakeCLIStdinBody(args, logFile)
+	if payload, ok := os.LookupEnv("FAKE_CLI_EXISTING_PR_JSON"); ok && len(args) > 0 && args[0] == "api" && strings.Contains(strings.Join(args, " "), "/pulls/") {
+		if os.Getenv("FAKE_CLI_EXISTING_PR_ERROR") != "" {
+			os.Exit(1)
+		}
+		if endpoint := os.Getenv("FAKE_CLI_EXISTING_PR_ENDPOINT"); endpoint != "" && args[len(args)-1] != endpoint {
+			os.Exit(1)
+		}
+		fmt.Print(payload)
+		os.Exit(0)
+	}
 
 	switch mode {
 	case "gh":
@@ -182,7 +192,11 @@ func fakeGHHandler(args []string) {
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "create" {
 		fakeGHStorePRBody(args)
-		fmt.Println("https://github.com/test/repo/pull/99")
+		created := os.Getenv("FAKE_CLI_CREATED_PR_URL")
+		if created == "" {
+			created = "https://github.com/test/repo/pull/99"
+		}
+		fmt.Println(created)
 		os.Exit(0)
 	}
 	os.Exit(1)

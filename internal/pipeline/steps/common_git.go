@@ -11,6 +11,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 )
 
 // reviewWorkload returns the bounded change size (files + net lines) between
@@ -204,6 +205,15 @@ func fetchRunUpstreamBranch(ctx context.Context, sctx *pipeline.StepContext, bra
 
 func fetchRunUpstreamBranchInner(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
 	upstreamURL := resolveUpstreamURL(sctx)
+	if target := existingPRURL(sctx); target != "" {
+		// Integration refs belong to the explicit PR's repository, while
+		// push routing and trusted-config selection remain unchanged.
+		repo, _, err := github.ExistingPRTarget(target)
+		if err != nil {
+			return err
+		}
+		upstreamURL = "https://github.com/" + repo + ".git"
+	}
 	originURL, err := git.GetRemoteURL(ctx, sctx.WorkDir, "origin")
 	if err == nil && upstreamURL == originURL {
 		return git.FetchRemoteBranch(ctx, sctx.WorkDir, "origin", branch)

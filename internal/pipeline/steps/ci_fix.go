@@ -752,7 +752,21 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // no-mistakes - restampPRAttestationWithSteps already enforces that. Any
 // other failure (PR discovery errors, or a discoverable PR whose write does
 // not settle) is wrapped in errAttestationWriteFailed and returned.
-func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult) error {
+func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult, remoteHead ...string) error {
+	if existingPRURL(sctx) != "" {
+		if len(remoteHead) != 1 {
+			return fmt.Errorf("explicit PR attestation requires verified remote head")
+		}
+		pr, err := ValidateExistingPR(sctx, remoteHead[0])
+		if err != nil {
+			return err
+		}
+		host, _ := buildHost(sctx, resolvedProvider(sctx))
+		if err := restampPRAttestationWithSteps(sctx.Ctx, host, pr, headSHA, steps, sctx.Log, attestationPolicyFrom(sctx)); err != nil {
+			return fmt.Errorf("%w: %v", errAttestationWriteFailed, err)
+		}
+		return nil
+	}
 	provider := resolvedProvider(sctx)
 	if !supportsPRTemplates(provider) {
 		return nil

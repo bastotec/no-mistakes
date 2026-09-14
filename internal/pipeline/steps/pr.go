@@ -70,23 +70,33 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	ctx := sctx.Ctx
+	explicit, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA)
+	if err != nil {
+		return nil, err
+	}
 
 	branch := sctx.Run.Branch
 	if strings.HasPrefix(branch, "refs/heads/") {
 		branch = strings.TrimPrefix(branch, "refs/heads/")
 	}
 	baseBranch := effectivePRBaseBranch(sctx)
-	if branch == baseBranch {
+	if branch == baseBranch && explicit == nil {
 		sctx.Log(fmt.Sprintf("skipping PR creation on base branch %s", branch))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
 	provider := resolvedProvider(sctx)
 	host, skipReason := buildHost(sctx, provider)
 	if host == nil {
+		if explicit != nil {
+			return nil, fmt.Errorf("explicit PR host unavailable: %s", skipReason)
+		}
 		sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 	}
 	if err := host.Available(ctx); err != nil {
+		if explicit != nil {
+			return nil, err
+		}
 		sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 	}
@@ -107,9 +117,12 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	baseSHA := resolveBranchBaseSHA(ctx, sctx.WorkDir, sctx.Run.BaseSHA, baseBranch)
 	bodyLimit := scm.MaxPRBodyChars(provider)
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
-	existing, err := host.FindPR(ctx, branch, "")
-	if err != nil {
-		return nil, err
+	existing := explicit
+	if existing == nil {
+		existing, err = host.FindPR(ctx, branch, "")
+		if err != nil {
+			return nil, err
+		}
 	}
 	existing, err = bindExistingPR(sctx, host, existing)
 	if err != nil {
@@ -155,6 +168,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
+			if _, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA); err != nil {
+				return nil, err
+			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit); err != nil {
 				return nil, err
 			}
@@ -166,7 +182,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
+			if _, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA); err != nil {
+				return nil, err
+			}
 			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
+			if err != nil && explicit != nil {
+				return nil, err
+			}
 			if err != nil {
 				sctx.Log(fmt.Sprintf("warning: failed to update PR: %v", err))
 				updated = existing
@@ -258,6 +280,12 @@ func retargetExistingPRIfNeeded(sctx *pipeline.StepContext, host scm.Host, exist
 // a per-run --base-branch retarget is refused rather than moving either
 // object. First-attach (no persisted URL) keeps the discovered PR.
 func bindExistingPR(sctx *pipeline.StepContext, host scm.Host, discovered *scm.PR) (*scm.PR, error) {
+	if existingPRURL(sctx) != "" {
+		if discovered == nil || discovered.URL != existingPRURL(sctx) {
+			return nil, fmt.Errorf("explicit PR identity mismatch; refusing discovery fallback")
+		}
+		return discovered, nil
+	}
 	owned := runPRURL(sctx)
 	if owned == "" {
 		return discovered, nil

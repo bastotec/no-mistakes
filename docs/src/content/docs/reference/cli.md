@@ -129,6 +129,7 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `-y`, `--yes`   | `bool`   | `false` | Auto-resolve eligible gates until a decision point or outcome                                       |
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
+| `--existing-pr` | `string` | (none) | Explicit existing github.com PR URL; validates repository, source ref and head; never falls back to another PR |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
 | `--validation-generation` | `string` | (none) | Caller-selected validation generation bound to `--launch-nonce`; requires that flag |
@@ -163,6 +164,24 @@ Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `pas
 `passed-with-override` is a completed run whose CI approval gate was approved by a human while a live check was still failing; it stays a success but reads distinctly from a genuinely green `passed`, and its `help` names the failure the operator approved past.
 `passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL. It retains exit code 0: missing verification is not a failing code verdict. `run.automatic_skips` names each affected step and cause, and `run.head_sha` gives the full recorded head in both drive output and `axi status`. Report that missing evidence; this outcome does not establish CI readiness or a merge. Explicit per-run skips retain their existing behavior. If the run also has a CI approval override, `passed-with-override` takes precedence and the automatic skip causes remain visible. Legacy rows without a recorded skip cause keep their prior classification; their logs remain inspectable.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
+
+### Explicit existing upstream PR
+
+When `origin` points at your fork but the PR lives upstream, select the existing review object explicitly:
+
+```sh
+no-mistakes axi run \
+  --existing-pr https://github.com/upstream/widgets/pull/168 \
+  --intent "Validate the account-context change in the existing upstream PR"
+```
+
+Run this from the PR's clean, checked-out source branch. The URL supplies both the upstream repository and PR number; no remote rewrite or separate repository flag is needed. This mode currently supports canonical `https://github.com/OWNER/REPO/pull/NUMBER` URLs only, not GitHub Enterprise Server or other providers.
+
+Before any pipeline step starts, the daemon requires an open PR whose returned URL, number and base repository match the request, whose full source repository matches the configured push target (`fork_url` when configured, otherwise `origin`), and whose source branch and full head SHA match the submitted local branch and commit. **The source head must already be published**: local-only commits, stale local heads, deleted forks, closed/merged PRs, authentication failures and unavailable or incomplete validation fail rather than select or create another PR. A newer CLI also refuses an older daemon that lacks this launch protocol; it does not fall back to the ordinary push hook.
+
+The constraint is stored atomically with the run and survives recovery and `rerun`. PR updates, pre-push attestation writes and CI target that exact upstream PR, without branch-based discovery. Before each pipeline push, the PR's live head must match the source remote head verified by the existing push-safety checks; publication and CI also validate the published head. Pipeline fixes still push to the source repository. Integration-branch fetches use the explicit upstream repository, while trusted configuration still comes from the registered repository's pinned default branch. The configured integration branch remains in effect for Rebase; CI repair follows the PR's live base branch. This option does not retarget the PR.
+
+`--existing-pr` cannot be combined with `--base-branch`, `--skip`, or the strict launch-receipt flags. Reattach with the same URL or omit it; a different or absent explicit target on an active run is refused when you supply the flag. Repeat `--existing-pr` for a new independent run. Without the flag, ordinary repository-scoped discovery is unchanged: an `origin` pointing at a fork does **not** automatically discover upstream PRs. For general fork routing, including new PR creation, use [`init --fork-url`](#no-mistakes-init).
 
 ### Strict launch receipts
 

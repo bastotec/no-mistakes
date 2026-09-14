@@ -11,6 +11,7 @@ import (
 const (
 	MethodPushReceived       = "push_received"
 	MethodStartFreshRun      = "start_fresh_run"
+	MethodStartExistingPRRun = "start_existing_pr_run"
 	MethodClaimLaunchReceipt = "claim_launch_receipt"
 	MethodGetRun             = "get_run"
 	MethodGetStepDiff        = "get_step_diff"
@@ -84,6 +85,16 @@ type PushReceivedParams struct {
 	// branch, so the hook reports no previous head of its own. It is a claim the
 	// daemon accepts only against the gate's own archive tag.
 	ReconciledPreviousHead string `json:"reconciled_previous_head,omitempty"`
+}
+
+// StartExistingPRRunParams uses a distinct method so an older daemon cannot
+// silently ignore an explicit target and start an ordinary discovery run.
+type StartExistingPRRunParams struct {
+	RepoID  string `json:"repo_id"`
+	Branch  string `json:"branch"`
+	HeadSHA string `json:"head_sha"`
+	Intent  string `json:"intent"`
+	URL     string `json:"url"`
 }
 
 // StartFreshRunParams requests a nonce-bound fresh launch for one exact gate
@@ -322,7 +333,8 @@ type RunInfo struct {
 	CIReadyNoCI      bool            `json:"ci_ready_no_ci,omitempty"`
 	// PRBaseBranch is the per-run PR target override, if the operator set
 	// --base-branch when starting this run.
-	PRBaseBranch *string `json:"pr_base_branch,omitempty"`
+	PRBaseBranch  *string `json:"pr_base_branch,omitempty"`
+	ExistingPRURL *string `json:"existing_pr_url,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both

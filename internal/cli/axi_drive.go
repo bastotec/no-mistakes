@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -119,6 +120,7 @@ func newAxiRunCmd() *cobra.Command {
 	var launchNonce string
 	var validationGeneration string
 	var baseBranch string
+	var existingPR string
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -144,6 +146,10 @@ func newAxiRunCmd() *cobra.Command {
 			"--base-branch targets an integration branch other than the repository default\n" +
 			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
 			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
+			"--existing-pr URL binds this run to an open github.com PR, including an upstream\n" +
+			"PR when origin is your fork. The clean source branch head must already be\n" +
+			"published and match the PR. Validation failure never creates another PR.\n" +
+			"Cannot be combined with --skip, --base-branch, or launch-receipt flags.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
 			"ACP alias, or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
@@ -165,7 +171,10 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
-				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait)
+				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
+					return emitError(cmd, 2, "--existing-pr requires a PR URL")
+				}
+				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait, existingPR)
 			})
 		},
 	}
@@ -175,6 +184,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this run with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
@@ -183,7 +193,19 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait)
 }
 
-func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration) error {
+func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, target ...string) error {
+	existingPR := ""
+	if len(target) > 0 {
+		existingPR = target[0]
+	}
+	if existingPR != "" {
+		if _, _, err := github.ExistingPRTarget(existingPR); err != nil {
+			return emitError(cmd, 2, err.Error())
+		}
+		if baseBranch != "" || launchNonce != "" || validationGeneration != "" || len(skipSteps) != 0 {
+			return emitError(cmd, 2, "--existing-pr cannot be combined with --base-branch, --skip, or launch proof flags")
+		}
+	}
 	if err := validateAxiWait(wait); err != nil {
 		return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")
 	}
@@ -245,6 +267,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
 		}
 		if active != nil {
+			if existingPR != "" && (active.ExistingPRURL == nil || *active.ExistingPRURL != existingPR) {
+				return emitError(cmd, 2, "active run has a different or absent explicit PR target; refusing to reattach")
+			}
 			if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
 				return emitError(cmd, 2, err.Error(),
 					"Omit --base-branch to reattach, or abort the active run before starting a new one")
@@ -275,7 +300,14 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return guard(cmd)
 		}
 		var err error
-		if launchNonce != "" {
+		if existingPR != "" {
+			if state := freshRunBranchOwnershipState(ctx, env); state != nil {
+				return emitBranchOwnershipError(cmd, &branchOwnershipError{state: *state})
+			}
+			var result ipc.RerunResult
+			err = env.client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, Intent: intent, URL: existingPR}, &result)
+			runID = result.RunID
+		} else if launchNonce != "" {
 			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, launchNonce, validationGeneration)
 			if err == nil {
 				runID = launchReceipt.RunID

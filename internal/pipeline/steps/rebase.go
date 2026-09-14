@@ -48,6 +48,9 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 
 	sctx.Log("fetching latest upstream state...")
 	if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
+		if existingPRURL(sctx) != "" {
+			return nil, fmt.Errorf("fetch explicit PR integration branch: %w", err)
+		}
 		sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", defaultBranch, err))
 	}
 	// Sync the push branch's remote-tracking ref only when we are about to rebase
@@ -61,7 +64,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// (the original #281/#305 hazard, in the force-push path). Leaving it stale is
 	// what lets the push step's content check catch that case.
 	if !forcePush && branch != "" && branch != defaultBranch {
-		if strings.TrimSpace(sctx.Repo.ForkURL) == "" {
+		if strings.TrimSpace(sctx.Repo.ForkURL) == "" && existingPRURL(sctx) == "" {
 			if err := fetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
 				sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", branch, err))
 			}
