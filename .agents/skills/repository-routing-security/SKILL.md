@@ -8,7 +8,7 @@ metadata:
 
 **Fork Routing**
 
-- `repos.upstream_url` is the parent repository used for PR base routing; `repos.fork_url` is an optional GitHub fork push target.
+- `repos.upstream_url` is the registered repository used for ordinary PR base routing; `repos.fork_url` is an optional GitHub fork push target. Explicit `axi run --existing-pr <URL>` is the per-run exception: `internal/pipeline/steps/existing_pr.go` owns fail-closed identity validation, and the [CLI reference](../../../docs/src/content/docs/reference/cli.md#explicit-existing-upstream-pr) owns supported usage. Never inherit its URL into an ordinary run without its repository constraint (`inheritablePRURL` owns that boundary).
 - `no-mistakes init --fork-url <url>` expects `origin` to point at the GitHub parent repository and `<url>` at the contributor fork; plain `no-mistakes init` preserves an existing fork URL on idempotent refresh.
 - Push code must resolve the push URL via `resolvePushURL` (`internal/pipeline/steps/common_git.go`) so configured forks still receive branch updates, including after a CI repair restarts validation; the non-fork path recovers the credentialled upstream from the worktree's `origin` remote at run time because the DB `upstream_url` is stored redacted (see Credential Redaction below). `Repo.PushURL()` remains correct only for fork-only callers (e.g. `rebase.go`), since fork URLs carry no embedded credentials.
 - GitHub PR code must keep `--repo` pointed at the parent and use `--head <fork_owner>:<branch>` when `fork_url` is set; existing-PR lookup must list by the bare branch and filter head-owner fields, never pass `<owner>:<branch>` to `gh pr list --head`.
