@@ -49,7 +49,11 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 		if err != nil || sha == "" || sha != p.HeadSHA {
 			return "", fmt.Errorf("submitted head does not match local source branch")
 		}
-		if _, err := git.Run(ctx, m.paths.RepoDir(repo.ID), "fetch", "--no-tags", "--no-write-fetch-head", "--", repo.WorkingPath, sha); err != nil {
+		gateDir := m.paths.RepoDir(repo.ID)
+		if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+			return "", fmt.Errorf("validate explicit PR gate: %w", err)
+		}
+		if _, err := git.RunBare(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", "--", repo.WorkingPath, sha); err != nil {
 			return "", fmt.Errorf("transfer explicit PR submission: %w", err)
 		}
 		return m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, sha, "", "existing-pr", nil, p.Intent, db.RunIntentSourceAgent, "", "", "", "", "", p.URL)
