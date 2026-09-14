@@ -29,11 +29,11 @@ func reviewWorkload(ctx context.Context, workDir, base, head string) *agent.Invo
 // resolveBaseSHA returns a usable base SHA for diff/log operations.
 // When baseSHA is the zero ref (new branch push), it tries git merge-base
 // against the default branch, falling back to the empty tree SHA.
-func resolveBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string) string {
+func resolveBaseSHA(ctx context.Context, sctx *pipeline.StepContext, workDir, baseSHA, defaultBranch string) string {
 	if !git.IsZeroSHA(baseSHA) {
 		return baseSHA
 	}
-	if mb := mergeBaseWithDefaultBranch(ctx, workDir, defaultBranch); mb != "" {
+	if mb := mergeBaseWithDefaultBranch(ctx, sctx, workDir, defaultBranch); mb != "" {
 		return mb
 	}
 	return git.EmptyTreeSHA
@@ -43,11 +43,11 @@ func resolveBaseSHA(ctx context.Context, workDir, baseSHA, defaultBranch string)
 // branch when possible. This keeps pipeline steps scoped to the full branch,
 // not just the last pushed delta. If merge-base cannot be determined, it falls
 // back to resolveBaseSHA.
-func resolveBranchBaseSHA(ctx context.Context, workDir, fallbackBaseSHA, defaultBranch string) string {
-	if mb := mergeBaseWithDefaultBranch(ctx, workDir, defaultBranch); mb != "" {
+func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) string {
+	if mb := mergeBaseWithDefaultBranch(ctx, sctx, sctx.WorkDir, defaultBranch); mb != "" {
 		return mb
 	}
-	return resolveBaseSHA(ctx, workDir, fallbackBaseSHA, defaultBranch)
+	return resolveBaseSHA(ctx, sctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch)
 }
 
 func resolveDefaultBranchTipSHA(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) string {
@@ -62,7 +62,7 @@ func resolveRunDefaultBranchTipSHA(ctx context.Context, sctx *pipeline.StepConte
 
 func resolveRunDefaultBranchTip(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) (string, bool) {
 	if strings.TrimSpace(defaultBranch) != "" {
-		if err := fetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
+		if err := FetchRunUpstreamBranch(ctx, sctx, defaultBranch); err != nil {
 			return unresolvedDefaultBranchTip(ctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch), false
 		}
 		sha, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", runIntegrationRef(sctx, defaultBranch))
@@ -70,7 +70,7 @@ func resolveRunDefaultBranchTip(ctx context.Context, sctx *pipeline.StepContext,
 			return strings.TrimSpace(sha), true
 		}
 	}
-	return resolveBaseSHA(ctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch), false
+	return resolveBaseSHA(ctx, sctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch), false
 }
 
 func resolveDefaultBranchTip(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) (string, bool) {
@@ -86,7 +86,7 @@ func resolveDefaultBranchTip(ctx context.Context, workDir, upstreamURL, fallback
 			}
 		}
 	}
-	return resolveBaseSHA(ctx, workDir, fallbackBaseSHA, defaultBranch), false
+	return resolveBaseSHA(ctx, nil, workDir, fallbackBaseSHA, defaultBranch), false
 }
 
 func unresolvedDefaultBranchTip(ctx context.Context, workDir, fallbackBaseSHA, defaultBranch string) string {
@@ -117,17 +117,33 @@ func resolveUpstreamRemoteName(ctx context.Context, workDir, upstreamURL string)
 	return "origin"
 }
 
-func mergeBaseWithDefaultBranch(ctx context.Context, workDir, defaultBranch string) string {
-	if strings.TrimSpace(defaultBranch) == "" {
+func mergeBaseWithDefaultBranch(ctx context.Context, sctx *pipeline.StepContext, workDir, defaultBranch string) string {
+	refs := integrationMergeBaseRefs(sctx, defaultBranch)
+	if len(refs) == 0 {
 		return ""
 	}
-	for _, ref := range []string{"origin/" + defaultBranch, defaultBranch} {
+	for _, ref := range refs {
 		mb, err := git.Run(ctx, workDir, "merge-base", "HEAD", ref)
 		if err == nil && strings.TrimSpace(mb) != "" {
 			return strings.TrimSpace(mb)
 		}
 	}
 	return ""
+}
+
+// integrationMergeBaseRefs names the refs a diff base may be measured from.
+// An explicit PR target is answered by its own integration ref alone: the
+// registered repository's origin/<default> is a different repository there, and
+// measuring against it reports - and lets the fix agent edit - commits the
+// contributor never wrote.
+func integrationMergeBaseRefs(sctx *pipeline.StepContext, defaultBranch string) []string {
+	if existingPRURL(sctx) != "" {
+		return []string{runIntegrationRef(sctx, effectivePRBaseBranch(sctx))}
+	}
+	if strings.TrimSpace(defaultBranch) == "" {
+		return nil
+	}
+	return []string{"origin/" + defaultBranch, defaultBranch}
 }
 
 // lastFetchedBranchTip returns the commit the push branch's remote-tracking ref
@@ -188,7 +204,7 @@ var fetchUpstreamTimeout = 120 * time.Second
 // ErrFetchTimeout marks a fetch that exceeded fetchUpstreamTimeout.
 var ErrFetchTimeout = errors.New("upstream fetch timed out")
 
-func fetchRunUpstreamBranch(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
+func FetchRunUpstreamBranch(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
 	// Respect a deadline the caller already set rather than extending it.
 	if _, ok := ctx.Deadline(); !ok {
 		var cancel context.CancelFunc

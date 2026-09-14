@@ -56,8 +56,34 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 		if _, err := git.RunBare(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", "--", repo.WorkingPath, sha); err != nil {
 			return "", fmt.Errorf("transfer explicit PR submission: %w", err)
 		}
+		if err := bindExplicitGateBranch(ctx, gateDir, p.Branch, sha); err != nil {
+			return "", err
+		}
 		return m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, sha, "", "existing-pr", nil, p.Intent, db.RunIntentSourceAgent, "", "", "", "", "", p.URL)
 	})
+}
+
+// bindExplicitGateBranch points the gate branch at the submitted head, the
+// custody anchor every other launch path establishes by pushing. Without it the
+// transferred commit is referenced by nothing once the run worktree is gone, so
+// rerun and recovery cannot read the head the run validated. It advances the
+// branch, never rewrites it: a gate head the submission does not contain is
+// left in place and the launch is refused.
+func bindExplicitGateBranch(ctx context.Context, gateDir, branch, head string) error {
+	ref := "refs/heads/" + branch
+	current, err := git.RunBare(ctx, gateDir, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	current = strings.TrimSpace(current)
+	if err != nil || current == "" {
+		current = strings.Repeat("0", len(head))
+	} else if current == head {
+		return nil
+	} else if _, err := git.RunBare(ctx, gateDir, "merge-base", "--is-ancestor", current, head); err != nil {
+		return fmt.Errorf("gate branch %s is at %s, which the submitted head does not contain; reconcile the branch before an explicit PR run", branch, current)
+	}
+	if _, err := git.RunBare(ctx, gateDir, "update-ref", "--no-deref", ref, head, current); err != nil {
+		return fmt.Errorf("bind explicit PR submission to gate branch: %w", err)
+	}
+	return nil
 }
 
 func explicitRunTarget(run *db.Run) string {

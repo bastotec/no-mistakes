@@ -1398,7 +1398,8 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("resolve forge profile: %w", err)
 	}
 
-	_, explicitPR, err := steps.ValidateExistingPR(&pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}, headSHA)
+	explicitCtx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}
+	_, explicitPR, err := steps.ValidateExistingPR(explicitCtx, headSHA)
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
 		return "", err
@@ -1408,6 +1409,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if explicitPR != nil {
 		base, err := normalizeRunPRBaseBranch(explicitPR.BaseBranch)
 		if err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		if err := steps.FetchRunUpstreamBranch(ctx, explicitCtx, base); err != nil {
+			err = fmt.Errorf("fetch explicit PR integration branch: %w", err)
 			m.db.UpdateRunError(run.ID, err.Error())
 			return "", err
 		}

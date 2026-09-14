@@ -10,10 +10,22 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// stubExplicitUpstream stands a local bare repository in for the explicit PR's
+// repository, so the launch's integration fetch resolves without a network.
+func stubExplicitUpstream(t *testing.T, p *paths.Paths, repo *db.Repo, baseBranch string) {
+	t.Helper()
+	upstream := t.TempDir()
+	gitCmd(t, "", "init", "--bare", upstream)
+	gitCmd(t, repo.WorkingPath, "push", upstream, "main:refs/heads/"+baseBranch)
+	gitCmd(t, p.RepoDir(repo.ID), "config", "url."+upstream+".insteadOf", "https://github.com/upstream/widgets.git")
+}
 
 func TestExistingPRLaunchPinsTargetAndFailsClosed(t *testing.T) {
 	bin := t.TempDir()
@@ -36,6 +48,7 @@ func TestExistingPRLaunchPinsTargetAndFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stubExplicitUpstream(t, p, repo, "main")
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "new.txt"), []byte("new committed work"), 0600); err != nil {
 		t.Fatal(err)
@@ -70,13 +83,12 @@ func TestExistingPRLaunchPinsTargetAndFailsClosed(t *testing.T) {
 	if got := inheritablePRURL(&legacy); got != target {
 		t.Fatalf("legacy inheritance changed: %s", got)
 	}
-	// Transfer was object-only, not an ordinary push triggering another run.
-	if _, err := exec.Command("git", "-C", p.RepoDir(repo.ID), "show-ref", "--verify", "refs/heads/feature").Output(); err == nil {
-		t.Fatal("launch unexpectedly replaced gate branch")
+	// The launch binds the gate branch, so a run that never reached Push - the
+	// ordinary outcome of a declined gate - still has a head rerun can resolve.
+	if got := gitOutput(t, p.RepoDir(repo.ID), "rev-parse", "refs/heads/feature^{commit}"); got != head {
+		t.Fatalf("gate branch = %s, want the submitted head %s", got, head)
 	}
-
 	// A rerun inherits the hard constraint, not just the legacy discovered URL.
-	gitCmd(t, p.RepoDir(repo.ID), "update-ref", "refs/heads/feature", head)
 	var rerun ipc.RerunResult
 	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: run.ID}, &rerun); err != nil {
 		t.Fatal(err)
@@ -142,6 +154,7 @@ func TestExistingPRLaunchIntegratesWithTheValidatedBaseBranch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stubExplicitUpstream(t, p, repo, prBase)
 	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
 	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "new.txt"), []byte("new committed work"), 0600); err != nil {
 		t.Fatal(err)
@@ -167,7 +180,6 @@ func TestExistingPRLaunchIntegratesWithTheValidatedBaseBranch(t *testing.T) {
 
 	// A rerun reads the base back from the live pull request rather than
 	// inheriting it as an operator override, which explicit runs refuse.
-	gitCmd(t, p.RepoDir(repo.ID), "update-ref", "refs/heads/feature", head)
 	var rerun ipc.RerunResult
 	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: run.ID}, &rerun); err != nil {
 		t.Fatal(err)
@@ -178,6 +190,64 @@ func TestExistingPRLaunchIntegratesWithTheValidatedBaseBranch(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("step calls=%d", calls.Load())
+	}
+}
+
+// The gate branch is the registered repository's custody record. An explicit
+// submission may advance it, but a head the submission does not contain belongs
+// to work the launch must not discard.
+func TestExistingPRLaunchRefusesToRewriteAnUnrelatedGateBranch(t *testing.T) {
+	bin := t.TempDir()
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	const target = "https://github.com/upstream/widgets/pull/168"
+	var calls atomic.Int32
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&existingPRObserveStep{calls: &calls, target: target}} })
+	repo, _ := setupTestGitRepo(t, p, d, "explicit-pr-custody")
+	repo, err := d.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "new.txt"), []byte("new committed work"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "new work")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "unrelated.txt"), []byte("another workstream"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", ".")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "unrelated work")
+	unrelated := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "reset", "--hard", head)
+	gateDir := p.RepoDir(repo.ID)
+	gitCmd(t, gateDir, "fetch", "--no-tags", "--", repo.WorkingPath, unrelated)
+	gitCmd(t, gateDir, "update-ref", "refs/heads/feature", unrelated)
+	payload := fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","base":{"ref":"main","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, target, head)
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", payload)
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "validate existing upstream PR", URL: target}, &ipc.RerunResult{}); err == nil {
+		t.Fatal("explicit launch discarded an unrelated gate head")
+	}
+	if got := gitOutput(t, gateDir, "rev-parse", "refs/heads/feature^{commit}"); got != unrelated {
+		t.Fatalf("gate branch = %s, want the preserved head %s", got, unrelated)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("refused launch ran the pipeline: %d", calls.Load())
 	}
 }
 
