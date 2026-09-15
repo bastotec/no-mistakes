@@ -283,6 +283,58 @@ func TestExplicitPRUnreadableIntegrationBaseStopsInsteadOfSubstituting(t *testin
 	}
 }
 
+// The upstream repository of an association is routinely private to the
+// contributor, and one daemon serves several accounts, so the integration fetch
+// must read with the forge profile this run selected - not with whatever the
+// daemon process happens to have configured.
+func TestExplicitPRIntegrationFetchUsesTheRunsOwnForgeEnvironment(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		ambientPoints string
+	}{
+		{name: "upstream reachable only through the run's profile", ambientPoints: "nowhere"},
+		{name: "another account's repository is never read", ambientPoints: "other"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			upstream := t.TempDir()
+			gitCmd(t, upstream, "init", "--bare")
+			gitCmd(t, dir, "push", upstream, "main")
+			upstreamMain := gitCmd(t, dir, "rev-parse", "main")
+			other := t.TempDir()
+			gitCmd(t, other, "init", "--bare")
+			gitCmd(t, dir, "push", other, "feature:refs/heads/main")
+			otherMain := gitCmd(t, dir, "rev-parse", "feature")
+			if upstreamMain == otherMain {
+				t.Fatal("the two accounts must answer different commits")
+			}
+			mapping := func(target string) string {
+				path := filepath.Join(t.TempDir(), "gitconfig")
+				body := "[url \"" + target + "\"]\n\tinsteadOf = https://github.com/upstream/widgets.git\n"
+				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				return path
+			}
+			ambientTarget := filepath.Join(t.TempDir(), "absent-repository")
+			if tc.ambientPoints == "other" {
+				ambientTarget = other
+			}
+			// The daemon process's own account: it must not answer this fetch.
+			t.Setenv("GIT_CONFIG_GLOBAL", mapping(ambientTarget))
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			pinFixturePR(t, sctx)
+			sctx.Env = append(sctx.Env, "GIT_CONFIG_GLOBAL="+mapping(upstream))
+			if err := FetchRunUpstreamBranch(context.Background(), sctx, "main"); err != nil {
+				t.Fatalf("integration fetch could not use the run's own profile: %v", err)
+			}
+			if got := gitCmd(t, dir, "rev-parse", runIntegrationRef(sctx, "main")); got != upstreamMain {
+				t.Fatalf("integration ref = %s, want the run profile's upstream %s (other account is %s)", got, upstreamMain, otherMain)
+			}
+		})
+	}
+}
+
 func gitRun(dir string, args ...string) (string, error) {
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	return string(out), err

@@ -201,6 +201,43 @@ func TestPRStep_ExplicitTargetKeepsAuthorTitleAndBody(t *testing.T) {
 	}
 }
 
+// GitHub answers a pull request from a replica, so the head it reports can
+// still trail a commit the push step just proved on the source remote. That is
+// the forge catching up, not the source branch moving outside the run, and the
+// PR step re-reads a bounded number of times before it refuses. Equality stays
+// exact: the run publishes only once the pull request answers the same commit.
+func TestPRStep_ExplicitTargetReReadsAHeadTheForgeHasNotCaughtUpWith(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	pinFixturePR(t, sctx)
+	recordCompletedReviewStep(t, sctx)
+	stubFixtureIntegrationBase(t, sctx)
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte("## Overview\n\nUpstream author narrative.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, log := fakeGH(t, "")
+	sctx.Env = append(env,
+		"FAKE_CLI_EXISTING_PR_JSON="+existingPRFixture(head),
+		"FAKE_CLI_EXISTING_PR_JSON_FIRST="+existingPRFixture(base),
+		"FAKE_CLI_EXISTING_PR_FIRST_MARKER="+filepath.Join(t.TempDir(), "served"),
+		"FAKE_CLI_EXISTING_PR_ENDPOINT=repos/upstream/widgets/pulls/168",
+		"FAKE_CLI_PR_BODY_FILE="+bodyFile,
+	)
+	out, err := (&PRStep{}).Execute(sctx)
+	if err != nil || out.PRURL != fixtureExistingPR {
+		t.Fatalf("a settling pull request head failed the run: out=%+v err=%v", out, err)
+	}
+	calls, _ := os.ReadFile(log)
+	if strings.Contains(string(calls), "pr list") || strings.Contains(string(calls), "pr create") {
+		t.Fatalf("explicit target fell through to discovery/create:\n%s", calls)
+	}
+	if !strings.Contains(string(calls), "pr edit 168 --repo upstream/widgets") {
+		t.Fatalf("settled target was not updated:\n%s", calls)
+	}
+}
+
 // An empty description is still the author's: a repository template fills a
 // blank body on the repository's own pull requests, never on a pull request the
 // run is only associated with.

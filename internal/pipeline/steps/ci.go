@@ -301,7 +301,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if published == nil || published.LastPushedSHA == nil {
 			return nil, fmt.Errorf("explicit PR has no durable published head for CI")
 		}
-		explicitHost, _, err = ValidateExistingPR(sctx, *published.LastPushedSHA)
+		explicitHost, _, err = ValidateExistingPublishedPR(sctx, *published.LastPushedSHA)
 		if err != nil {
 			return nil, err
 		}

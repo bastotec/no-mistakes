@@ -49,6 +49,15 @@ func handleFakeCLI(mode string) {
 		if endpoint := os.Getenv("FAKE_CLI_EXISTING_PR_ENDPOINT"); endpoint != "" && args[len(args)-1] != endpoint {
 			os.Exit(1)
 		}
+		// A pull request read from a replica can answer a stale head once
+		// before it catches up; the marker file makes that one-shot.
+		if stale, ok := os.LookupEnv("FAKE_CLI_EXISTING_PR_JSON_FIRST"); ok {
+			marker := os.Getenv("FAKE_CLI_EXISTING_PR_FIRST_MARKER")
+			if _, err := os.Stat(marker); err != nil {
+				_ = os.WriteFile(marker, []byte("served"), 0o644)
+				payload = stale
+			}
+		}
 		fmt.Print(payload)
 		os.Exit(0)
 	}

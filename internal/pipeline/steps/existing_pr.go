@@ -1,8 +1,10 @@
 package steps
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -26,9 +28,40 @@ func ValidateExistingPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm
 		return host, pr, err
 	}
 	if head == "" || pr.HeadSHA != head {
-		return nil, nil, fmt.Errorf("%s is at %s, not the %s this run published: its source branch moved outside this run - validate the new head with a fresh run on the branch, or run `no-mistakes axi run --retire-existing-pr` on it if that pull request is no longer the target", existingPRURL(sctx), shortSHA(pr.HeadSHA), shortSHA(head))
+		return nil, nil, fmt.Errorf("%w: %s is at %s, not the %s this run published: its source branch moved outside this run - validate the new head with a fresh run on the branch, or run `no-mistakes axi run --retire-existing-pr` on it if that pull request is no longer the target", errExplicitPRHeadMismatch, existingPRURL(sctx), shortSHA(pr.HeadSHA), shortSHA(head))
 	}
 	return host, pr, nil
+}
+
+// errExplicitPRHeadMismatch marks the head check specifically, so a caller that
+// has just proven that head on the source remote can tell it apart from every
+// other association failure.
+var errExplicitPRHeadMismatch = errors.New("explicit PR head mismatch")
+
+// A pull request is served from a replica, so its head can still answer the
+// commit before the one this run just verified on the source remote. These
+// bound the re-read: a few seconds, then the mismatch stands.
+var (
+	prHeadSettleAttempts = 3
+	prHeadSettleDelay    = 2 * time.Second
+)
+
+// ValidateExistingPublishedPR is ValidateExistingPR for a head this run already
+// verified on the source remote. Equality stays exact - an ancestor is never
+// accepted and the refusal is unchanged once the bound is spent - but the
+// forge's own read lag is re-read rather than reported as a source branch that
+// moved outside the run.
+func ValidateExistingPublishedPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm.PR, error) {
+	host, pr, err := ValidateExistingPR(sctx, head)
+	for attempt := 1; attempt < prHeadSettleAttempts && errors.Is(err, errExplicitPRHeadMismatch); attempt++ {
+		select {
+		case <-sctx.Ctx.Done():
+			return nil, nil, sctx.Ctx.Err()
+		case <-time.After(prHeadSettleDelay):
+		}
+		host, pr, err = ValidateExistingPR(sctx, head)
+	}
+	return host, pr, err
 }
 
 // ValidateExistingPRIdentity proves the association alone: the target is an

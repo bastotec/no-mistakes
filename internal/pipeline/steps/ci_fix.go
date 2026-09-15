@@ -141,12 +141,6 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	return nil, nil
 }
 
-// autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
-// records the repair under the run's uniform continuity rule: published
-// immediately through the guarded push path when its continuity with the
-// reviewed head is provable, held for revalidation when it is not or when
-// ci.revalidate_repairs asks for it outright. See recordRepair.
-// The result reports whether the recorded head advanced and whether the repair
 // resolveCIRepairBases answers the two commits a repair turn is given: the base
 // its diff is measured from, and the commit a merge-conflict repair rebases
 // onto. An associated run proves its live integration branch once and uses that
@@ -169,6 +163,12 @@ func resolveCIRepairBases(ctx context.Context, sctx *pipeline.StepContext, baseB
 	return baseSHA, resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch), nil
 }
 
+// autoFixCI runs the agent to fix CI failures and/or merge conflicts, then
+// records the repair under the run's uniform continuity rule: published
+// immediately through the guarded push path when its continuity with the
+// reviewed head is provable, held for revalidation when it is not or when
+// ci.revalidate_repairs asks for it outright. See recordRepair.
+// The result reports whether the recorded head advanced and whether the repair
 // must revalidate; a zero result means the agent produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
 	ctx := sctx.Ctx
@@ -778,7 +778,7 @@ func (s *CIStep) publishRepair(sctx *pipeline.StepContext, headSHA string) (ciRe
 // not settle) is wrapped in errAttestationWriteFailed and returned.
 func attestHeadBeforePush(sctx *pipeline.StepContext, headSHA string, steps []*db.StepResult, remoteHead string) error {
 	if existingPRURL(sctx) != "" {
-		host, pr, err := ValidateExistingPR(sctx, remoteHead)
+		host, pr, err := ValidateExistingPublishedPR(sctx, remoteHead)
 		if err != nil {
 			return err
 		}

@@ -274,7 +274,12 @@ func fetchRunUpstreamBranchInner(ctx context.Context, sctx *pipeline.StepContext
 		if err != nil {
 			return err
 		}
-		return git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, "https://github.com/"+repo+".git", branch, runIntegrationRef(sctx, branch))
+		// Through the step runner, so the fetch reads with the forge profile
+		// this run selected rather than whatever account the daemon process
+		// happens to have configured: an upstream repository is often private
+		// to the contributor, and one daemon can serve several accounts.
+		_, err = stepGitRunRawContext(ctx, sctx, "fetch", "--no-tags", "https://github.com/"+repo+".git", "+refs/heads/"+branch+":"+runIntegrationRef(sctx, branch))
+		return err
 	}
 	upstreamURL := resolveUpstreamURL(sctx)
 	originURL, err := git.GetRemoteURL(ctx, sctx.WorkDir, "origin")

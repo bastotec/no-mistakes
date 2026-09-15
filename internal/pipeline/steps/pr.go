@@ -70,7 +70,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	explicitHost, explicit, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA)
+	explicitHost, explicit, err := ValidateExistingPublishedPR(sctx, sctx.Run.HeadSHA)
 	if err != nil {
 		return nil, err
 	}
