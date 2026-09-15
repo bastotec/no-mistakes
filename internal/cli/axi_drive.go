@@ -121,6 +121,7 @@ func newAxiRunCmd() *cobra.Command {
 	var validationGeneration string
 	var baseBranch string
 	var existingPR string
+	var retireExistingPR bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -146,10 +147,13 @@ func newAxiRunCmd() *cobra.Command {
 			"--base-branch targets an integration branch other than the repository default\n" +
 			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
 			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
-			"--existing-pr URL binds this run to an open github.com PR, including an upstream\n" +
+			"--existing-pr URL binds this branch to an open github.com PR, including an upstream\n" +
 			"PR when origin is your fork. The clean source branch head must already be\n" +
 			"published and match the PR. The run integrates with the branch that PR targets.\n" +
-			"Validation failure never creates another PR.\n" +
+			"The association is remembered for the branch, so later runs - including push-hook\n" +
+			"runs and CI repairs - publish to that same PR; pass a different URL to replace it\n" +
+			"and --retire-existing-pr (which starts no run) to drop it. Validation failure never\n" +
+			"creates another PR.\n" +
 			"Cannot be combined with --skip, --base-branch, or launch-receipt flags.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
@@ -175,6 +179,12 @@ func newAxiRunCmd() *cobra.Command {
 				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
+				if retireExistingPR {
+					if existingPR != "" {
+						return emitError(cmd, 2, "--retire-existing-pr cannot be combined with --existing-pr")
+					}
+					return runAxiRetireExistingPR(cmd)
+				}
 				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait, existingPR)
 			})
 		},
@@ -185,13 +195,44 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
-	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this run with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
+	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
+	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string) error {
 	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait, "")
+}
+
+// runAxiRetireExistingPR drops the current branch's remembered pull request
+// association and reports what it removed. It deliberately starts no run: the
+// next ordinary launch is the run, and keeping them separate leaves one
+// readable document per command.
+func runAxiRetireExistingPR(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	env, err := openAxiRunEnv()
+	if err != nil {
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+	}
+	defer env.close()
+	branch, err := git.CurrentBranch(ctx, ".")
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
+	}
+	if branch == "HEAD" {
+		return emitError(cmd, 1, "detached HEAD: check out the branch whose association you are retiring")
+	}
+	var retired ipc.RetireExistingPRResult
+	if err := env.client.Call(ipc.MethodRetireExistingPR, &ipc.RetireExistingPRParams{RepoID: env.repo.ID, Branch: branch}, &retired); err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("retire pull request association: %v", err))
+	}
+	value := retired.RetiredURL
+	if value == "" {
+		value = "none"
+	}
+	emitDoc(cmd, toon.Field{Key: "branch", Value: branch}, toon.Field{Key: "retired_pr_association", Value: value})
+	return nil
 }
 
 func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, existingPR string) error {

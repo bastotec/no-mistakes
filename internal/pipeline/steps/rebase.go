@@ -26,20 +26,31 @@ func (s *RebaseStep) Name() types.StepName { return types.StepRebase }
 
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
-// explicitIntegrationRefPrefix keeps an explicit PR target's integration branch
-// in its own remote-tracking namespace. refs/remotes/origin/ lives in the gate
+// explicitIntegrationRefPrefix keeps an associated run's integration branch in
+// its own remote-tracking namespace. refs/remotes/origin/ lives in the gate
 // repository shared by every worktree and run of the registered repository, so
 // a foreign repository's commits must never land there.
 const explicitIntegrationRefPrefix = "refs/remotes/no-mistakes-upstream/"
 
-// runIntegrationRef names the ref this run's integration branch is fetched
-// into. Every read of it is preceded by that fetch in the same call, so the
-// value is never inherited from another run.
+// runIntegrationRef names the ref an associated run's integration branch is
+// fetched into. The pull request's repository is part of the ref, so two runs
+// of the same fork whose pull requests live in different repositories cannot
+// read each other's branch of the same name out of the shared gate.
 func runIntegrationRef(sctx *pipeline.StepContext, branch string) string {
-	if existingPRURL(sctx) != "" {
-		return explicitIntegrationRefPrefix + branch
+	if repo := explicitTargetRepo(sctx); repo != "" {
+		return explicitIntegrationRefPrefix + repo + "/" + branch
 	}
 	return "origin/" + branch
+}
+
+// runIntegrationBranch answers callers that have no branch of their own to
+// name. An associated run integrates with its pull request's base; every other
+// run keeps measuring from the repository default.
+func runIntegrationBranch(sctx *pipeline.StepContext) string {
+	if existingPRURL(sctx) != "" {
+		return effectivePRBaseBranch(sctx)
+	}
+	return sctx.Repo.DefaultBranch
 }
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
@@ -312,9 +323,10 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		firstFile = files[0]
 	}
 
+	integration := integrationBranchLabel(sctx, defaultBranch)
 	description := fmt.Sprintf(
-		"branch carries %d commit(s) that exist on your local %s branch but were never pushed to origin/%s; these may be unintended bundled work (%s):\n- %s\n\nConfirm these commits belong in this PR before approving, or manually separate the intended work onto origin/%s before gating.",
-		len(commits), defaultBranch, defaultBranch, fileEvidence, strings.Join(commits, "\n- "), defaultBranch,
+		"branch carries %d commit(s) that exist on your local %s branch but are not in %s; these may be unintended bundled work (%s):\n- %s\n\nConfirm these commits belong in this PR before approving, or manually separate the intended work onto %s before gating.",
+		len(commits), defaultBranch, integration, fileEvidence, strings.Join(commits, "\n- "), integration,
 	)
 	fixSummary := ""
 	if sctx.Fixing {

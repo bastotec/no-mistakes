@@ -193,6 +193,132 @@ func TestExistingPRLaunchIntegratesWithTheValidatedBaseBranch(t *testing.T) {
 	}
 }
 
+// The association is the branch's, not one run's: once an explicit launch
+// proves it, later unflagged runs publish to that same pull request without
+// discovering or creating another one - and they do so while carrying a NEW
+// head, which is the whole point of the gate. It ends only when replaced by
+// another explicit target or retired.
+func TestExistingPRAssociationIsReusedUntilReplacedOrRetired(t *testing.T) {
+	bin := t.TempDir()
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	const target = "https://github.com/upstream/widgets/pull/168"
+	const replacement = "https://github.com/upstream/widgets/pull/200"
+	var calls atomic.Int32
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&existingPRObserveStep{calls: &calls, target: target}} })
+	repo, _ := setupTestGitRepo(t, p, d, "explicit-pr-association")
+	repo, err := d.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubExplicitUpstream(t, p, repo, "main")
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	writeCommit(t, repo.WorkingPath, "new.txt", "new committed work")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	prPayload := func(url, number, headSHA string) string {
+		return fmt.Sprintf(`{"number":%s,"html_url":%q,"state":"open","base":{"ref":"main","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, number, url, headSHA)
+	}
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", prPayload(target, "168", head))
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.RerunResult
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "validate existing upstream PR", URL: target}, &result); err != nil {
+		t.Fatal(err)
+	}
+	if run := waitForRunTerminalState(t, d, result.RunID); run.Status != types.RunCompleted {
+		t.Fatalf("explicit launch did not complete: %+v", run)
+	}
+	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != target {
+		t.Fatalf("association = %q (%v), want %s", stored, err, target)
+	}
+
+	// The contributor commits again: the branch now has a head the pull
+	// request has never seen, and an unflagged run must still publish to it.
+	writeCommit(t, repo.WorkingPath, "more.txt", "later work")
+	next := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	if next == head {
+		t.Fatal("expected a new head")
+	}
+	gateDir := p.RepoDir(repo.ID)
+	gitCmd(t, gateDir, "fetch", "--no-tags", "--", repo.WorkingPath, next)
+	gitCmd(t, gateDir, "update-ref", "refs/heads/feature", next)
+	var unflagged ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: result.RunID}, &unflagged); err != nil {
+		t.Fatal(err)
+	}
+	reused := waitForRunTerminalState(t, d, unflagged.RunID)
+	if reused.Status != types.RunCompleted || reused.ExistingPRURL == nil || *reused.ExistingPRURL != target {
+		t.Fatalf("unflagged run lost the association: %+v", reused)
+	}
+	if reused.HeadSHA != next {
+		t.Fatalf("unflagged run head = %s, want the new head %s", reused.HeadSHA, next)
+	}
+
+	// Retiring is a between-runs decision: an active run keeps publishing
+	// where it was validated to publish.
+	active, err := d.InsertRun(repo.ID, "feature", next, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := client.Call(ipc.MethodRetireExistingPR, &ipc.RetireExistingPRParams{RepoID: repo.ID, Branch: "feature"}, &ipc.RetireExistingPRResult{}); err == nil {
+		t.Fatal("retired an association underneath an active run")
+	}
+	if err := d.UpdateRunStatus(active.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	// Replacement: a second explicit target takes over the branch.
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", prPayload(replacement, "200", next))
+	var replaced ipc.RerunResult
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: next, Intent: "move to the replacement PR", URL: replacement}, &replaced); err != nil {
+		t.Fatal(err)
+	}
+	waitForRunTerminalState(t, d, replaced.RunID)
+	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != replacement {
+		t.Fatalf("association after replacement = %q (%v), want %s", stored, err, replacement)
+	}
+
+	// Retirement returns the branch to ordinary discovery.
+	var retired ipc.RetireExistingPRResult
+	if err := client.Call(ipc.MethodRetireExistingPR, &ipc.RetireExistingPRParams{RepoID: repo.ID, Branch: "feature"}, &retired); err != nil {
+		t.Fatal(err)
+	}
+	if retired.RetiredURL != replacement {
+		t.Fatalf("retired %q, want %s", retired.RetiredURL, replacement)
+	}
+	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != "" {
+		t.Fatalf("association survived retirement: %q (%v)", stored, err)
+	}
+	var afterRetire ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: replaced.RunID}, &afterRetire); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := waitForRunTerminalState(t, d, afterRetire.RunID)
+	if ordinary.ExistingPRURL != nil {
+		t.Fatalf("retired branch still carries an association: %+v", ordinary.ExistingPRURL)
+	}
+}
+
+func writeCommit(t *testing.T, dir, name, body string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".")
+	gitCmd(t, dir, "commit", "-m", "commit "+name)
+}
+
 // The gate branch is the registered repository's custody record. An explicit
 // submission may advance it, but a head the submission does not contain belongs
 // to work the launch must not discard.

@@ -28,7 +28,7 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, runIntegrationBranch(sctx))
 
 	// In fix mode, ask agent to fix test failures first.
 	//

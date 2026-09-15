@@ -63,6 +63,30 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 	})
 }
 
+// HandleRetireExistingPR drops a branch's canonical association, returning the
+// pull request it published to, or "" when the branch had none. An active run
+// already validated and is publishing to that pull request, so the association
+// is retired between runs, not underneath one.
+func (m *RunManager) HandleRetireExistingPR(repoID, branch string) (string, error) {
+	repo, err := m.db.GetRepo(repoID)
+	if err != nil {
+		return "", err
+	}
+	if repo == nil {
+		return "", fmt.Errorf("unknown repository")
+	}
+	return m.withBranchLock(repo.ID, branch, func() (string, error) {
+		active, err := m.db.GetActiveRun(repo.ID, branch)
+		if err != nil {
+			return "", err
+		}
+		if active != nil {
+			return "", fmt.Errorf("branch %s has an active run; finish or abort it before retiring its pull request association", branch)
+		}
+		return m.db.DeleteBranchPRTarget(repo.ID, branch)
+	})
+}
+
 // bindExplicitGateBranch points the gate branch at the submitted head, the
 // custody anchor every other launch path establishes by pushing. Without it the
 // transferred commit is referenced by nothing once the run worktree is gone, so

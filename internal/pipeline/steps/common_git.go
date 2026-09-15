@@ -47,7 +47,10 @@ func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallb
 	if mb := mergeBaseWithDefaultBranch(ctx, sctx, sctx.WorkDir, defaultBranch); mb != "" {
 		return mb
 	}
-	return resolveBaseSHA(ctx, sctx, sctx.WorkDir, fallbackBaseSHA, defaultBranch)
+	if !git.IsZeroSHA(fallbackBaseSHA) {
+		return fallbackBaseSHA
+	}
+	return git.EmptyTreeSHA
 }
 
 func resolveDefaultBranchTipSHA(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) string {
@@ -122,6 +125,12 @@ func mergeBaseWithDefaultBranch(ctx context.Context, sctx *pipeline.StepContext,
 	if len(refs) == 0 {
 		return ""
 	}
+	if existingPRURL(sctx) != "" {
+		// The caller names the branch it integrates with, and CI reads that
+		// from the live pull request, so refresh it rather than trusting a ref
+		// an earlier step fetched for a base the maintainer has since changed.
+		_ = FetchRunUpstreamBranch(ctx, sctx, defaultBranch)
+	}
 	for _, ref := range refs {
 		mb, err := git.Run(ctx, workDir, "merge-base", "HEAD", ref)
 		if err == nil && strings.TrimSpace(mb) != "" {
@@ -132,16 +141,16 @@ func mergeBaseWithDefaultBranch(ctx context.Context, sctx *pipeline.StepContext,
 }
 
 // integrationMergeBaseRefs names the refs a diff base may be measured from.
-// An explicit PR target is answered by its own integration ref alone: the
-// registered repository's origin/<default> is a different repository there, and
-// measuring against it reports - and lets the fix agent edit - commits the
-// contributor never wrote.
+// An associated run is answered by the caller's branch in its own integration
+// namespace alone: the registered repository's origin/<branch> is a different
+// repository there, and measuring against it reports - and lets the fix agent
+// edit - commits the contributor never wrote.
 func integrationMergeBaseRefs(sctx *pipeline.StepContext, defaultBranch string) []string {
-	if existingPRURL(sctx) != "" {
-		return []string{runIntegrationRef(sctx, effectivePRBaseBranch(sctx))}
-	}
 	if strings.TrimSpace(defaultBranch) == "" {
 		return nil
+	}
+	if existingPRURL(sctx) != "" {
+		return []string{runIntegrationRef(sctx, defaultBranch)}
 	}
 	return []string{"origin/" + defaultBranch, defaultBranch}
 }

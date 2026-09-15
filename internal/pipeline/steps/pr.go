@@ -278,12 +278,6 @@ func retargetExistingPRIfNeeded(sctx *pipeline.StepContext, host scm.Host, exist
 // a per-run --base-branch retarget is refused rather than moving either
 // object. First-attach (no persisted URL) keeps the discovered PR.
 func bindExistingPR(sctx *pipeline.StepContext, host scm.Host, discovered *scm.PR) (*scm.PR, error) {
-	if existingPRURL(sctx) != "" {
-		if discovered == nil || discovered.URL != existingPRURL(sctx) {
-			return nil, fmt.Errorf("explicit PR identity mismatch; refusing discovery fallback")
-		}
-		return discovered, nil
-	}
 	owned := runPRURL(sctx)
 	if owned == "" {
 		return discovered, nil

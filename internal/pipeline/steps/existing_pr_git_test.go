@@ -160,6 +160,60 @@ func TestExplicitPRDiffBaseIsTheUpstreamBaseNotTheForkDefault(t *testing.T) {
 	}
 }
 
+// CI re-reads the pull request's live base and hands it to the repair helpers,
+// so a maintainer retargeting the PR mid-run must move the diff base with the
+// rebase target. A merge base measured from the branch stored at launch would
+// hand the fix agent a diff from the old base while rebasing onto the new one.
+func TestExplicitPRDiffBaseFollowsTheCallerSelectedUpstreamBranch(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	parent := t.TempDir()
+	gitCmd(t, parent, "init", "--bare")
+	fork := t.TempDir()
+	gitCmd(t, fork, "init", "--bare")
+	gitCmd(t, dir, "remote", "add", "origin", fork)
+	gitCmd(t, dir, "push", "origin", "main", "feature")
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("upstream-only"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".")
+	gitCmd(t, dir, "commit", "-m", "upstream advancement")
+	gitCmd(t, dir, "push", parent, "main")
+	if err := os.WriteFile(filepath.Join(dir, "release.txt"), []byte("release-only"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".")
+	gitCmd(t, dir, "commit", "-m", "release advancement")
+	releaseHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", parent, "HEAD:refs/heads/release/2.0")
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", releaseHead)
+	gitCmd(t, dir, "config", "url."+parent+".insteadOf", "https://github.com/upstream/widgets.git")
+	gitCmd(t, dir, "config", "url."+fork+".insteadOf", fixtureSourceURL)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	pinFixturePR(t, sctx)
+	// The run was launched against main; the maintainer has since retargeted.
+	launchBase := "main"
+	if err := sctx.DB.SetRunPRBaseBranch(sctx.Run.ID, launchBase); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.PRBaseBranch = &launchBase
+	ctx := context.Background()
+	if err := FetchRunUpstreamBranch(ctx, sctx, launchBase); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/2.0")
+	if baseSHA != releaseHead {
+		t.Fatalf("diff base = %s, want the live base %s", baseSHA, releaseHead)
+	}
+	changed := gitCmd(t, dir, "diff", "--name-only", baseSHA, "HEAD")
+	if strings.Contains(changed, "release.txt") {
+		t.Fatalf("diff measured from the launch base still carries the live base's commits:\n%s", changed)
+	}
+}
+
 func gitRun(dir string, args ...string) (string, error) {
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	return string(out), err

@@ -10,6 +10,15 @@ CREATE TABLE IF NOT EXISTS repos (
     created_at     INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS branch_pr_targets (
+    repo_id    TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+    branch     TEXT NOT NULL,
+    pr_url     TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (repo_id, branch)
+);
+
 CREATE TABLE IF NOT EXISTS runs (
     id                   TEXT PRIMARY KEY,
     repo_id              TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,

@@ -12,6 +12,7 @@ const (
 	MethodPushReceived       = "push_received"
 	MethodStartFreshRun      = "start_fresh_run"
 	MethodStartExistingPRRun = "start_existing_pr_run"
+	MethodRetireExistingPR   = "retire_existing_pr"
 	MethodClaimLaunchReceipt = "claim_launch_receipt"
 	MethodGetRun             = "get_run"
 	MethodGetStepDiff        = "get_step_diff"
@@ -95,6 +96,19 @@ type StartExistingPRRunParams struct {
 	HeadSHA string `json:"head_sha"`
 	Intent  string `json:"intent"`
 	URL     string `json:"url"`
+}
+
+// RetireExistingPRParams drops a branch's canonical pull request association so
+// later runs return to ordinary repository-scoped discovery.
+type RetireExistingPRParams struct {
+	RepoID string `json:"repo_id"`
+	Branch string `json:"branch"`
+}
+
+// RetireExistingPRResult reports the association that was retired, or an empty
+// URL when the branch had none.
+type RetireExistingPRResult struct {
+	RetiredURL string `json:"retired_url,omitempty"`
 }
 
 // StartFreshRunParams requests a nonce-bound fresh launch for one exact gate

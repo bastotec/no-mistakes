@@ -90,7 +90,7 @@ func (s *DocumentStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcom
 		return nil, err
 	}
 	ctx := sctx.Ctx
-	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, runIntegrationBranch(sctx))
 
 	ignorePatterns := "none"
 	if len(sctx.Config.IgnorePatterns) > 0 {

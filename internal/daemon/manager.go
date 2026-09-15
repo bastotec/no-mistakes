@@ -28,6 +28,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
@@ -1087,7 +1088,10 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		// replacement run reads it back from the live pull request.
 		storedPRBaseBranch = strings.TrimSpace(*selectedRun.PRBaseBranch)
 	}
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), explicitRunTarget(selectedRun))
+	// A rerun is not an operator claiming the pull request's head: the branch's
+	// own association supplies the target, and the head it publishes is proven
+	// against the remote before the push like every other run's.
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), "")
 }
 
 func inheritablePRURL(run *db.Run) string {
@@ -1219,7 +1223,25 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 
 	if existingPR != "" && (len(skipSteps) != 0 || strings.TrimSpace(prBaseBranch) != "") {
+		trackStartFailure("explicit_pr_flag_conflict")
 		return "", fmt.Errorf("explicit PR runs cannot skip steps or retarget the base")
+	}
+	// A branch keeps the pull request an explicit association proved, so every
+	// later launch - unflagged, push-hook or rerun - publishes to that same
+	// review object instead of discovering or creating another one. A branch
+	// with no association is untouched.
+	target := existingPR
+	if target == "" {
+		stored, err := m.db.GetBranchPRTarget(repo.ID, branch)
+		if err != nil {
+			trackStartFailure("read_branch_pr_target")
+			return "", err
+		}
+		target = stored
+	}
+	if target != "" && strings.TrimSpace(prBaseBranch) != "" {
+		trackStartFailure("associated_pr_base_conflict")
+		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; retire the association to retarget it", branch, target)
 	}
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
@@ -1242,7 +1264,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", err
 	}
 
-	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, existingPR)
+	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, target)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
@@ -1399,29 +1421,51 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 
 	explicitCtx := &pipeline.StepContext{Ctx: ctx, Run: run, Repo: repo, WorkDir: wtDir, Config: cfg, ForgeContext: forgeCtx}
-	_, explicitPR, err := steps.ValidateExistingPR(explicitCtx, headSHA)
+	// An operator naming the target claims this exact commit is already the
+	// pull request's head, and that claim is checked. A run that inherits the
+	// branch's association is usually about to publish a NEW head, so only the
+	// association itself - repository, source repository and source ref - is
+	// proven here; the head is proven again against the remote before the push
+	// and after it by the PR and CI steps.
+	var explicitPR *scm.PR
+	if existingPR != "" {
+		_, explicitPR, err = steps.ValidateExistingPR(explicitCtx, headSHA)
+	} else {
+		_, explicitPR, err = steps.ValidateExistingPRIdentity(explicitCtx)
+	}
 	if err != nil {
 		m.db.UpdateRunError(run.ID, err.Error())
+		trackStartFailure("validate_existing_pr")
 		return "", err
 	}
-	// The run integrates with the branch the explicit pull request actually
-	// targets, not the repository default: rebase, PR and CI all read this.
+	// The run integrates with the branch the pull request actually targets, not
+	// the repository default: rebase, PR and CI all read this.
 	if explicitPR != nil {
 		base, err := normalizeRunPRBaseBranch(explicitPR.BaseBranch)
 		if err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("invalid_existing_pr_base")
 			return "", err
 		}
 		if err := steps.FetchRunUpstreamBranch(ctx, explicitCtx, base); err != nil {
 			err = fmt.Errorf("fetch explicit PR integration branch: %w", err)
 			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("fetch_existing_pr_base")
 			return "", err
 		}
 		if err := m.db.SetRunPRBaseBranch(run.ID, base); err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("store_existing_pr_base")
 			return "", err
 		}
 		run.PRBaseBranch = &base
+		if existingPR != "" {
+			if err := m.db.SetBranchPRTarget(repo.ID, branch, existingPR); err != nil {
+				m.db.UpdateRunError(run.ID, err.Error())
+				trackStartFailure("store_branch_pr_target")
+				return "", err
+			}
+		}
 	}
 
 	// Create agent. In demo mode, newPipelineAgent returns a no-op agent, and it
