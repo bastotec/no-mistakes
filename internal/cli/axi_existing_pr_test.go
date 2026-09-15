@@ -25,15 +25,16 @@ func TestAxiExistingPRFlagRejectsUnsupportedCombinations(t *testing.T) {
 	}
 }
 
-// Retiring an association starts no run, so a launch flag passed with it would
-// be silently dropped - including --intent, which describes work the caller
-// believes is about to be validated.
+// Retiring an association starts no run, so a flag that describes a run - above
+// all --intent, which describes work the caller believes is about to be
+// validated - is refused rather than silently dropped. Flags that only shape
+// how a run is driven are not refused: a harness that always appends them must
+// still be able to retire.
 func TestAxiRetireExistingPRRejectsLaunchFlags(t *testing.T) {
 	for _, extra := range [][]string{
 		{"--intent", "revalidate after retiring"},
 		{"--skip", "lint"},
 		{"--base-branch", "release"},
-		{"--yes"},
 		{"--launch-nonce", "nonce", "--validation-generation", "gen"},
 		{"--existing-pr", axiExistingPRURL},
 	} {
@@ -44,6 +45,15 @@ func TestAxiRetireExistingPRRejectsLaunchFlags(t *testing.T) {
 		}
 		if !strings.Contains(out, extra[0]) {
 			t.Fatalf("failure did not name the discarded flag %s: %s", extra[0], out)
+		}
+	}
+	// --yes and --wait shape how a run is driven, not what it validates, so a
+	// harness that appends them to every command can still retire.
+	for _, extra := range [][]string{{"--yes"}, {"--wait", "10m"}, {"--yes", "--wait", "10m"}} {
+		args := append([]string{"axi", "run", "--retire-existing-pr"}, extra...)
+		out, _ := executeCmd(args...)
+		if strings.Contains(out, "cannot be combined") {
+			t.Fatalf("args=%v refused a drive-only flag: %s", args, out)
 		}
 	}
 }

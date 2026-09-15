@@ -6,13 +6,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/spf13/pflag"
 	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
@@ -182,7 +180,7 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
 				if retireExistingPR {
-					if conflicting := changedFlagsWith(cmd, "retire-existing-pr"); len(conflicting) > 0 {
+					if conflicting := changedLaunchFlags(cmd); len(conflicting) > 0 {
 						return emitError(cmd, 2, fmt.Sprintf("--retire-existing-pr starts no run, so it cannot be combined with %s", strings.Join(conflicting, ", ")))
 					}
 					return runAxiRetireExistingPR(cmd)
@@ -207,18 +205,20 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait, "")
 }
 
-// changedFlagsWith names the flags the caller set alongside one that starts no
-// run. Retiring an association is not a launch, so a launch flag passed with it
-// would be silently discarded - including --intent, which the caller supplied
-// to describe work that will never run.
-func changedFlagsWith(cmd *cobra.Command, self string) []string {
+// launchShapingFlags are the flags that describe a run. Retiring an association
+// starts none, so passing one with it describes work that will never happen.
+// --yes and --wait shape how a run is driven rather than what it validates, so
+// a retirement that drives nothing simply leaves them with nothing to do - and
+// refusing them would lock out any harness that appends them to every command.
+var launchShapingFlags = []string{"intent", "skip", "base-branch", "existing-pr", "launch-nonce", "validation-generation"}
+
+func changedLaunchFlags(cmd *cobra.Command) []string {
 	var conflicting []string
-	cmd.Flags().Visit(func(f *pflag.Flag) {
-		if f.Name != self {
-			conflicting = append(conflicting, "--"+f.Name)
+	for _, name := range launchShapingFlags {
+		if cmd.Flags().Changed(name) {
+			conflicting = append(conflicting, "--"+name)
 		}
-	})
-	sort.Strings(conflicting)
+	}
 	return conflicting
 }
 

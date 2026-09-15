@@ -3,6 +3,7 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -66,6 +67,31 @@ func TestValidateExistingPRIdentity(t *testing.T) {
 				t.Fatalf("unexpected PR: %+v", pr)
 			}
 		})
+	}
+}
+
+// A renamed or transferred repository answers the old URL through GitHub's
+// redirect under its new name. The association still refuses it - the stored
+// URL derives the integration fetch URL and ref namespace - but the refusal
+// names the canonical URL so the operator can re-run with it.
+func TestExistingPRIdentityNamesTheCanonicalURL(t *testing.T) {
+	t.Parallel()
+	const canonical = "https://github.com/newowner/widgets/pull/168"
+	p := explicitTestResponse()
+	p["html_url"] = canonical
+	base := p["base"].(map[string]any)["repo"].(map[string]any)
+	base["full_name"] = "newowner/widgets"
+	base["html_url"] = "https://github.com/newowner/widgets"
+	payload, _ := json.Marshal(p)
+	h := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api --hostname github.com repos/upstream/widgets/pulls/168": {stdout: string(payload)},
+	}), nil, "github.com", "upstream/widgets")
+	pr, err := h.ValidateExistingPRIdentity(context.Background(), explicitTestURL, "contributor/widgets", "fm/account-context")
+	if err == nil {
+		t.Fatalf("accepted a non-canonical URL: %+v", pr)
+	}
+	if !strings.Contains(err.Error(), canonical) {
+		t.Fatalf("refusal did not name the canonical URL: %v", err)
 	}
 }
 
