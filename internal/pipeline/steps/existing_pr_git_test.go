@@ -214,6 +214,54 @@ func TestExplicitPRDiffBaseFollowsTheCallerSelectedUpstreamBranch(t *testing.T) 
 	}
 }
 
+// A retargeted pull request whose new base cannot be read - the fetch failed,
+// or the branch is gone - must still measure the contributor's own commits. An
+// associated run records its submitted head as its base, so falling back to it
+// would diff HEAD against itself: an empty diff no step reports as a failure.
+func TestExplicitPRDiffBaseNeverCollapsesWhenTheLiveBaseIsUnreadable(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	parent := t.TempDir()
+	gitCmd(t, parent, "init", "--bare")
+	fork := t.TempDir()
+	gitCmd(t, fork, "init", "--bare")
+	gitCmd(t, dir, "remote", "add", "origin", fork)
+	gitCmd(t, dir, "push", "origin", "main", "feature")
+	gitCmd(t, dir, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(dir, "upstream.txt"), []byte("upstream-only"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", ".")
+	gitCmd(t, dir, "commit", "-m", "upstream advancement")
+	parentHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "push", parent, "main")
+	gitCmd(t, dir, "checkout", "feature")
+	gitCmd(t, dir, "rebase", parentHead)
+	gitCmd(t, dir, "config", "url."+parent+".insteadOf", "https://github.com/upstream/widgets.git")
+	gitCmd(t, dir, "config", "url."+fork+".insteadOf", fixtureSourceURL)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	pinFixturePR(t, sctx)
+	launchBase := "main"
+	if err := sctx.DB.SetRunPRBaseBranch(sctx.Run.ID, launchBase); err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run.PRBaseBranch = &launchBase
+	ctx := context.Background()
+	if err := FetchRunUpstreamBranch(ctx, sctx, launchBase); err != nil {
+		t.Fatal(err)
+	}
+	// An explicit launch records the submitted head as the run's base.
+	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
+	sctx.Run.BaseSHA = sctx.Run.HeadSHA
+	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/never-published")
+	if baseSHA != parentHead {
+		t.Fatalf("diff base = %s, want the branch the run was launched against %s", baseSHA, parentHead)
+	}
+	if changed := gitCmd(t, dir, "diff", "--name-only", baseSHA, "HEAD"); strings.TrimSpace(changed) == "" {
+		t.Fatal("gates would review an empty diff")
+	}
+}
+
 func gitRun(dir string, args ...string) (string, error) {
 	out, err := exec.Command("git", append([]string{"-C", dir}, args...)...).CombinedOutput()
 	return string(out), err

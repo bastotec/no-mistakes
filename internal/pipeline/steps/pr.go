@@ -146,17 +146,22 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 			var emptyNarrative string
 			var title string
-			if live.Body == "" && template != "" {
-				draft, err := s.draftTemplateNarrative(sctx, branch, baseBranch, baseSHA, template)
-				if err != nil {
-					return nil, err
-				}
-				emptyNarrative = neutralizeAttestationMarkers(draft.Body)
-				title = draft.Title
-			} else if explicit == nil && sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
-				title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
-				if err != nil {
-					return nil, err
+			// An associated run appends its evidence and nothing else: the
+			// title and the description - including an empty one - belong to
+			// the pull request's author, not to this repository's template.
+			if explicit == nil {
+				if live.Body == "" && template != "" {
+					draft, err := s.draftTemplateNarrative(sctx, branch, baseBranch, baseSHA, template)
+					if err != nil {
+						return nil, err
+					}
+					emptyNarrative = neutralizeAttestationMarkers(draft.Body)
+					title = draft.Title
+				} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
+					title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA)
+					if err != nil {
+						return nil, err
+					}
 				}
 			}
 			appendix, err := s.buildPRAppendix(sctx, provider)

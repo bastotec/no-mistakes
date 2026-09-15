@@ -30,7 +30,7 @@ func reviewWorkload(ctx context.Context, workDir, base, head string) *agent.Invo
 // When baseSHA is the zero ref (new branch push), it tries git merge-base
 // against the default branch, falling back to the empty tree SHA.
 func resolveBaseSHA(ctx context.Context, sctx *pipeline.StepContext, workDir, baseSHA, defaultBranch string) string {
-	if !git.IsZeroSHA(baseSHA) {
+	if usableBaseSHA(baseSHA) {
 		return baseSHA
 	}
 	if mb := mergeBaseWithDefaultBranch(ctx, sctx, workDir, defaultBranch); mb != "" {
@@ -47,10 +47,18 @@ func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallb
 	if mb := mergeBaseWithDefaultBranch(ctx, sctx, sctx.WorkDir, defaultBranch); mb != "" {
 		return mb
 	}
-	if !git.IsZeroSHA(fallbackBaseSHA) {
+	if usableBaseSHA(fallbackBaseSHA) {
 		return fallbackBaseSHA
 	}
 	return git.EmptyTreeSHA
+}
+
+// usableBaseSHA reports whether a recorded base can be handed to git as one
+// side of a diff. The zero ref means "new branch"; an empty string is not a
+// revision at all, and git reads "..HEAD" as HEAD..HEAD - an empty diff that
+// no step would report as a failure.
+func usableBaseSHA(baseSHA string) bool {
+	return strings.TrimSpace(baseSHA) != "" && !git.IsZeroSHA(baseSHA)
 }
 
 func resolveDefaultBranchTipSHA(ctx context.Context, workDir, upstreamURL, fallbackBaseSHA, defaultBranch string) string {
@@ -93,7 +101,7 @@ func resolveDefaultBranchTip(ctx context.Context, workDir, upstreamURL, fallback
 }
 
 func unresolvedDefaultBranchTip(ctx context.Context, workDir, fallbackBaseSHA, defaultBranch string) string {
-	if !git.IsZeroSHA(fallbackBaseSHA) {
+	if usableBaseSHA(fallbackBaseSHA) {
 		return fallbackBaseSHA
 	}
 	sha, localErr := git.Run(ctx, workDir, "rev-parse", "--verify", defaultBranch)
@@ -150,7 +158,16 @@ func integrationMergeBaseRefs(sctx *pipeline.StepContext, defaultBranch string) 
 		return nil
 	}
 	if existingPRURL(sctx) != "" {
-		return []string{runIntegrationRef(sctx, defaultBranch)}
+		refs := []string{runIntegrationRef(sctx, defaultBranch)}
+		// The caller's branch is the answer. When it cannot be read - the
+		// fetch failed, or the maintainer retargeted onto a branch that has
+		// since gone - the branch this run was launched against still measures
+		// the contributor's own commits, which an unreadable ref would
+		// otherwise reduce to an empty diff.
+		if launched := effectivePRBaseBranch(sctx); launched != defaultBranch {
+			refs = append(refs, runIntegrationRef(sctx, launched))
+		}
+		return refs
 	}
 	return []string{"origin/" + defaultBranch, defaultBranch}
 }

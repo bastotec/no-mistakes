@@ -31,21 +31,6 @@ func ExistingPRTarget(raw string) (repo, number string, err error) {
 	return repo, number, nil
 }
 
-// ValidateExistingPR proves the identity and that the pull request's live head
-// is exactly the expected commit. Callers that are about to publish a NEW head
-// use ValidateExistingPRIdentity instead, which proves the same association
-// without requiring the head to already be published.
-func (h *Host) ValidateExistingPR(ctx context.Context, raw, sourceRepo, branch, head string) (*scm.PR, error) {
-	pr, err := h.ValidateExistingPRIdentity(ctx, raw, sourceRepo, branch)
-	if err != nil {
-		return nil, err
-	}
-	if head == "" || pr.HeadSHA != head {
-		return nil, fmt.Errorf("explicit PR head does not match expected head %s", head)
-	}
-	return pr, nil
-}
-
 // ValidateExistingPRIdentity uses a numbered REST lookup, never branch
 // discovery. Both repositories and the source ref must be proven before use.
 func (h *Host) ValidateExistingPRIdentity(ctx context.Context, raw, sourceRepo, branch string) (*scm.PR, error) {
@@ -92,6 +77,9 @@ func (h *Host) ValidateExistingPRIdentity(ctx context.Context, raw, sourceRepo, 
 	}
 	if sourceRepo == "" || !strings.EqualFold(p.Head.Repo.FullName, sourceRepo) || !strings.EqualFold(p.Head.Repo.URL, "https://github.com/"+sourceRepo) || p.Head.Ref != strings.TrimPrefix(branch, "refs/heads/") {
 		return nil, fmt.Errorf("explicit PR source repository/ref does not match the configured push target and run branch")
+	}
+	if p.Head.SHA == "" {
+		return nil, fmt.Errorf("explicit PR reports no source head")
 	}
 	return &scm.PR{Number: number, URL: raw, HeadSHA: p.Head.SHA, BaseBranch: p.Base.Ref}, nil
 }

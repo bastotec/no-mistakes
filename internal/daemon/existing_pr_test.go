@@ -389,6 +389,9 @@ func (s *existingPRObserveStep) Execute(ctx *pipeline.StepContext) (*pipeline.St
 	if ctx.Run.ExistingPRURL == nil || *ctx.Run.ExistingPRURL != s.target || ctx.Run.PRURL == nil || *ctx.Run.PRURL != s.target {
 		return nil, fmt.Errorf("target missing before first step")
 	}
+	if ctx.Run.BaseSHA == "" {
+		return nil, fmt.Errorf("run has no base commit to diff from")
+	}
 	if s.base != "" && (ctx.Run.PRBaseBranch == nil || *ctx.Run.PRBaseBranch != s.base) {
 		return nil, fmt.Errorf("step ran against %v, not the pull request base %s", ctx.Run.PRBaseBranch, s.base)
 	}

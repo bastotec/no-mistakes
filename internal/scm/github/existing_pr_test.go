@@ -3,7 +3,6 @@ package github
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"testing"
 )
 
@@ -21,11 +20,11 @@ func explicitTestResponse() map[string]any {
 func TestValidateExistingPRIdentity(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
-		name                 string
-		mutate               func(map[string]any)
-		source, branch, head string
-		code                 int
-		wantError            bool
+		name           string
+		mutate         func(map[string]any)
+		source, branch string
+		code           int
+		wantError      bool
 	}{
 		{name: "fork upstream exact match"},
 		{name: "different requested repository", mutate: func(p map[string]any) {
@@ -37,7 +36,6 @@ func TestValidateExistingPRIdentity(t *testing.T) {
 		{name: "same owner different source repo", source: "contributor/other", wantError: true},
 		{name: "different source ref", branch: "fm/other", wantError: true},
 		{name: "source ref is case sensitive", branch: "fm/Account-context", wantError: true},
-		{name: "different head", head: strings.Repeat("f", 40), wantError: true},
 		{name: "missing head", mutate: func(p map[string]any) { delete(p["head"].(map[string]any), "sha") }, wantError: true},
 		{name: "deleted source repo", mutate: func(p map[string]any) { p["head"].(map[string]any)["repo"] = nil }, wantError: true},
 		{name: "closed", mutate: func(p map[string]any) { p["state"] = "closed" }, wantError: true},
@@ -53,21 +51,18 @@ func TestValidateExistingPRIdentity(t *testing.T) {
 			h := New(githubTestCmdFactory(map[string]githubTestResponse{
 				"gh api --hostname github.com repos/upstream/widgets/pulls/168": {stdout: string(payload), code: tc.code},
 			}), nil, "github.com", "upstream/widgets")
-			source, branch, head := tc.source, tc.branch, tc.head
+			source, branch := tc.source, tc.branch
 			if source == "" {
 				source = "contributor/widgets"
 			}
 			if branch == "" {
 				branch = "fm/account-context"
 			}
-			if head == "" {
-				head = explicitTestHead
-			}
-			pr, err := h.ValidateExistingPR(context.Background(), explicitTestURL, source, branch, head)
+			pr, err := h.ValidateExistingPRIdentity(context.Background(), explicitTestURL, source, branch)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("PR=%+v error=%v", pr, err)
 			}
-			if !tc.wantError && (pr.URL != explicitTestURL || pr.BaseBranch != "main") {
+			if !tc.wantError && (pr.URL != explicitTestURL || pr.BaseBranch != "main" || pr.HeadSHA != explicitTestHead) {
 				t.Fatalf("unexpected PR: %+v", pr)
 			}
 		})

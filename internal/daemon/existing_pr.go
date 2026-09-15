@@ -59,7 +59,7 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 		if err := bindExplicitGateBranch(ctx, gateDir, p.Branch, sha); err != nil {
 			return "", err
 		}
-		return m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, sha, "", "existing-pr", nil, p.Intent, db.RunIntentSourceAgent, "", "", "", "", "", p.URL)
+		return m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, sha, sha, "existing-pr", nil, p.Intent, db.RunIntentSourceAgent, "", "", "", "", "", p.URL)
 	})
 }
 

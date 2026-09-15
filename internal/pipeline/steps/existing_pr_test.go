@@ -1,12 +1,15 @@
 package steps
 
 import (
+	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -69,13 +72,15 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
 		name, replace, with string
+		liveHead            string
 		unavailable         bool
 	}{
 		{name: "valid fork origin"},
 		{name: "wrong source ref", replace: `"ref":"feature"`, with: `"ref":"other"`},
 		{name: "wrong source repository", replace: `"full_name":"contributor/widgets"`, with: `"full_name":"contributor/other"`},
 		{name: "wrong target repository", replace: `"full_name":"upstream/widgets"`, with: `"full_name":"elsewhere/widgets"`},
-		{name: "wrong head", replace: `"sha":`, with: `"ignored_sha":`},
+		{name: "different head", liveHead: strings.Repeat("f", 40)},
+		{name: "missing head", replace: `"sha":`, with: `"ignored_sha":`},
 		{name: "closed target", replace: `"state":"open"`, with: `"state":"closed"`},
 		{name: "unavailable validation", unavailable: true},
 	} {
@@ -86,6 +91,9 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 			recordCompletedReviewStep(t, sctx)
 			env, log := fakeGH(t, "https://github.com/contributor/widgets/pull/2")
 			payload := existingPRFixture(head)
+			if tc.liveHead != "" {
+				payload = existingPRFixture(tc.liveHead)
+			}
 			if tc.replace != "" {
 				payload = strings.Replace(payload, tc.replace, tc.with, 1)
 			}
@@ -98,7 +106,7 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 				sctx.Env = append(sctx.Env, "FAKE_CLI_EXISTING_PR_ERROR=unavailable")
 			}
 			out, err := (&PRStep{}).Execute(sctx)
-			valid := tc.replace == "" && !tc.unavailable
+			valid := tc.replace == "" && tc.liveHead == "" && !tc.unavailable
 			if valid && (err != nil || out.PRURL != fixtureExistingPR) {
 				t.Fatalf("out=%+v err=%v", out, err)
 			}
@@ -160,6 +168,58 @@ func TestPRStep_ExplicitTargetKeepsAuthorTitleAndBody(t *testing.T) {
 	}
 	if strings.TrimSpace(parts.before) != strings.TrimSpace(author) {
 		t.Fatalf("author narrative was rewritten:\n%s", body)
+	}
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logs), "--title") {
+		t.Fatalf("author title was rewritten:\n%s", logs)
+	}
+}
+
+// An empty description is still the author's: a repository template fills a
+// blank body on the repository's own pull requests, never on a pull request the
+// run is only associated with.
+func TestPRStep_ExplicitTargetWithEmptyBodyIsNotTemplated(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	drafted := false
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		drafted = true
+		data, _ := json.Marshal(prContent{Title: "drafted title", Body: filledPRTemplate})
+		return &agent.Result{Output: data}, nil
+	}
+	pinFixturePR(t, sctx)
+	recordCompletedReviewStep(t, sctx)
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, logFile := fakeGH(t, "")
+	sctx.Env = append(env,
+		"FAKE_CLI_EXISTING_PR_JSON="+existingPRFixture(sctx.Run.HeadSHA),
+		"FAKE_CLI_EXISTING_PR_ENDPOINT=repos/upstream/widgets/pulls/168",
+		"FAKE_CLI_PR_BODY_FILE="+bodyFile,
+		"FAKE_CLI_PR_TITLE=Author title",
+	)
+	out, err := (&PRStep{}).Execute(sctx)
+	if err != nil || out.PRURL != fixtureExistingPR {
+		t.Fatalf("out=%+v err=%v", out, err)
+	}
+	if drafted {
+		t.Fatal("drafted a narrative for a pull request the run does not own")
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := parsePROwnedBody(string(body))
+	if err != nil || !parts.managed {
+		t.Fatalf("pipeline evidence is not separately owned: %+v, %v", parts, err)
+	}
+	if strings.TrimSpace(parts.before) != "" {
+		t.Fatalf("empty author description was filled in:\n%s", body)
 	}
 	logs, err := os.ReadFile(logFile)
 	if err != nil {
