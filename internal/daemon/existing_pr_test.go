@@ -265,6 +265,24 @@ func TestExistingPRAssociationIsReusedUntilReplacedOrRetired(t *testing.T) {
 		t.Fatalf("unflagged run head = %s, want the new head %s", reused.HeadSHA, next)
 	}
 
+	// A merged or closed target ends the association's usefulness, and every
+	// later run on the branch fails until the operator acts - so the failure
+	// has to say what the supported action is.
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", strings.Replace(prPayload(target, "168", next), `"state":"open"`, `"state":"closed"`, 1))
+	err = client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: unflagged.RunID}, &ipc.RerunResult{})
+	if err == nil || !strings.Contains(err.Error(), "--retire-existing-pr") {
+		t.Fatalf("stale association failure did not name the supported way out: %v", err)
+	}
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", prPayload(target, "168", next))
+
+	// Publishing to someone else's pull request means running the whole
+	// pipeline, so a skip is refused at launch rather than failing at the step
+	// that needed the published head.
+	err = client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: unflagged.RunID, SkipSteps: []types.StepName{types.StepPush}}, &ipc.RerunResult{})
+	if err == nil || !strings.Contains(err.Error(), "cannot skip steps") {
+		t.Fatalf("associated branch accepted a skip: %v", err)
+	}
+
 	// Retiring is a between-runs decision: an active run keeps publishing
 	// where it was validated to publish.
 	active, err := d.InsertRun(repo.ID, "feature", next, "")

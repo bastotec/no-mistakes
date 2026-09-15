@@ -2,6 +2,7 @@ package steps
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -40,7 +41,7 @@ func ValidateExistingPRIdentity(sctx *pipeline.StepContext) (scm.Host, *scm.PR, 
 		return nil, nil, nil
 	}
 	if sctx.Run.PRURL == nil || *sctx.Run.PRURL != raw {
-		return nil, nil, fmt.Errorf("explicit PR differs from persisted publication identity")
+		return nil, nil, staleAssociation(sctx, fmt.Errorf("explicit PR differs from persisted publication identity"))
 	}
 	host, reason := buildHost(sctx, resolvedProvider(sctx))
 	if host == nil {
@@ -59,9 +60,18 @@ func ValidateExistingPRIdentity(sctx *pipeline.StepContext) (scm.Host, *scm.PR, 
 	}
 	pr, err := gh.ValidateExistingPRIdentity(sctx.Ctx, raw, github.RepoSlug(pushURL), sctx.Run.Branch)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, staleAssociation(sctx, err)
 	}
 	return host, pr, nil
+}
+
+// staleAssociation carries the supported way out of an association that no
+// longer describes this branch - a merged or closed pull request, a source ref
+// that moved - so the operator is not left repeating a failing run. It never
+// retires anything itself and never falls back to another pull request.
+func staleAssociation(sctx *pipeline.StepContext, err error) error {
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	return fmt.Errorf("%w; %s publishes to %s - if that is no longer the right target, run `no-mistakes axi run --retire-existing-pr` on the branch to return to ordinary discovery", err, branch, existingPRURL(sctx))
 }
 
 // explicitTargetRepo is the owner/repo the run's pull request lives in, or ""

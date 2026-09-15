@@ -171,9 +171,6 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			if _, _, err := ValidateExistingPR(sctx, sctx.Run.HeadSHA); err != nil {
-				return nil, err
-			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit); err != nil {
 				return nil, err
 			}

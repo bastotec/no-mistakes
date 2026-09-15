@@ -1222,10 +1222,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		repo = refreshed
 	}
 
-	if existingPR != "" && (len(skipSteps) != 0 || strings.TrimSpace(prBaseBranch) != "") {
-		trackStartFailure("explicit_pr_flag_conflict")
-		return "", fmt.Errorf("explicit PR runs cannot skip steps or retarget the base")
-	}
 	// A branch keeps the pull request an explicit association proved, so every
 	// later launch - unflagged, push-hook or rerun - publishes to that same
 	// review object instead of discovering or creating another one. A branch
@@ -1239,9 +1235,16 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 		target = stored
 	}
+	// A run that publishes to someone else's pull request delivers the whole
+	// pipeline: skipping a step leaves the target updated from an unvalidated
+	// head, or not updated at all, and its base comes from the pull request.
+	if target != "" && len(skipSteps) != 0 {
+		trackStartFailure("associated_pr_skip_conflict")
+		return "", fmt.Errorf("branch %s publishes to %s, so its runs cannot skip steps; run `no-mistakes axi run --retire-existing-pr` on the branch to return to ordinary discovery", branch, target)
+	}
 	if target != "" && strings.TrimSpace(prBaseBranch) != "" {
 		trackStartFailure("associated_pr_base_conflict")
-		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; retire the association to retarget it", branch, target)
+		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; run `no-mistakes axi run --retire-existing-pr` on the branch to retarget it", branch, target)
 	}
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch)
