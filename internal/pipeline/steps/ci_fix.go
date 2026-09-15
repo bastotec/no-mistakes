@@ -147,6 +147,28 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 // reviewed head is provable, held for revalidation when it is not or when
 // ci.revalidate_repairs asks for it outright. See recordRepair.
 // The result reports whether the recorded head advanced and whether the repair
+// resolveCIRepairBases answers the two commits a repair turn is given: the base
+// its diff is measured from, and the commit a merge-conflict repair rebases
+// onto. An associated run proves its live integration branch once and uses that
+// tip for both; it never resolves the branch a second time, because a failed
+// second lookup would answer with the run's own recorded base - which for an
+// associated run is its head, so the agent would be told to rebase onto the
+// commit it is already on.
+func resolveCIRepairBases(ctx context.Context, sctx *pipeline.StepContext, baseBranch string) (string, string, error) {
+	integrationTip, err := requireRunIntegrationBase(ctx, sctx, baseBranch)
+	if err != nil {
+		return "", "", err
+	}
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	if err != nil {
+		return "", "", err
+	}
+	if integrationTip != "" {
+		return baseSHA, integrationTip, nil
+	}
+	return baseSHA, resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch), nil
+}
+
 // must revalidate; a zero result means the agent produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
 	ctx := sctx.Ctx
@@ -160,14 +182,10 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	if pr != nil && strings.TrimSpace(pr.BaseBranch) != "" {
 		baseBranch = strings.TrimSpace(pr.BaseBranch)
 	}
-	if err := requireRunIntegrationBase(ctx, sctx, baseBranch); err != nil {
-		return ciRepairResult{}, err
-	}
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	baseSHA, rebaseBaseSHA, err := resolveCIRepairBases(ctx, sctx, baseBranch)
 	if err != nil {
 		return ciRepairResult{}, err
 	}
-	rebaseBaseSHA := resolveRunDefaultBranchTipSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	promptBaseSHA := baseSHA
 	if mergeConflict {
 		promptBaseSHA = rebaseBaseSHA

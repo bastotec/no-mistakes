@@ -63,22 +63,26 @@ func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallb
 }
 
 // requireRunIntegrationBase refreshes the branch an associated run is about to
-// measure against and proves it is readable. CI repair is the one place the
-// live base can differ from the one the launch validated, because the
-// maintainer can retarget the pull request mid-run. Unassociated runs keep
-// their existing behavior: they read the ref their own fetch maintains.
-func requireRunIntegrationBase(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
+// measure against, proves it is readable, and returns its tip. CI repair is the
+// one place the live base can differ from the one the launch validated, because
+// the maintainer can retarget the pull request mid-run; it rebases onto the tip
+// proven here rather than resolving the same branch a second time, where a
+// failed lookup would quietly answer with the run's own recorded base.
+// Unassociated runs are unaffected: they get "" and keep reading the ref their
+// own fetch maintains.
+func requireRunIntegrationBase(ctx context.Context, sctx *pipeline.StepContext, branch string) (string, error) {
 	target := existingPRURL(sctx)
 	if target == "" {
-		return nil
+		return "", nil
 	}
 	if err := FetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
-		return fmt.Errorf("fetch integration branch %s of %s: %w", branch, target, err)
+		return "", fmt.Errorf("fetch integration branch %s of %s: %w", branch, target, err)
 	}
-	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", runIntegrationRef(sctx, branch)+"^{commit}"); err != nil {
-		return fmt.Errorf("integration branch %s of %s is unreadable after fetching it", branch, target)
+	tip, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", runIntegrationRef(sctx, branch)+"^{commit}")
+	if err != nil || strings.TrimSpace(tip) == "" {
+		return "", fmt.Errorf("integration branch %s of %s is unreadable after fetching it", branch, target)
 	}
-	return nil
+	return strings.TrimSpace(tip), nil
 }
 
 // usableBaseSHA reports whether a recorded base can be handed to git as one

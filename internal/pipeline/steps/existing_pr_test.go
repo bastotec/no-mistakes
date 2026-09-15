@@ -126,6 +126,15 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 			if !valid && err == nil {
 				t.Fatalf("wanted failure, got %+v", out)
 			}
+			if tc.liveHead != "" {
+				// A source branch that moved outside the run names both heads
+				// and the supported recovery, not just a bare SHA.
+				for _, want := range []string{shortSHA(tc.liveHead), shortSHA(head), "--retire-existing-pr"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("out-of-band head refusal omitted %q: %v", want, err)
+					}
+				}
+			}
 			data, _ := os.ReadFile(log)
 			calls := string(data)
 			if strings.Contains(calls, "pr list") || strings.Contains(calls, "pr create") {
@@ -242,6 +251,48 @@ func TestPRStep_ExplicitTargetWithEmptyBodyIsNotTemplated(t *testing.T) {
 	}
 	if strings.Contains(string(logs), "--title") {
 		t.Fatalf("author title was rewritten:\n%s", logs)
+	}
+}
+
+// Both halves of a gate prompt must agree about what the change integrates
+// with: an associated run measures its base from the pull request's branch in
+// the pull request's repository, so the prompt names that, not the fork's
+// default branch. A run with no association keeps naming the repository
+// default exactly as before.
+func TestReviewStep_PromptNamesTheBranchItsBaseWasMeasuredFrom(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name       string
+		associated bool
+		want       string
+	}{
+		{name: "associated", associated: true, want: "- default branch: upstream/widgets:main"},
+		{name: "unassociated", want: "- default branch: main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			prompts := make(chan string, 4)
+			ag := &mockAgent{name: "prompt-probe", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				prompts <- opts.Prompt
+				return &agent.Result{Output: json.RawMessage(`{"findings":[],"risk_level":"low","risk_rationale":"none","risk_scope":"source-or-external"}`)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			if tc.associated {
+				pinFixturePR(t, sctx)
+				stubFixtureIntegrationBase(t, sctx)
+			}
+			if _, err := (&ReviewStep{}).Execute(sctx); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case prompt := <-prompts:
+				if !strings.Contains(prompt, tc.want) {
+					t.Fatalf("prompt did not name %q:\n%s", tc.want, prompt)
+				}
+			default:
+				t.Fatal("review never reached the agent")
+			}
+		})
 	}
 }
 

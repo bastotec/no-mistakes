@@ -209,12 +209,12 @@ func TestExplicitPRDiffBaseFollowsTheCallerSelectedUpstreamBranch(t *testing.T) 
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
 	// CI repair is the one caller that re-reads the live base, and it refreshes
 	// that branch before measuring against it.
-	if err := requireRunIntegrationBase(ctx, sctx, "release/2.0"); err != nil {
-		t.Fatal(err)
-	}
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/2.0")
+	baseSHA, rebaseSHA, err := resolveCIRepairBases(ctx, sctx, "release/2.0")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if rebaseSHA != releaseHead {
+		t.Fatalf("CI repair would rebase onto %s, want the live base %s", rebaseSHA, releaseHead)
 	}
 	if baseSHA != releaseHead {
 		t.Fatalf("diff base = %s, want the live base %s", baseSHA, releaseHead)
@@ -266,11 +266,16 @@ func TestExplicitPRUnreadableIntegrationBaseStopsInsteadOfSubstituting(t *testin
 	// An explicit launch records the submitted head as the run's base.
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
 	sctx.Run.BaseSHA = sctx.Run.HeadSHA
-	if err := requireRunIntegrationBase(ctx, sctx, "release/never-published"); err == nil {
-		t.Fatal("CI repair accepted an integration branch it could not read")
-	}
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/never-published")
+	// CI repair asks for both commits at once: neither may be answered with the
+	// run's own head, which for an associated run is its recorded base.
+	diffBase, rebaseSHA, err := resolveCIRepairBases(ctx, sctx, "release/never-published")
 	if err == nil {
+		t.Fatalf("CI repair proceeded from a substituted base %s and would rebase onto %s", diffBase, rebaseSHA)
+	}
+	if rebaseSHA == sctx.Run.HeadSHA || diffBase == sctx.Run.HeadSHA {
+		t.Fatalf("CI repair answered with the branch's own head: base=%s rebase=%s", diffBase, rebaseSHA)
+	}
+	if baseSHA, baseErr := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/never-published"); baseErr == nil {
 		t.Fatalf("measured the change from a substituted base %s", baseSHA)
 	}
 	if launched, launchedErr := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, launchBase); launchedErr != nil || launched != parentHead {

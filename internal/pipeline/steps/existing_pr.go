@@ -26,7 +26,7 @@ func ValidateExistingPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm
 		return host, pr, err
 	}
 	if head == "" || pr.HeadSHA != head {
-		return nil, nil, fmt.Errorf("explicit PR head does not match expected head %s", head)
+		return nil, nil, fmt.Errorf("%s is at %s, not the %s this run published: its source branch moved outside this run - validate the new head with a fresh run on the branch, or run `no-mistakes axi run --retire-existing-pr` on it if that pull request is no longer the target", existingPRURL(sctx), shortSHA(pr.HeadSHA), shortSHA(head))
 	}
 	return host, pr, nil
 }
@@ -86,6 +86,17 @@ func explicitTargetRepo(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return repo
+}
+
+// integrationBranchPromptLabel names the branch a prompt's base commit was
+// measured from. An associated run measures against a branch in the pull
+// request's repository, which is not the fork "origin" points at; every other
+// run keeps naming the repository default exactly as before.
+func integrationBranchPromptLabel(sctx *pipeline.StepContext) string {
+	if explicitTargetRepo(sctx) != "" {
+		return integrationBranchLabel(sctx, runIntegrationBranch(sctx))
+	}
+	return sctx.Repo.DefaultBranch
 }
 
 // integrationBranchLabel names the branch a run integrates with the way an
