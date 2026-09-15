@@ -25,7 +25,10 @@ func (s *ReviewStep) Name() types.StepName { return types.StepReview }
 
 func (s *ReviewStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	ctx := sctx.Ctx
-	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, runIntegrationBranch(sctx))
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, runIntegrationBranch(sctx))
+	if err != nil {
+		return nil, err
+	}
 	branch := sctx.Run.Branch
 	ignorePatterns := "none"
 	if len(sctx.Config.IgnorePatterns) > 0 {

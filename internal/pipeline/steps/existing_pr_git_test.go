@@ -150,7 +150,10 @@ func TestExplicitPRDiffBaseIsTheUpstreamBaseNotTheForkDefault(t *testing.T) {
 		t.Fatal(err)
 	}
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
-	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, sctx.Repo.DefaultBranch)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if baseSHA != parentHead {
 		t.Fatalf("diff base = %s, want the pull request's base %s (fork default is %s)", baseSHA, parentHead, forkMain)
 	}
@@ -204,7 +207,15 @@ func TestExplicitPRDiffBaseFollowsTheCallerSelectedUpstreamBranch(t *testing.T) 
 		t.Fatal(err)
 	}
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
-	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/2.0")
+	// CI repair is the one caller that re-reads the live base, and it refreshes
+	// that branch before measuring against it.
+	if err := requireRunIntegrationBase(ctx, sctx, "release/2.0"); err != nil {
+		t.Fatal(err)
+	}
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if baseSHA != releaseHead {
 		t.Fatalf("diff base = %s, want the live base %s", baseSHA, releaseHead)
 	}
@@ -215,10 +226,12 @@ func TestExplicitPRDiffBaseFollowsTheCallerSelectedUpstreamBranch(t *testing.T) 
 }
 
 // A retargeted pull request whose new base cannot be read - the fetch failed,
-// or the branch is gone - must still measure the contributor's own commits. An
-// associated run records its submitted head as its base, so falling back to it
-// would diff HEAD against itself: an empty diff no step reports as a failure.
-func TestExplicitPRDiffBaseNeverCollapsesWhenTheLiveBaseIsUnreadable(t *testing.T) {
+// or the branch is gone - stops the run. Measuring from the branch the run was
+// launched against would hand the fix agent every commit the new base has
+// accumulated since, and measuring from the run's own recorded base (its
+// submitted head) would diff HEAD against itself: an empty diff no step
+// reports as a failure. Neither substitution is acceptable.
+func TestExplicitPRUnreadableIntegrationBaseStopsInsteadOfSubstituting(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
 	parent := t.TempDir()
@@ -253,12 +266,15 @@ func TestExplicitPRDiffBaseNeverCollapsesWhenTheLiveBaseIsUnreadable(t *testing.
 	// An explicit launch records the submitted head as the run's base.
 	sctx.Run.HeadSHA = gitCmd(t, dir, "rev-parse", "HEAD")
 	sctx.Run.BaseSHA = sctx.Run.HeadSHA
-	baseSHA := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/never-published")
-	if baseSHA != parentHead {
-		t.Fatalf("diff base = %s, want the branch the run was launched against %s", baseSHA, parentHead)
+	if err := requireRunIntegrationBase(ctx, sctx, "release/never-published"); err == nil {
+		t.Fatal("CI repair accepted an integration branch it could not read")
 	}
-	if changed := gitCmd(t, dir, "diff", "--name-only", baseSHA, "HEAD"); strings.TrimSpace(changed) == "" {
-		t.Fatal("gates would review an empty diff")
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, "release/never-published")
+	if err == nil {
+		t.Fatalf("measured the change from a substituted base %s", baseSHA)
+	}
+	if launched, launchedErr := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, launchBase); launchedErr != nil || launched != parentHead {
+		t.Fatalf("the branch the run was launched against stopped resolving: %s, %v", launched, launchedErr)
 	}
 }
 

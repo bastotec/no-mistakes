@@ -25,6 +25,29 @@ func TestAxiExistingPRFlagRejectsUnsupportedCombinations(t *testing.T) {
 	}
 }
 
+// Retiring an association starts no run, so a launch flag passed with it would
+// be silently dropped - including --intent, which describes work the caller
+// believes is about to be validated.
+func TestAxiRetireExistingPRRejectsLaunchFlags(t *testing.T) {
+	for _, extra := range [][]string{
+		{"--intent", "revalidate after retiring"},
+		{"--skip", "lint"},
+		{"--base-branch", "release"},
+		{"--yes"},
+		{"--launch-nonce", "nonce", "--validation-generation", "gen"},
+		{"--existing-pr", axiExistingPRURL},
+	} {
+		args := append([]string{"axi", "run", "--retire-existing-pr"}, extra...)
+		out, err := executeCmd(args...)
+		if err == nil || !strings.Contains(out, "cannot be combined") {
+			t.Fatalf("args=%v error=%v output=%s", args, err, out)
+		}
+		if !strings.Contains(out, extra[0]) {
+			t.Fatalf("failure did not name the discarded flag %s: %s", extra[0], out)
+		}
+	}
+}
+
 func TestAxiExistingPRReattachmentMustMatchPin(t *testing.T) {
 	for _, target := range []string{"", axiExistingPRURL, "https://github.com/upstream/widgets/pull/169"} {
 		t.Run(target, func(t *testing.T) {

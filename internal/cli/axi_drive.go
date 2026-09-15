@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 	"unicode"
 
+	"github.com/spf13/pflag"
 	toon "github.com/toon-format/toon-go"
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
@@ -180,8 +182,8 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
 				if retireExistingPR {
-					if existingPR != "" {
-						return emitError(cmd, 2, "--retire-existing-pr cannot be combined with --existing-pr")
+					if conflicting := changedFlagsWith(cmd, "retire-existing-pr"); len(conflicting) > 0 {
+						return emitError(cmd, 2, fmt.Sprintf("--retire-existing-pr starts no run, so it cannot be combined with %s", strings.Join(conflicting, ", ")))
 					}
 					return runAxiRetireExistingPR(cmd)
 				}
@@ -203,6 +205,21 @@ func newAxiRunCmd() *cobra.Command {
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string) error {
 	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait, "")
+}
+
+// changedFlagsWith names the flags the caller set alongside one that starts no
+// run. Retiring an association is not a launch, so a launch flag passed with it
+// would be silently discarded - including --intent, which the caller supplied
+// to describe work that will never run.
+func changedFlagsWith(cmd *cobra.Command, self string) []string {
+	var conflicting []string
+	cmd.Flags().Visit(func(f *pflag.Flag) {
+		if f.Name != self {
+			conflicting = append(conflicting, "--"+f.Name)
+		}
+	})
+	sort.Strings(conflicting)
+	return conflicting
 }
 
 // runAxiRetireExistingPR drops the current branch's remembered pull request

@@ -23,6 +23,18 @@ func existingPRFixture(head string) string {
 	return fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","merged":false,"base":{"ref":"main","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, fixtureExistingPR, head)
 }
 
+// stubFixtureIntegrationBase stands the pull request's repository in with the
+// worktree's own main branch and fetches the run's integration ref, which the
+// daemon establishes at launch and the rebase step refreshes before any gate
+// measures a diff against it.
+func stubFixtureIntegrationBase(t *testing.T, sctx *pipeline.StepContext) {
+	t.Helper()
+	gitCmd(t, sctx.WorkDir, "config", "url."+sctx.WorkDir+".insteadOf", "https://github.com/upstream/widgets.git")
+	if err := FetchRunUpstreamBranch(context.Background(), sctx, "main"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // The PR step always runs after the gates, so its evidence appendix has step
 // results to report.
 func recordCompletedReviewStep(t *testing.T, sctx *pipeline.StepContext) {
@@ -89,6 +101,7 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 			pinFixturePR(t, sctx)
 			recordCompletedReviewStep(t, sctx)
+			stubFixtureIntegrationBase(t, sctx)
 			env, log := fakeGH(t, "https://github.com/contributor/widgets/pull/2")
 			payload := existingPRFixture(head)
 			if tc.liveHead != "" {
@@ -142,6 +155,7 @@ func TestPRStep_ExplicitTargetKeepsAuthorTitleAndBody(t *testing.T) {
 	pinFixturePR(t, sctx)
 	sctx.Config.PR.TitleFormat = "PROJ-123: %s"
 	recordCompletedReviewStep(t, sctx)
+	stubFixtureIntegrationBase(t, sctx)
 	author := "## Overview\n\nHand-written upstream narrative.\n\nCloses https://github.com/upstream/widgets/issues/7\n"
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
@@ -192,6 +206,7 @@ func TestPRStep_ExplicitTargetWithEmptyBodyIsNotTemplated(t *testing.T) {
 	}
 	pinFixturePR(t, sctx)
 	recordCompletedReviewStep(t, sctx)
+	stubFixtureIntegrationBase(t, sctx)
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
 		t.Fatal(err)

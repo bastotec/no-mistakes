@@ -42,15 +42,43 @@ func resolveBaseSHA(ctx context.Context, sctx *pipeline.StepContext, workDir, ba
 // resolveBranchBaseSHA returns the branch base commit relative to the default
 // branch when possible. This keeps pipeline steps scoped to the full branch,
 // not just the last pushed delta. If merge-base cannot be determined, it falls
-// back to resolveBaseSHA.
-func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) string {
+// back to the run's recorded base and finally to the empty tree.
+//
+// An associated run has no such fallback: its integration branch lives in
+// another repository, and every other answer either measures the change from a
+// different branch - handing the fix agent commits the contributor never wrote
+// - or from the run's own head, which is an empty diff no step reports as a
+// failure. It stops instead.
+func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) (string, error) {
 	if mb := mergeBaseWithDefaultBranch(ctx, sctx, sctx.WorkDir, defaultBranch); mb != "" {
-		return mb
+		return mb, nil
+	}
+	if target := existingPRURL(sctx); target != "" {
+		return "", fmt.Errorf("integration branch %s of %s is unreadable in this run; refusing to measure the change from another base", defaultBranch, target)
 	}
 	if usableBaseSHA(fallbackBaseSHA) {
-		return fallbackBaseSHA
+		return fallbackBaseSHA, nil
 	}
-	return git.EmptyTreeSHA
+	return git.EmptyTreeSHA, nil
+}
+
+// requireRunIntegrationBase refreshes the branch an associated run is about to
+// measure against and proves it is readable. CI repair is the one place the
+// live base can differ from the one the launch validated, because the
+// maintainer can retarget the pull request mid-run. Unassociated runs keep
+// their existing behavior: they read the ref their own fetch maintains.
+func requireRunIntegrationBase(ctx context.Context, sctx *pipeline.StepContext, branch string) error {
+	target := existingPRURL(sctx)
+	if target == "" {
+		return nil
+	}
+	if err := FetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
+		return fmt.Errorf("fetch integration branch %s of %s: %w", branch, target, err)
+	}
+	if _, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", runIntegrationRef(sctx, branch)+"^{commit}"); err != nil {
+		return fmt.Errorf("integration branch %s of %s is unreadable after fetching it", branch, target)
+	}
+	return nil
 }
 
 // usableBaseSHA reports whether a recorded base can be handed to git as one
@@ -133,12 +161,6 @@ func mergeBaseWithDefaultBranch(ctx context.Context, sctx *pipeline.StepContext,
 	if len(refs) == 0 {
 		return ""
 	}
-	if existingPRURL(sctx) != "" {
-		// The caller names the branch it integrates with, and CI reads that
-		// from the live pull request, so refresh it rather than trusting a ref
-		// an earlier step fetched for a base the maintainer has since changed.
-		_ = FetchRunUpstreamBranch(ctx, sctx, defaultBranch)
-	}
 	for _, ref := range refs {
 		mb, err := git.Run(ctx, workDir, "merge-base", "HEAD", ref)
 		if err == nil && strings.TrimSpace(mb) != "" {
@@ -150,24 +172,17 @@ func mergeBaseWithDefaultBranch(ctx context.Context, sctx *pipeline.StepContext,
 
 // integrationMergeBaseRefs names the refs a diff base may be measured from.
 // An associated run is answered by the caller's branch in its own integration
-// namespace alone: the registered repository's origin/<branch> is a different
-// repository there, and measuring against it reports - and lets the fix agent
-// edit - commits the contributor never wrote.
+// namespace alone - never by a second ref: the registered repository's
+// origin/<branch> and any other upstream branch both report, and let the fix
+// agent edit, commits the contributor never wrote. The ref is the snapshot the
+// launch validated and the rebase step refreshed; CI repair refreshes it again
+// through requireRunIntegrationBase before it reads the live base.
 func integrationMergeBaseRefs(sctx *pipeline.StepContext, defaultBranch string) []string {
 	if strings.TrimSpace(defaultBranch) == "" {
 		return nil
 	}
 	if existingPRURL(sctx) != "" {
-		refs := []string{runIntegrationRef(sctx, defaultBranch)}
-		// The caller's branch is the answer. When it cannot be read - the
-		// fetch failed, or the maintainer retargeted onto a branch that has
-		// since gone - the branch this run was launched against still measures
-		// the contributor's own commits, which an unreadable ref would
-		// otherwise reduce to an empty diff.
-		if launched := effectivePRBaseBranch(sctx); launched != defaultBranch {
-			refs = append(refs, runIntegrationRef(sctx, launched))
-		}
-		return refs
+		return []string{runIntegrationRef(sctx, defaultBranch)}
 	}
 	return []string{"origin/" + defaultBranch, defaultBranch}
 }
