@@ -18,9 +18,6 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 	if _, _, err := github.ExistingPRTarget(p.URL); err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(p.Intent) == "" {
-		return "", fmt.Errorf("intent is required")
-	}
 	repo, err := m.db.GetRepo(p.RepoID)
 	if err != nil {
 		return "", err
@@ -41,6 +38,13 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 				return active.ID, nil
 			}
 			return "", fmt.Errorf("branch already has an active run; explicit PR target cannot replace it")
+		}
+		// Only a run that is actually about to start needs the caller's
+		// account of the work. Reattaching to the run this call already proved
+		// is the same one is the caller observing what is in flight, and the
+		// idempotent return above must be reachable without re-supplying it.
+		if strings.TrimSpace(p.Intent) == "" {
+			return "", fmt.Errorf("intent is required")
 		}
 		if _, err := git.Run(ctx, repo.WorkingPath, "check-ref-format", "refs/heads/"+p.Branch); err != nil {
 			return "", fmt.Errorf("invalid source branch")

@@ -13,7 +13,12 @@ import (
 // discover or create another one. Nothing here is written before the forge has
 // proven the target, so a refused launch leaves the branch mapped exactly
 // where it already was.
-func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL string) error {
+//
+// The pull request's own base branch rides the same write. `pr_base_branch`
+// otherwise means an operator `--base-branch` override, and that is exactly how
+// a later rerun reads it (`explicitRunTarget`), so a base persisted without the
+// pin beside it would be inherited as an override the operator never made.
+func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL, prBaseBranch string) error {
 	ts := now()
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -21,8 +26,8 @@ func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL string) err
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(
-		`UPDATE runs SET existing_pr_url = ?, pr_url = ?, updated_at = ? WHERE id = ?`,
-		prURL, prURL, ts, runID,
+		`UPDATE runs SET existing_pr_url = ?, pr_url = ?, pr_base_branch = ?, updated_at = ? WHERE id = ?`,
+		prURL, prURL, prBaseBranch, ts, runID,
 	)
 	if err != nil {
 		return fmt.Errorf("pin run to existing pr: %w", err)

@@ -322,18 +322,19 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
 		}
 		if active != nil {
-			// A run records its explicit target only once its launch has
-			// proven it on the forge, so an absent one means that launch has
-			// not decided yet - not that it decided on another pull request.
-			// This lookup holds no branch lock and cannot tell those apart, so
-			// an undetermined target is handed to the daemon below, which does
-			// hold it and answers either with the same run or with what
-			// actually conflicts.
-			undetermined := existingPR != "" && active.ExistingPRURL == nil
-			if existingPR != "" && active.ExistingPRURL != nil && *active.ExistingPRURL != existingPR {
-				return emitError(cmd, 2, "active run has a different explicit PR target; refusing to reattach")
-			}
-			if !undetermined {
+			if existingPR != "" {
+				// Whether this reattaches or conflicts is the daemon's call,
+				// not this lookup's. `runs.existing_pr_url` is legitimately
+				// absent both for an ordinary run's whole life and while an
+				// explicit launch is still proving its target, and without the
+				// branch lock those two cannot be told apart - so the call goes
+				// to the daemon, whose own check does hold that lock, and its
+				// answer is reported verbatim.
+				runID, err = startExistingPRRun(env, branch, headSHA, intent, existingPR)
+				if err != nil {
+					return emitError(cmd, existingPRLaunchExitCode(err), err.Error())
+				}
+			} else {
 				if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
 					return emitError(cmd, 2, err.Error(),
 						"Omit --base-branch to reattach, or abort the active run before starting a new one")
@@ -369,9 +370,7 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			if state := freshRunBranchOwnershipState(ctx, env); state != nil {
 				return emitBranchOwnershipError(cmd, &branchOwnershipError{state: *state})
 			}
-			var result ipc.RerunResult
-			err = env.client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, Intent: intent, URL: existingPR}, &result)
-			runID = result.RunID
+			runID, err = startExistingPRRun(env, branch, headSHA, intent, existingPR)
 		} else if launchNonce != "" {
 			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, launchNonce, validationGeneration)
 			if err == nil {
@@ -399,6 +398,30 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, run, ciReady)
+}
+
+// startExistingPRRun asks the daemon to launch or reattach an explicit-target
+// run. The daemon holds the branch lock for that whole decision, so it is the
+// only place that can tell a reattach from a conflict.
+func startExistingPRRun(env *axiEnv, branch, headSHA, intent, existingPR string) (string, error) {
+	var result ipc.RerunResult
+	if err := env.client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, Intent: intent, URL: existingPR}, &result); err != nil {
+		return "", err
+	}
+	return result.RunID, nil
+}
+
+// existingPRLaunchExitCode keeps the agent-facing contract that exit 2 means
+// "change the invocation". A refusal the daemon reasoned about - the branch
+// already has a different active run, the submitted head is not the branch's -
+// is exactly that. A daemon that does not know the method, or a transport
+// failure, is not something the caller can rephrase, so it stays exit 1.
+func existingPRLaunchExitCode(err error) int {
+	var rpcErr *ipc.RPCError
+	if errors.As(err, &rpcErr) && rpcErr.Code != ipc.ErrMethodNotFound {
+		return 2
+	}
+	return 1
 }
 
 func digestLaunchIntent(intent string) string {

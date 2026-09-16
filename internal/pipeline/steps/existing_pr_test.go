@@ -56,7 +56,7 @@ func pinFixturePR(t *testing.T, sctx *pipeline.StepContext) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sctx.DB.AssociateRunWithExistingPR(run.ID, sctx.Repo.ID, sctx.Run.Branch, fixtureExistingPR); err != nil {
+	if err := sctx.DB.AssociateRunWithExistingPR(run.ID, sctx.Repo.ID, sctx.Run.Branch, fixtureExistingPR, ""); err != nil {
 		t.Fatal(err)
 	}
 	run, err = sctx.DB.GetRun(run.ID)

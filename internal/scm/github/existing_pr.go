@@ -72,7 +72,7 @@ func (h *Host) ValidateExistingPRIdentity(ctx context.Context, raw, sourceRepo, 
 	if p.URL != "" && p.URL != raw {
 		return nil, fmt.Errorf("explicit PR answers to %s, not %s; re-run with that canonical URL if it is the pull request you mean", p.URL, raw)
 	}
-	if strconv.Itoa(p.Number) != number || p.URL != raw || !strings.EqualFold(p.Base.Repo.FullName, repo) || !strings.EqualFold(p.Base.Repo.URL, "https://github.com/"+repo) {
+	if strconv.Itoa(p.Number) != number || p.URL == "" || !strings.EqualFold(p.Base.Repo.FullName, repo) || !strings.EqualFold(p.Base.Repo.URL, "https://github.com/"+repo) {
 		return nil, fmt.Errorf("explicit PR response repository/identity mismatch")
 	}
 	if p.State != "open" || p.Merged || p.Base.Ref == "" {

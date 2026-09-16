@@ -20,7 +20,7 @@ func TestExistingPRPinSurvivesReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target); err != nil {
+	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target, "release/2.0"); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {
@@ -54,15 +54,15 @@ func TestExplicitTargetPinsTheRunAndAssociatesTheBranchInOneWrite(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Creating the run proves nothing about the target, so it pins nothing and
-	// associates nothing.
-	if run.ExistingPRURL != nil || run.PRURL != nil {
+	// Creating the run proves nothing about the target, so it pins nothing,
+	// associates nothing, and records no base to integrate with.
+	if run.ExistingPRURL != nil || run.PRURL != nil || run.PRBaseBranch != nil {
 		t.Fatalf("run insert pinned an unproven target: %+v", run)
 	}
 	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != "" {
 		t.Fatalf("branch association after insert = %q (%v), want none", stored, err)
 	}
-	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target); err != nil {
+	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target, "release/2.0"); err != nil {
 		t.Fatal(err)
 	}
 	pinned, err := d.GetRun(run.ID)
@@ -71,6 +71,11 @@ func TestExplicitTargetPinsTheRunAndAssociatesTheBranchInOneWrite(t *testing.T) 
 	}
 	if pinned.ExistingPRURL == nil || *pinned.ExistingPRURL != target || pinned.PRURL == nil || *pinned.PRURL != target {
 		t.Fatalf("run not pinned to %s: %+v", target, pinned)
+	}
+	// A base with no pin beside it reads as an operator --base-branch override
+	// to the next rerun, so the two are durable together or not at all.
+	if pinned.PRBaseBranch == nil || *pinned.PRBaseBranch != "release/2.0" {
+		t.Fatalf("pull request base did not ride the pin: %+v", pinned.PRBaseBranch)
 	}
 	stored, err := d.GetBranchPRTarget(repo.ID, "feature")
 	if err != nil {
@@ -95,13 +100,13 @@ func TestFailedExplicitAssociationLeavesThePriorAssociationIntact(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := d.AssociateRunWithExistingPR(first.ID, repo.ID, "feature", original); err != nil {
+	if err := d.AssociateRunWithExistingPR(first.ID, repo.ID, "feature", original, "main"); err != nil {
 		t.Fatal(err)
 	}
 	// No such run: the pin cannot land, so neither may the association it
 	// travels with.
 	replacement := "https://github.com/upstream/widgets/pull/999"
-	if err := d.AssociateRunWithExistingPR("run-that-does-not-exist", repo.ID, "feature", replacement); err == nil {
+	if err := d.AssociateRunWithExistingPR("run-that-does-not-exist", repo.ID, "feature", replacement, "main"); err == nil {
 		t.Fatal("expected association against an unknown run to fail")
 	}
 	stored, err := d.GetBranchPRTarget(repo.ID, "feature")
@@ -110,5 +115,12 @@ func TestFailedExplicitAssociationLeavesThePriorAssociationIntact(t *testing.T) 
 	}
 	if stored != original {
 		t.Fatalf("branch association = %q, want the original %q", stored, original)
+	}
+	kept, err := d.GetRun(first.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kept.PRBaseBranch == nil || *kept.PRBaseBranch != "main" {
+		t.Fatalf("failed association disturbed the prior base: %+v", kept.PRBaseBranch)
 	}
 }

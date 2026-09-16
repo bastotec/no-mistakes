@@ -1450,6 +1450,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	// The run integrates with the branch the pull request actually targets, not
 	// the repository default: rebase, PR and CI all read this.
+	explicitBase := ""
 	if explicitPR != nil {
 		base, err := normalizeRunPRBaseBranch(explicitPR.BaseBranch)
 		if err != nil {
@@ -1463,11 +1464,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			trackStartFailure("fetch_existing_pr_base")
 			return "", err
 		}
-		if err := m.db.SetRunPRBaseBranch(run.ID, base); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("store_existing_pr_base")
-			return "", err
-		}
+		explicitBase = base
 		run.PRBaseBranch = &base
 	}
 
@@ -1510,13 +1507,13 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	})
 
 	// Every way this launch can still be refused is behind us, so this is where
-	// the target becomes the branch's. Nothing above reads it back from the
-	// database - validation and the integration base both read the in-memory
-	// run - so a refused launch leaves the branch mapped exactly where it
-	// already was, at every one of those failure points rather than only at the
-	// forge check.
+	// the target and the base it integrates with become durable. Nothing above
+	// reads either back from the database - validation and the integration base
+	// both read the in-memory run - so a refused launch leaves the branch mapped
+	// exactly where it already was, at every one of those failure points rather
+	// than only at the forge check.
 	if explicitPR != nil {
-		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target); err != nil {
+		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target, explicitBase); err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("associate_existing_pr")
 			return "", err
