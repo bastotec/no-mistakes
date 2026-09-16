@@ -106,9 +106,6 @@ func TestPreserveHistory_InitialPublicationAndAdditiveCIRepair(t *testing.T) {
 			calls := 0
 			f.sctx.Agent = &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				calls++
-				if !strings.Contains(opts.Prompt, "Never rebase, reset, amend") {
-					t.Error("fixer did not receive the history constraint")
-				}
 				writeCIFix(opts.CWD)
 				return &agent.Result{Output: []byte(`{"summary":"additive CI correction"}`)}, nil
 			}}
@@ -246,4 +243,19 @@ func TestPreserveHistory_InvalidPinsFailClosed(t *testing.T) {
 			t.Fatalf("invalid pin %q silently opted out: %v", bad, err)
 		}
 	}
+}
+
+// Every later step scopes its diff through origin/<base>, so the preserve-history
+// path must still refresh that remote-tracking ref even though it rebases nothing.
+func TestPreserveHistory_InitialValidationRefreshesThePinnedBaseRef(t *testing.T) {
+	f, base, originalParents := newHistoryFixture(t, false)
+	stale := gitCmd(t, f.dir, "rev-parse", base+"^")
+	gitCmd(t, f.dir, "update-ref", "refs/remotes/origin/main", stale)
+	if _, err := (&RebaseStep{}).Execute(f.sctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, f.dir, "rev-parse", "refs/remotes/origin/main"); got != base {
+		t.Fatalf("origin/main = %s, want the pinned base %s; later steps would review the base branch's own commits", got, base)
+	}
+	assertHistoryUntouched(t, f, originalParents)
 }

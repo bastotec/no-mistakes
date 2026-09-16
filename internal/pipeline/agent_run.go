@@ -61,12 +61,6 @@ func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, se
 	if sctx != nil {
 		ag = sctx.Agent
 		timeout = AgentTimeout(sctx.Config)
-		if sctx.Run != nil && sctx.Run.PreserveHistoryBaseSHA != nil {
-			// Guidance complements, rather than replaces, the deterministic
-			// pre-integration and pre-publication guards. Agents still execute
-			// trusted tools; this is not a Git sandbox.
-			opts.Prompt = "History-preserving run: make additive corrections only. Never rebase, reset, amend, squash, merge, or push. If a correction needs changing history or the integration base, stop and report that constraint.\n\n" + opts.Prompt
-		}
 	}
 	activity := observeAgentActivity(&opts)
 	return invokeAgent(parent, timeout, activity, func(ctx context.Context) (*agent.Result, error) {

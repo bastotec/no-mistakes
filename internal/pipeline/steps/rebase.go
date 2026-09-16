@@ -31,6 +31,12 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		if err := AssertHistoryPolicy(sctx); err != nil {
 			return nil, err
 		}
+		// Every later step scopes its diff against the base's remote-tracking
+		// ref, and refreshing it moves no history.
+		pinnedBase := effectivePRBaseBranch(sctx)
+		if err := fetchRunUpstreamBranch(sctx.Ctx, sctx, pinnedBase); err != nil {
+			sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", pinnedBase, err))
+		}
 		sctx.Log("preserve-history: exact integration pins verified; no rebase or merge performed")
 		return &pipeline.StepOutcome{}, nil
 	}

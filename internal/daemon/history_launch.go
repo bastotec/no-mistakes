@@ -125,7 +125,7 @@ func (m *RunManager) HandleStartHistoryRun(ctx context.Context, p *ipc.StartHist
 func historyRequestMatches(run *db.Run, p *ipc.StartHistoryRunParams, base string) bool {
 	return run.PreserveHistoryBaseSHA != nil && *run.PreserveHistoryBaseSHA == p.PreserveHistoryBaseSHA &&
 		run.PRBaseBranch != nil && *run.PRBaseBranch == base && run.SubmittedHeadSHA != nil &&
-		(*run.SubmittedHeadSHA == p.HeadSHA || run.HeadSHA == p.HeadSHA)
+		*run.SubmittedHeadSHA == p.HeadSHA
 }
 
 func validateHistoryCaller(ctx context.Context, repo *db.Repo, p *ipc.StartHistoryRunParams) error {

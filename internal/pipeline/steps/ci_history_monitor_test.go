@@ -296,20 +296,40 @@ func TestPreserveHistory_SharedContinuityGuardIgnoresAMovedBase(t *testing.T) {
 	}
 }
 
-// The gate reconciler runs every two minutes while a gate is parked. A parked
-// preserve-history refusal is the condition being decided, so reconciling it
-// must preserve the park rather than fail the step and the run.
-func TestPreserveHistory_GateReconcilerPreservesTheParkedRefusal(t *testing.T) {
-	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
-	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
-	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
-	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
-	resolved, err := (&CIStep{}).ReconcileApprovalGate(f.sctx)
-	if resolved {
-		t.Fatal("the reconciler resolved a gate whose condition still stands")
-	}
-	if errors.Is(err, pipeline.ErrFatalGateReconciliation) {
-		t.Fatalf("the reconciler destroyed the park it was asked to preserve: %v", err)
+// The gate reconciler runs every two minutes while a gate is parked. With a
+// preserve-history refusal standing, it must still decide the gate on the PR
+// alone: an open PR keeps the park alive, a closed one supersedes it, and
+// neither is ever a fatal reconciliation that would discard the run.
+func TestPreserveHistory_GateReconcilerDecidesTheParkOnThePRAlone(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		state        string
+		wantResolved bool
+		wantPRState  string
+	}{
+		{name: "open_pr_keeps_the_park", state: "OPEN", wantPRState: "open"},
+		{name: "closed_pr_supersedes_the_park", state: "CLOSED", wantResolved: true, wantPRState: "closed"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main", "FAKE_CLI_STATE="+tc.state)
+			tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+			moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+			gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+			resolved, err := (&CIStep{}).ReconcileApprovalGate(f.sctx)
+			if err != nil {
+				t.Fatalf("a standing refusal made reconciliation fail: %v", err)
+			}
+			if resolved != tc.wantResolved {
+				t.Fatalf("resolved = %v, want %v", resolved, tc.wantResolved)
+			}
+			run, dbErr := f.sctx.DB.GetRun(f.sctx.Run.ID)
+			if dbErr != nil {
+				t.Fatal(dbErr)
+			}
+			if run.PRState == nil || *run.PRState != tc.wantPRState {
+				t.Fatalf("recorded PR state = %v, want %q", run.PRState, tc.wantPRState)
+			}
+		})
 	}
 }
 

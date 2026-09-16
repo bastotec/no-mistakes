@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -130,5 +131,28 @@ func TestHistoryLaunch_RejectsBeforeStartingOrChangingRefs(t *testing.T) {
 	}
 	if got := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD"); got != head {
 		t.Fatal("refusal changed the caller head")
+	}
+}
+
+// run.HeadSHA advances with every additive repair. A caller sitting on that
+// repaired head must not reattach to a run pinned to a different submitted
+// head and be told it is the pinned integration.
+func TestHistoryRequestMatches_OnlyTheSubmittedHeadReattaches(t *testing.T) {
+	submitted, repaired := strings.Repeat("a", 40), strings.Repeat("b", 40)
+	pinnedBase, branch := strings.Repeat("c", 40), "main"
+	run := &db.Run{
+		HeadSHA: repaired, SubmittedHeadSHA: &submitted,
+		PRBaseBranch: &branch, PreserveHistoryBaseSHA: &pinnedBase,
+	}
+	request := &ipc.StartHistoryRunParams{
+		StartFreshRunParams:    ipc.StartFreshRunParams{HeadSHA: repaired},
+		PreserveHistoryBaseSHA: pinnedBase,
+	}
+	if historyRequestMatches(run, request, branch) {
+		t.Fatal("a caller at the repaired head reattached to a run pinned to another head")
+	}
+	request.HeadSHA = submitted
+	if !historyRequestMatches(run, request, branch) {
+		t.Fatal("the pinned submitted head no longer reattaches")
 	}
 }
