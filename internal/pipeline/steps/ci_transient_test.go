@@ -143,7 +143,7 @@ func TestClassifyCheckFailure(t *testing.T) {
 		// masked as infrastructure.
 		{"failure that cleared setup stays genuine", scm.Check{Name: "test", Bucket: scm.CheckBucketFail, State: "FAILURE", PreRunFailure: false}, classGenuine},
 		{"job error", scm.Check{Name: "test", Bucket: scm.CheckBucketFail, State: "ERROR"}, classGenuine},
-		{"action required", scm.Check{Name: "test", Bucket: scm.CheckBucketFail, State: "ACTION_REQUIRED"}, classGenuine},
+		{"action required is not a job verdict", scm.Check{Name: "test", Bucket: scm.CheckBucketFail, State: "ACTION_REQUIRED"}, classUnknown},
 		// A workflow that cannot start is reproducible (bad workflow file), not
 		// something a rerun clears.
 		{"startup failure", scm.Check{Name: "test", Bucket: scm.CheckBucketFail, State: "STARTUP_FAILURE"}, classGenuine},

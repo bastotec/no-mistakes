@@ -46,6 +46,10 @@ type ciIssues struct {
 	// botComments are the unresolved review-thread comments left by
 	// registered review bots, fetched only when such a bot's check is red.
 	botComments []scm.ReviewComment
+	// awaitingApproval are the checks held for a maintainer's approval.
+	awaitingApproval []scm.Check
+	// forkPR reports that the PR is delivered from a fork.
+	forkPR bool
 }
 
 // ciObservationFindings converts one settled observation into findings, one
@@ -63,7 +67,11 @@ type ciIssues struct {
 //     the file and line the comment is about;
 //   - a provider-attributed outcome no rerun will replace is an ask-user
 //     warning, exactly as before findings existed: nothing a fix agent does
-//     can clear it.
+//     can clear it;
+//   - action_required checks (runs held for a maintainer's approval, or app
+//     checks asking for an action) are one blocking ask-user error: only
+//     approving the runs or taking that action can clear it, and
+//     selecting it for a fix round resumes monitoring without an agent.
 //
 // The classification reads provider structure only - bucket, state, the
 // check suite's app identity - never check names or log text, so it is as
@@ -99,6 +107,8 @@ func ciObservationFindings(issues ciIssues) Findings {
 	}
 	transient, transientSummary := unresolvedTransientFindings(issues.unresolvedCancelled, issues.checks, issues.reruns)
 	items = append(items, transient...)
+	approval, approvalSummary := awaitingApprovalFinding(issues.awaitingApproval, issues.forkPR)
+	items = append(items, approval...)
 
 	var parts []string
 	switch codeChecks {
@@ -117,7 +127,43 @@ func ciObservationFindings(issues ciIssues) Findings {
 	if len(transient) > 0 {
 		parts = append(parts, transientSummary)
 	}
+	if len(approval) > 0 {
+		parts = append(parts, approvalSummary)
+	}
 	return Findings{Summary: strings.Join(parts, "; "), Items: items}
+}
+
+// awaitingApprovalFinding reports the action_required checks, held for a
+// maintainer's approval or asking for an action outside the code, as one
+// error. It names no Check, so a fix round selecting it has nothing to repair
+// and goes straight back to monitoring.
+func awaitingApprovalFinding(held []scm.Check, forkPR bool) ([]Finding, string) {
+	if len(held) == 0 {
+		return nil, ""
+	}
+	names := make([]string, 0, len(held))
+	for _, check := range held {
+		name := check.Name
+		if check.Link != "" {
+			name += " (" + check.Link + ")"
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	where := "this PR"
+	if forkPR {
+		where = "this fork PR"
+	}
+	summary := fmt.Sprintf("%d check(s) awaiting maintainer approval or action", len(held))
+	return []Finding{{
+		Severity: types.FindingSeverityError,
+		Action:   types.ActionAskUser,
+		Category: types.FindingCategoryCIApproval,
+		Description: fmt.Sprintf(
+			"%d check(s) report action_required on %s: %s. A workflow run held for maintainer approval never ran, so approve it; any other check is asking for an action at its details link. Then resume with fix; no code change can clear this.",
+			len(held), where, strings.Join(names, ", "),
+		),
+	}}, summary
 }
 
 // ciObservationOutcome is the step outcome for a settled observation. A
@@ -345,6 +391,15 @@ func parseCIFixTargets(raw string) (ciFixTargets, error) {
 	if err != nil {
 		return ciFixTargets{}, err
 	}
+	// An approval finding is not repairable: dropping it leaves a round that
+	// selected only it empty, so the step resumes monitoring instead.
+	kept := findings.Items[:0]
+	for _, item := range findings.Items {
+		if item.Category != types.FindingCategoryCIApproval {
+			kept = append(kept, item)
+		}
+	}
+	findings.Items = kept
 	targets := ciFixTargets{Findings: findings}
 	seen := map[string]bool{}
 	for _, item := range findings.Items {

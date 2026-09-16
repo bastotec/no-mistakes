@@ -12,8 +12,11 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testguidance"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -120,8 +123,8 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	}
 
 	// Stop before rebasing when the gated branch carries commits that live on
-	// the contributor's local default branch but were never pushed to
-	// origin/<default>. Rebasing onto the fresh remote default keeps those
+	// the contributor's local default branch but not on the integration base.
+	// Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR may bundle another
 	// workstream's unpushed work. Surface the ambiguity for a human decision.
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, integrationRef, integrationIsOwnBranch); outcome != nil {
@@ -266,15 +269,16 @@ func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
 
 // detectBundledLocalDefaultCommits returns a blocking finding when the gated
 // branch carries commits that exist on the contributor's local default branch
-// but were never pushed to origin/<default>. In multi-session / monorepo setups
-// the local default branch routinely carries another workstream's unpushed
+// but not on the integration base (remoteRef in the gate). In multi-session /
+// monorepo setups the local default branch routinely carries another workstream's unpushed
 // work; branching a fix off that local tip silently drags it into the PR when
 // the branch is rebased onto the remote default. Returns nil when no such
 // divergence is detected so the run proceeds normally.
 //
 // It only flags commits the branch actually carries: it reads the local default
-// tip from the working repo, confirms that tip is ahead of origin/<default> and
-// is a strict ancestor of the branch HEAD, then enumerates the unpushed commits.
+// tip from the working repo, confirms that tip is ahead of remoteRef and is a
+// strict ancestor of the branch HEAD, then enumerates the commits, telling
+// ones pushed to another remote's default branch (a fork's) from never-pushed ones.
 // Equal tips are the common commit-on-main-then-name-a-branch workflow, not
 // evidence of an additional bundled workstream.
 // Detection is best-effort - if the local default tip advanced past the branch
@@ -325,11 +329,40 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		return nil
 	}
 
-	subjects, err := git.Run(ctx, sctx.WorkDir, "log", "--oneline", "--no-decorate", remoteRef+".."+localTip)
-	if err != nil || strings.TrimSpace(subjects) == "" {
+	commitLog, err := git.Run(ctx, sctx.WorkDir, "log", "--no-decorate", "--format=%H %h %s", remoteRef+".."+localTip)
+	if err != nil || strings.TrimSpace(commitLog) == "" {
 		return nil
 	}
-	commits := strings.Split(strings.TrimSpace(subjects), "\n")
+	// Split the commits by whether the contributor already pushed them to a
+	// remote default branch (typically a fork's) or to none at all: the first
+	// ride into the PR although they were pushed, the second were never pushed.
+	remoteDefaults := contributorRemoteDefaults(ctx, workingPath, defaultBranch)
+	notOnRemote := make([]map[string]bool, len(remoteDefaults))
+	for i, rd := range remoteDefaults {
+		notOnRemote[i] = commitsMissingFrom(ctx, workingPath, localTip, rd.ref)
+	}
+	var pushed, unpushed []string
+	pushedTo := map[string]bool{}
+	var pushedNames []string
+	for _, line := range strings.Split(strings.TrimSpace(commitLog), "\n") {
+		sha, oneline, _ := strings.Cut(line, " ")
+		remote := ""
+		for i, rd := range remoteDefaults {
+			if notOnRemote[i] != nil && !notOnRemote[i][sha] {
+				remote = rd.name
+				break
+			}
+		}
+		if remote == "" {
+			unpushed = append(unpushed, oneline)
+			continue
+		}
+		pushed = append(pushed, oneline)
+		if !pushedTo[remote] {
+			pushedTo[remote] = true
+			pushedNames = append(pushedNames, remote)
+		}
+	}
 	// Report the proposed PR, not a two-dot comparison that can count
 	// upstream-only changes as removals from an outdated local default tip.
 	base, baseErr := git.Run(ctx, sctx.WorkDir, "merge-base", remoteRef, "HEAD")
@@ -347,11 +380,34 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 		firstFile = files[0]
 	}
 
-	integration := integrationBranchLabel(sctx, defaultBranch)
-	description := fmt.Sprintf(
-		"branch carries %d commit(s) that exist on your local %s branch but are not in %s; these may be unintended bundled work (%s):\n- %s\n\nConfirm these commits belong in this PR before approving, or manually separate the intended work onto %s before gating.",
-		len(commits), defaultBranch, integration, fileEvidence, strings.Join(commits, "\n- "), integration,
+	// Name the base by the repository and commit the gate compared against:
+	// origin/<default> resolves to a different commit in a contributor clone
+	// whose origin is a fork than in the gate, whose origin is upstream.
+	baseName := integrationBaseName(ctx, sctx, defaultBranch, remoteRef)
+	var sections []string
+	if len(pushed) > 0 {
+		sections = append(sections, fmt.Sprintf(
+			"branch carries %d commit(s) from your local %s branch that were pushed to %s but are not on the PR base %s, so this PR would bring them along (%s):\n- %s",
+			len(pushed), defaultBranch, strings.Join(pushedNames, ", "), baseName, fileEvidence, strings.Join(pushed, "\n- "),
+		))
+	}
+	if len(unpushed) > 0 {
+		sections = append(sections, fmt.Sprintf(
+			"branch carries %d commit(s) that exist on your local %s branch but were never pushed to any remote %s branch and are not on the PR base %s; these may be unintended bundled work (%s):\n- %s",
+			len(unpushed), defaultBranch, defaultBranch, baseName, fileEvidence, strings.Join(unpushed, "\n- "),
+		))
+	}
+	description := strings.Join(sections, "\n\n") + fmt.Sprintf(
+		"\n\nConfirm these commits belong in this PR before approving, or manually separate the intended work onto %s before gating.",
+		baseName,
 	)
+	summary := fmt.Sprintf("branch bundles %d unpushed %s commit(s)", len(unpushed), defaultBranch)
+	if len(pushed) > 0 {
+		summary = fmt.Sprintf("branch bundles %d %s commit(s) absent from the PR base", len(pushed)+len(unpushed), defaultBranch)
+		if len(unpushed) > 0 {
+			summary += fmt.Sprintf(" (%d never pushed)", len(unpushed))
+		}
+	}
 	fixSummary := ""
 	if sctx.Fixing {
 		fixSummary = noChangesAppliedSummary
@@ -370,7 +426,7 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 			// classifies it correctly and the driving agent escalates.
 			Action: types.ActionAskUser,
 		}},
-		Summary: fmt.Sprintf("branch bundles %d unpushed %s commit(s)", len(commits), defaultBranch),
+		Summary: summary,
 	})
 	return &pipeline.StepOutcome{
 		NeedsApproval: true,
@@ -383,6 +439,75 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 func isAncestor(ctx context.Context, workDir, ancestor, descendant string) bool {
 	_, err := git.Run(ctx, workDir, "merge-base", "--is-ancestor", ancestor, descendant)
 	return err == nil
+}
+
+// commitsMissingFrom returns the commits reachable from tip but not from ref,
+// or nil when git cannot list them.
+func commitsMissingFrom(ctx context.Context, workDir, tip, ref string) map[string]bool {
+	out, err := git.Run(ctx, workDir, "rev-list", tip, "^"+ref)
+	if err != nil {
+		return nil
+	}
+	missing := map[string]bool{}
+	for _, sha := range strings.Fields(out) {
+		missing[sha] = true
+	}
+	return missing
+}
+
+type remoteDefault struct {
+	ref  string // refs/remotes/<name>/<default> in the contributor clone
+	name string // repository identity, never a remote-tracking spelling
+}
+
+// contributorRemoteDefaults lists the contributor clone's remote-tracking
+// default branches, skipping the gate remote, whose refs mirror what was
+// pushed for validation rather than what reached a real remote.
+func contributorRemoteDefaults(ctx context.Context, workingPath, defaultBranch string) []remoteDefault {
+	out, err := git.Run(ctx, workingPath, "remote")
+	if err != nil {
+		return nil
+	}
+	var defaults []remoteDefault
+	for _, remote := range strings.Fields(out) {
+		if remote == gate.RemoteName {
+			continue
+		}
+		ref := "refs/remotes/" + remote + "/" + defaultBranch
+		if _, err := git.Run(ctx, workingPath, "rev-parse", "--verify", "--quiet", ref+"^{commit}"); err != nil {
+			continue
+		}
+		url, err := git.GetRemoteURL(ctx, workingPath, remote)
+		if err != nil {
+			continue
+		}
+		defaults = append(defaults, remoteDefault{ref: ref, name: repoDisplayName(url) + " " + defaultBranch})
+	}
+	return defaults
+}
+
+// integrationBaseName names the integration base as "<repo> <branch> at
+// <short sha>", which resolves to the same commit for the reader as for the
+// gate whatever their remotes are called. The repository is the one the base
+// was fetched from: an associated run's pull request repository, otherwise the
+// upstream fetchRunUpstreamBranchInner reads.
+func integrationBaseName(ctx context.Context, sctx *pipeline.StepContext, defaultBranch, remoteRef string) string {
+	repo := explicitTargetRepo(sctx)
+	if repo == "" {
+		repo = repoDisplayName(resolveUpstreamURL(sctx))
+	}
+	name := repo + " " + defaultBranch
+	if sha, err := git.Run(ctx, sctx.WorkDir, "rev-parse", "--verify", "--quiet", "--short", remoteRef+"^{commit}"); err == nil && strings.TrimSpace(sha) != "" {
+		name += " at " + strings.TrimSpace(sha)
+	}
+	return name
+}
+
+func repoDisplayName(url string) string {
+	if slug := scm.RepoPath(url); slug != "" {
+		return slug
+	}
+	return safeurl.Redact(url)
 }
 
 func remoteDefaultBranchAdvanced(ctx context.Context, workDir, remoteRef, baseSHA string) bool {

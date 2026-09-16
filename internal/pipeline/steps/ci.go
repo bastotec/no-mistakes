@@ -612,6 +612,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// includes cancelled and unknown provider states.
 			readinessPending := checksPending || hasUnresolvedChecks(checks)
 			failing := failingCheckNames(checks)
+			awaitingApproval := awaitingApprovalChecks(checks)
 
 			// A rerun the provider has answered is no longer outstanding. This
 			// runs before anything reads the rerun bookkeeping so a resolved
@@ -684,7 +685,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			sort.Strings(unresolvedCancelled)
 			sort.Strings(awaitingRerun)
 			hasFailures := len(failing) > 0
-			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0
+			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0 || len(awaitingApproval) > 0
+			// Checks held for approval never start on their own, so waiting
+			// for the rest to finish only delays the one thing a human can do.
+			// Anything the fix agent could repair still waits for the full set.
+			approvalOnly := len(awaitingApproval) > 0 && !hasFailures && !mergeConflict
 			// reportedIssues is what the step tells the user about; failing
 			// stays the set the fix agent is asked to repair.
 			reportedIssues := mergeCheckNames(failing, unresolvedCancelled)
@@ -702,7 +707,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// check: it never counted as a failing check, so nothing above
 				// cleared it.
 				lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
-			} else if hasIssues && checksPending {
+			} else if hasIssues && checksPending && !approvalOnly {
 				// Issue handling waits only for checks that can still complete on
 				// their own. A cancelled check whose rerun budget is exhausted must
 				// reach the approval gate instead of waiting forever.
@@ -742,6 +747,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						mergeConflict:       mergeConflict,
 						reruns:              s.transientReruns.used,
 						botComments:         reviewBotComments(sctx, host, pr, checks),
+						awaitingApproval:    awaitingApproval,
+						forkPR:              strings.TrimSpace(sctx.Repo.ForkURL) != "",
 					})
 					sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
 					return ciObservationOutcome(findings), nil

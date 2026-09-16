@@ -48,6 +48,18 @@ func hasPendingChecks(checks []scm.Check) bool {
 	return false
 }
 
+// awaitingApprovalChecks returns the checks waiting on a maintainer's
+// approval or another action outside the code.
+func awaitingApprovalChecks(checks []scm.Check) []scm.Check {
+	var held []scm.Check
+	for _, c := range checks {
+		if c.AwaitingApproval() {
+			held = append(held, c)
+		}
+	}
+	return held
+}
+
 func hasUnresolvedChecks(checks []scm.Check) bool {
 	for _, c := range checks {
 		switch c.Bucket {

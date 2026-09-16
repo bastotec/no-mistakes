@@ -1306,7 +1306,7 @@ func isFailedJob(job githubRunJob) bool {
 		state = strings.ToUpper(strings.TrimSpace(job.Status))
 	}
 	switch state {
-	case "FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+	case "FAILURE", "FAILED", "ERROR", "TIMED_OUT", "STARTUP_FAILURE":
 		return true
 	default:
 		return false
@@ -1344,6 +1344,12 @@ func normalizeMergeableState(raw string) scm.MergeableState {
 }
 
 func normalizeCheckBucket(bucket, state string) scm.CheckBucket {
+	// action_required is a run held for a maintainer's approval (a fork PR's
+	// workflows) or a check asking for an action outside the code: no job ran,
+	// so it is never a failure, even though gh's own bucket calls it "fail".
+	if strings.EqualFold(strings.TrimSpace(state), "ACTION_REQUIRED") {
+		return scm.CheckBucketAwaitingApproval
+	}
 	if normalized := scm.CheckBucket(strings.TrimSpace(bucket)); normalized != "" {
 		return normalized
 	}
@@ -1351,7 +1357,7 @@ func normalizeCheckBucket(bucket, state string) scm.CheckBucket {
 	switch strings.ToUpper(strings.TrimSpace(state)) {
 	case "SUCCESS":
 		return scm.CheckBucketPass
-	case "FAILURE", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+	case "FAILURE", "ERROR", "TIMED_OUT", "STARTUP_FAILURE":
 		return scm.CheckBucketFail
 	case "PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED", "EXPECTED":
 		return scm.CheckBucketPending

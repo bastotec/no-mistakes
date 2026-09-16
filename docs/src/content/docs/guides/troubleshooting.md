@@ -219,12 +219,13 @@ Prefer authenticating through the credential helper (`gh auth setup-git`) over e
 This only affects branches that modify workflow files.
 A branch that touches no `.github/workflows/*.yml` or `*.yaml` pushes normally with a standard `repo`-scoped token.
 
-### Rebase pauses because the branch carries unpushed default-branch commits
+### Rebase pauses because the branch carries default-branch commits the PR base lacks
 
-This means a local default branch ahead of `origin/<default_branch>` is a strict ancestor of your branch, so the branch may contain unrelated local-default work.
-`no-mistakes` pauses with an `ask-user` finding instead of silently bundling that ambiguous work into the PR. If the local default tip and your branch `HEAD` are equal, it treats the commits as the intended delivery work and continues.
+This means your local default branch is ahead of the PR base and is a strict ancestor of your branch, so the branch may contain unrelated local-default work.
+`no-mistakes` pauses with an `ask-user` finding instead of silently bundling that work into the PR. If the local default tip and your branch `HEAD` are equal, it treats the commits as the intended delivery work and continues.
+The finding says which commits were never pushed and which were pushed elsewhere (for example to your fork's default branch) but are still missing from the PR base named in the finding; the [Rebase step reference](/no-mistakes/reference/pipeline-steps/#rebase) owns the exact rule.
 
-Push the default branch to `origin` if those commits belong in the shared base, or rebuild the feature branch from `origin/<default_branch>` to remove the unrelated work before running the gate again.
+Land those commits on the PR base first if they belong in the shared base, or rebuild the feature branch from the PR base commit the finding names to remove the unrelated work before running the gate again.
 Approve the finding only when you have confirmed the local default-branch work belongs in the delivery branch.
 
 ## `git push no-mistakes` doesn't start a pipeline

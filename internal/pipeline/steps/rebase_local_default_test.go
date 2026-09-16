@@ -224,6 +224,44 @@ func TestRebaseStep_LocalDefaultTipIsIntendedDelivery(t *testing.T) {
 	}
 }
 
+// The single-remote counterpart of the fork case: commits on local main and on
+// no remote are reported as never pushed, naming the base by its commit rather
+// than a remote-tracking spelling.
+func TestRebaseStep_UnpushedLocalDefaultFindingSaysNeverPushed(t *testing.T) {
+	t.Parallel()
+	ft := newForkTopology(t, true)
+	// Local main gains a commit that reaches no remote.
+	if err := os.WriteFile(filepath.Join(ft.working, "local_only.txt"), []byte("local"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, ft.working, "add", "-A")
+	gitCmd(t, ft.working, "commit", "-m", "local-only work")
+	gitCmd(t, ft.working, "checkout", "feature")
+	gitCmd(t, ft.working, "rebase", "main")
+	ft.head = gitCmd(t, ft.working, "rev-parse", "HEAD")
+	gitCmd(t, ft.working, "checkout", "main")
+	gitCmd(t, ft.gate, "fetch", ft.working, "feature")
+	gitCmd(t, ft.gate, "checkout", "-B", "feature", ft.head)
+
+	findings := ft.run(t, ft.fork, "", false)
+	if findings == nil || len(findings.Items) != 1 {
+		t.Fatalf("expected one bundled-commit finding, got %#v", findings)
+	}
+	desc := findings.Items[0].Description
+	if !strings.Contains(desc, "never pushed") || !strings.Contains(desc, "local-only work") {
+		t.Fatalf("expected a never-pushed finding naming the local commit:\n%s", desc)
+	}
+	if strings.Contains(desc, ft.forkOnlySubject) {
+		t.Fatalf("commit already on the base was reported:\n%s", desc)
+	}
+	if strings.Contains(desc, "origin/main") {
+		t.Fatalf("finding names origin/main:\n%s", desc)
+	}
+	if forkMain := gitCmd(t, ft.fork, "rev-parse", "main"); !strings.Contains(desc, forkMain[:7]) {
+		t.Fatalf("finding does not name the compared base commit:\n%s", desc)
+	}
+}
+
 // An associated run's source branch lives in the contributor's fork while the
 // pull request's base lives in another repository, so the two can share a name
 // (fork:develop -> upstream:develop) and still be different commits. Comparing
@@ -294,6 +332,11 @@ func TestRebaseStep_AssociatedRunSharingTheBaseBranchNameStillFlagsBundledCommit
 	}
 	if !strings.Contains(outcome.Findings, "unrelated backend work") {
 		t.Fatalf("expected the unpushed local develop commit in the findings, got: %s", outcome.Findings)
+	}
+	// The base is named by the pull request's repository, which is where it
+	// was fetched from, never by the fork-side origin/develop spelling.
+	if !strings.Contains(outcome.Findings, "upstream/widgets develop at ") || strings.Contains(outcome.Findings, "origin/develop") {
+		t.Fatalf("expected the base named as the PR repository's develop, got: %s", outcome.Findings)
 	}
 	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
 		t.Fatalf("step integrated instead of stopping for review: HEAD moved to %s", got)

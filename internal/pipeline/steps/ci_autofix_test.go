@@ -119,7 +119,7 @@ func TestCIStep_CIAutoFixDisabledWithZero(t *testing.T) {
 	checksJSON := `[
 		{"name":"build","state":"SUCCESS","bucket":"pass"},
 		{"name":"test","state":"FAILURE","bucket":"fail"},
-		{"name":"lint","state":"ACTION_REQUIRED","bucket":"fail"},
+		{"name":"lint","state":"TIMED_OUT","bucket":"fail"},
 		{"name":"deploy","state":"NEUTRAL"}
 	]`
 	env := fakeCIGH(t, "OPEN", checksJSON)
@@ -188,6 +188,85 @@ func TestCIStep_CIAutoFixDisabledWithZero(t *testing.T) {
 	}
 	if len(logs) == 0 || !strings.Contains(strings.Join(logs, "\n"), "issues detected: 2 CI checks failing") {
 		t.Errorf("expected the observation to be logged, got: %v", logs)
+	}
+}
+
+// A fork PR's workflow runs concluded action_required are waiting for a
+// maintainer's approval and never ran. The step must park on that at once with
+// one ask-user approval finding and spend no auto-fix round, while a real
+// failure in the same position does spend one.
+func TestCIStep_ActionRequiredParksForApprovalWithoutAFixRound(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name      string
+		checks    string
+		wantCalls int
+		wantHeld  bool
+	}{
+		{"action required", `[{"name":"CI","state":"ACTION_REQUIRED","bucket":"fail"}]`, 0, true},
+		{"action required beside a pending check", `[{"name":"CI","state":"ACTION_REQUIRED","bucket":"fail"},{"name":"external","state":"PENDING","bucket":"pending"}]`, 0, true},
+		{"real failure", `[{"name":"CI","state":"FAILURE","bucket":"fail"}]`, 1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: json.RawMessage(`{"summary":"nothing to change","code_change_needed":false}`)}, nil
+			}}
+			prURL := "https://github.com/test/repo/pull/42"
+			sctx := newTestContext(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = fakeCIGH(t, "OPEN", tc.checks)
+			sctx.Run.PRURL = &prURL
+			sctx.Repo.ForkURL = "https://github.com/contributor/repo"
+			sctx.Config.CITimeout = 30 * time.Second
+			sctx.Config.AutoFix = config.AutoFix{CI: 3}
+			sctx.Log = func(string) {}
+			step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error { return nil }}
+
+			outcome, err := driveCI(t, step, sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ag.calls) != tc.wantCalls {
+				t.Fatalf("agent calls = %d, want %d", len(ag.calls), tc.wantCalls)
+			}
+			if outcome == nil || !outcome.NeedsApproval || outcome.AutoFixable {
+				t.Fatalf("outcome = %#v, want a park the executor cannot auto-fix", outcome)
+			}
+			if !tc.wantHeld {
+				return
+			}
+			findings, err := types.ParseFindingsJSON(outcome.Findings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(findings.Items) != 1 {
+				t.Fatalf("findings = %+v, want one approval finding", findings.Items)
+			}
+			item := findings.Items[0]
+			if item.Category != types.FindingCategoryCIApproval || item.Action != types.ActionAskUser || item.Severity != types.FindingSeverityError {
+				t.Fatalf("finding = %+v, want a blocking ask-user approval finding", item)
+			}
+			if !strings.Contains(item.Description, "1 check(s) report action_required on this fork PR") || !strings.Contains(item.Description, "CI") {
+				t.Fatalf("description = %q", item.Description)
+			}
+			if strings.Contains(findings.Summary, "failing") {
+				t.Fatalf("summary = %q, want no failure wording", findings.Summary)
+			}
+
+			// Resuming with fix after approving the runs spends no agent: the
+			// step goes back to monitoring and parks again while still held.
+			sctx.Fixing = true
+			sctx.PreviousFindings = outcome.Findings
+			resumed, err := step.Execute(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(ag.calls) != 0 || resumed == nil || !resumed.NeedsApproval || !strings.Contains(resumed.Findings, types.FindingCategoryCIApproval) {
+				t.Fatalf("resume = %#v with %d agent calls, want the approval park again and no agent", resumed, len(ag.calls))
+			}
+		})
 	}
 }
 

@@ -64,7 +64,7 @@ func classifyCheckFailure(check scm.Check) failureClass {
 	switch strings.ToUpper(strings.TrimSpace(check.State)) {
 	case "CANCELLED", "CANCELED":
 		return classTransient
-	case "FAILURE", "FAILED", "ERROR", "TIMED_OUT", "ACTION_REQUIRED", "STARTUP_FAILURE":
+	case "FAILURE", "FAILED", "ERROR", "TIMED_OUT", "STARTUP_FAILURE":
 		return classGenuine
 	default:
 		// Includes the empty state: a provider that reported a failed bucket
