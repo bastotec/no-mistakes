@@ -1451,11 +1451,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// The run integrates with the branch the pull request actually targets, not
 	// the repository default: rebase, PR and CI all read this.
 	if explicitPR != nil {
-		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target); err != nil {
-			m.db.UpdateRunError(run.ID, err.Error())
-			trackStartFailure("associate_existing_pr")
-			return "", err
-		}
 		base, err := normalizeRunPRBaseBranch(explicitPR.BaseBranch)
 		if err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
@@ -1513,6 +1508,20 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		"step_count":  len(execSteps),
 		"demo_mode":   steps.IsDemoMode(),
 	})
+
+	// Every way this launch can still be refused is behind us, so this is where
+	// the target becomes the branch's. Nothing above reads it back from the
+	// database - validation and the integration base both read the in-memory
+	// run - so a refused launch leaves the branch mapped exactly where it
+	// already was, at every one of those failure points rather than only at the
+	// forge check.
+	if explicitPR != nil {
+		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("associate_existing_pr")
+			return "", err
+		}
+	}
 
 	// Create executor with event broadcast.
 	runCtx, cancel := context.WithCancelCause(context.Background())

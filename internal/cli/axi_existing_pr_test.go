@@ -59,14 +59,12 @@ func TestAxiRetireExistingPRRejectsLaunchFlags(t *testing.T) {
 }
 
 func TestAxiExistingPRReattachmentMustMatchPin(t *testing.T) {
-	for _, target := range []string{"", axiExistingPRURL, "https://github.com/upstream/widgets/pull/169"} {
+	for _, target := range []string{axiExistingPRURL, "https://github.com/upstream/widgets/pull/169"} {
 		t.Run(target, func(t *testing.T) {
 			fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
 			fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) {
 				r := fx.running()
-				if target != "" {
-					r.ExistingPRURL = &target
-				}
+				r.ExistingPRURL = &target
 				return r, nil
 			})
 			fx.setGetRun(func(context.Context, int) (*ipc.RunInfo, error) { return fx.completed(), nil })
@@ -79,6 +77,23 @@ func TestAxiExistingPRReattachmentMustMatchPin(t *testing.T) {
 				t.Fatalf("mismatched reattach err=%v output=%s", err, out)
 			}
 		})
+	}
+}
+
+// A run records its explicit target only once its launch has proven it, so an
+// active run without one is still deciding - not pinned somewhere else. This
+// lookup holds no branch lock, so it must hand that case to the daemon instead
+// of refusing with a conflict that does not exist.
+func TestAxiExistingPRUndeterminedTargetIsNotAConflict(t *testing.T) {
+	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{})
+	fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) { return fx.running(), nil })
+	fx.setGetRun(func(context.Context, int) (*ipc.RunInfo, error) { return fx.completed(), nil })
+	out, err := executeCmd("axi", "run", "--existing-pr", axiExistingPRURL, "--intent", "validate upstream contribution", "--wait", "3s")
+	if strings.Contains(out, "refusing to reattach") {
+		t.Fatalf("invented a target conflict for a launching run: %s", out)
+	}
+	if err == nil || !strings.Contains(out, ipc.MethodStartExistingPRRun) {
+		t.Fatalf("undetermined target was not handed to the daemon: %v\n%s", err, out)
 	}
 }
 

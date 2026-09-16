@@ -322,14 +322,24 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
 		}
 		if active != nil {
-			if existingPR != "" && (active.ExistingPRURL == nil || *active.ExistingPRURL != existingPR) {
-				return emitError(cmd, 2, "active run has a different or absent explicit PR target; refusing to reattach")
+			// A run records its explicit target only once its launch has
+			// proven it on the forge, so an absent one means that launch has
+			// not decided yet - not that it decided on another pull request.
+			// This lookup holds no branch lock and cannot tell those apart, so
+			// an undetermined target is handed to the daemon below, which does
+			// hold it and answers either with the same run or with what
+			// actually conflicts.
+			undetermined := existingPR != "" && active.ExistingPRURL == nil
+			if existingPR != "" && active.ExistingPRURL != nil && *active.ExistingPRURL != existingPR {
+				return emitError(cmd, 2, "active run has a different explicit PR target; refusing to reattach")
 			}
-			if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
-				return emitError(cmd, 2, err.Error(),
-					"Omit --base-branch to reattach, or abort the active run before starting a new one")
+			if !undetermined {
+				if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
+					return emitError(cmd, 2, err.Error(),
+						"Omit --base-branch to reattach, or abort the active run before starting a new one")
+				}
+				runID = active.ID
 			}
-			runID = active.ID
 		}
 	}
 	if runID == "" {

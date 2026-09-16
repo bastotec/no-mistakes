@@ -480,3 +480,54 @@ func TestRefusedExplicitLaunchLeavesNoAssociationToInherit(t *testing.T) {
 		t.Fatalf("unflagged run inherited the refused target: %v", *ordinary.ExistingPRURL)
 	}
 }
+
+// Validation proving the target is not the same as the launch surviving. A
+// refusal anywhere after the forge check - here the integration base the pull
+// request targets cannot be fetched - must leave the branch mapped exactly
+// where it already was, or the operator watches a launch fail and every later
+// unflagged run publishes to it anyway.
+func TestExplicitLaunchRefusedAfterValidationLeavesNoAssociation(t *testing.T) {
+	bin := t.TempDir()
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	const target = "https://github.com/upstream/widgets/pull/168"
+	var calls atomic.Int32
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&existingPRObserveStep{calls: &calls, target: target}} })
+	repo, _ := setupTestGitRepo(t, p, d, "explicit-pr-late-refusal")
+	repo, err := d.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubExplicitUpstream(t, p, repo, "main")
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	writeCommit(t, repo.WorkingPath, "new.txt", "new committed work")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	// The association itself is valid and the head matches, so validation
+	// passes; the base branch the pull request targets does not exist upstream,
+	// so the integration fetch that follows fails.
+	payload := fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","base":{"ref":"release/absent","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, target, head)
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", payload)
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	err = client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "validate existing upstream PR", URL: target}, &ipc.RerunResult{})
+	if err == nil || !strings.Contains(err.Error(), "fetch explicit PR integration branch") {
+		t.Fatalf("expected the integration fetch to refuse the launch, got %v", err)
+	}
+	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != "" {
+		t.Fatalf("refused launch left association %q (%v), want none", stored, err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("refused launch ran the pipeline: calls=%d", calls.Load())
+	}
+}
