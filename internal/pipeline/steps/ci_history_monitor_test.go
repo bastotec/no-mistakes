@@ -154,8 +154,9 @@ func TestPreserveHistory_MonitorParksWhenThePinnedBaseAdvancesMidRun(t *testing.
 }
 
 // A base that moved while the executor was between the PR and CI steps is the
-// same refusal the poll loop parks on: the PR is already open and its checks
-// may be green, and this run can never be restarted in place.
+// same refusal, raised by the monitor's first poll rather than a second guard
+// at step entry: the PR is already open and its checks may be green, and this
+// run can never be restarted in place.
 func TestPreserveHistory_MonitorParksWhenThePinnedBaseMovedBeforeTheStepStarts(t *testing.T) {
 	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
 	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
@@ -168,6 +169,13 @@ func TestPreserveHistory_MonitorParksWhenThePinnedBaseMovedBeforeTheStepStarts(t
 	finding := historyRefusalFinding(t, outcome)
 	if !strings.Contains(finding.Description, "moved") {
 		t.Fatalf("refusal lost its diagnostic: %s", finding.Description)
+	}
+	run, dbErr := f.sctx.DB.GetRun(f.sctx.Run.ID)
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	if run.PRState == nil || *run.PRState != "open" {
+		t.Fatalf("recorded PR state = %v; the park did not come from a poll that observed the PR", run.PRState)
 	}
 }
 
@@ -278,10 +286,10 @@ func TestPreserveHistory_PersistentlyUnreadablePinnedBaseEscalates(t *testing.T)
 	}
 }
 
-// A re-entry that exists to finish a retained protected-path repair must not
-// relabel a standing preserve-history refusal as a repair the operator can
-// retry: the refusal is the reason, and retrying would hit it again.
-func TestPreserveHistory_RetainedRepairReentryKeepsTheHistoryRefusal(t *testing.T) {
+// A re-entry that exists to finish a retained protected-path repair keeps that
+// retained refusal - it is still the outstanding work - and names the
+// preserve-history constraint that stopped the retry as the reason.
+func TestPreserveHistory_RetainedRepairReentryKeepsBothRefusals(t *testing.T) {
 	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
 	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
 	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
@@ -300,9 +308,24 @@ func TestPreserveHistory_RetainedRepairReentryKeepsTheHistoryRefusal(t *testing.
 	if err != nil {
 		t.Fatalf("the retained repair re-entry ended the run: %v\nlog:\n%s", err, f.log())
 	}
-	finding := historyRefusalFinding(t, outcome)
-	if !strings.Contains(finding.Description, "moved") {
-		t.Fatalf("refusal lost its diagnostic: %s", finding.Description)
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want a parked decision", outcome)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retainedKept := false
+	for _, item := range findings.Items {
+		if item.ID == "protected-path-refusal" {
+			retainedKept = true
+		}
+	}
+	if !retainedKept {
+		t.Fatalf("the retained protected-path refusal was dropped: %s", outcome.Findings)
+	}
+	if !strings.Contains(findings.Summary, "moved") {
+		t.Fatalf("summary = %q, want it to name the moved pinned base", findings.Summary)
 	}
 }
 

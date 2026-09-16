@@ -286,9 +286,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			outcome, err = refusal, nil
 			return
 		}
-		if err == nil && carriesHistoryRefusal(outcome) {
-			return
-		}
 		findings, _ := types.ParseFindingsJSON(refusalFindings)
 		findings.Summary = "Retained CI repair could not finish; resolve the failure and retry with fix"
 		if err != nil {
@@ -301,9 +298,6 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}()
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
-	}
-	if err := AssertHistoryPolicy(sctx); err != nil && !historyReadUnverifiable(sctx, err) {
-		return ciHistoryRefusalOutcome(sctx, err), nil
 	}
 	// A run recovered after a restart resumes the rerun budget it already
 	// spent. Without this the fresh in-memory budget would grant reruns the

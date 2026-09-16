@@ -1213,7 +1213,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		repo = refreshed
 	}
 
-	// Cancel any active run for this repo+branch.
+	// A preserve-history run pins the exact integration it is validating, so no
+	// other launch may supersede it: the replacement run would rebase and force
+	// the branch the pins exist to keep. Refuse with the run named instead of
+	// cancelling it silently.
+	active, err := m.db.GetActiveRun(repo.ID, branch)
+	if err != nil {
+		trackStartFailure("active_run_lookup")
+		return "", fmt.Errorf("check active run: %w", err)
+	}
+	if active != nil && active.PreserveHistoryBaseSHA != nil {
+		trackStartFailure("preserve_history_protected")
+		return "", fmt.Errorf("preserve-history: run %s pins this branch's exact integration head and base; refusing to supersede it - finish or abort that run first", active.ID)
+	}
 	m.cancelActiveRuns(repo.ID, branch)
 
 	storedIntent := intent

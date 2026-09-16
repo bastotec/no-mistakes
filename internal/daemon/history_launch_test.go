@@ -156,3 +156,32 @@ func TestHistoryRequestMatches_OnlyTheSubmittedHeadReattaches(t *testing.T) {
 		t.Fatal("the pinned submitted head no longer reattaches")
 	}
 }
+
+// Two of the three ways a run can be superseded already refuse a protected run.
+// The shared launch path is the third: an ordinary gate push must not cancel a
+// preserve-history run and start an unconstrained one that would rebase and
+// force the exact integration those pins exist to keep.
+func TestHistoryLaunch_OrdinaryLaunchRefusesToSupersedeAProtectedRun(t *testing.T) {
+	p, database := newRefreshRunFixture(t)
+	repo, head := setupTestGitRepo(t, p, database, "protected-supersede")
+	protected, err := database.InsertRunWithIntentAndLaunchNonce(repo.ID, "main", head, head, nil, "history-nonce", "generation", "digest", "release", head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRunManager(database, p, func() []pipeline.Step { return nil })
+	t.Cleanup(manager.Shutdown)
+	_, err = manager.startRun(context.Background(), repo, "main", head, head, "push", nil, "ordinary launch", "")
+	if err == nil {
+		t.Fatal("an ordinary launch superseded a preserve-history run")
+	}
+	if !strings.Contains(err.Error(), protected.ID) || !strings.Contains(err.Error(), "preserve-history") {
+		t.Fatalf("refusal = %v, want it to name the protected run %s", err, protected.ID)
+	}
+	still, err := database.GetActiveRun(repo.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if still == nil || still.ID != protected.ID {
+		t.Fatalf("active run = %+v, want the protected run left intact", still)
+	}
+}
