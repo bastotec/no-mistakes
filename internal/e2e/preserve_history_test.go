@@ -76,7 +76,9 @@ func TestPreserveHistoryMovedBaseWhileParkedStopsWithoutPublicationJourney(t *te
 	}
 	advanceMain(t, h, "later.txt", "later base\n", "advance pinned base while parked")
 	// This is the isolated fake-review gate, not an operator's real finding.
-	h.Respond(run.ID, types.StepReview, types.ActionFix)
+	// Review is not a history-moving step, so approving it lets the run reach
+	// publication, where the moved pinned base must be refused.
+	h.Respond(run.ID, types.StepReview, types.ActionApprove)
 	failed := h.WaitForRun(branch, 90*time.Second)
 	if failed.Status != types.RunFailed || failed.Error == nil || !strings.Contains(*failed.Error, "integration base main moved") {
 		t.Fatalf("moved pinned base was not refused: %+v", failed)
