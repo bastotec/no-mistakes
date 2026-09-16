@@ -150,3 +150,61 @@ func TestPreserveHistory_MonitorParksWhenThePinnedBaseAdvancesMidRun(t *testing.
 		t.Fatal("the monitor never polled, so it did not observe the advance")
 	}
 }
+
+// A base that moved while the executor was between the PR and CI steps is the
+// same refusal the poll loop parks on: the PR is already open and its checks
+// may be green, and this run can never be restarted in place.
+func TestPreserveHistory_MonitorParksWhenThePinnedBaseMovedBeforeTheStepStarts(t *testing.T) {
+	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+	outcome, err := f.run(t)
+	if err != nil {
+		t.Fatalf("CI step ended the run instead of parking: %v\nlog:\n%s", err, f.log())
+	}
+	finding := historyRefusalFinding(t, outcome)
+	if !strings.Contains(finding.Description, "moved") {
+		t.Fatalf("refusal lost its diagnostic: %s", finding.Description)
+	}
+}
+
+// Approving a parked preserve-history refusal is the operator's call and always
+// proceeds, but it must land as an override with the refusal named - green
+// checks are not evidence that the pinned relationship survived.
+func TestPreserveHistory_ApprovingARefusalIsNeverASilentCleanPass(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		prBase   string
+		moveBase bool
+		want     string
+	}{
+		{name: "pr_retargeted_off_the_pin", prBase: "release", want: "not the pinned integration branch"},
+		{name: "pinned_base_advanced", prBase: "main", moveBase: true, want: "moved"},
+		{name: "pins_still_honored", prBase: "main"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, base := newHistoryMonitorFixture(t,
+				"FAKE_CLI_PR_BASE="+tc.prBase,
+				`FAKE_CLI_CHECKS=[{"name":"build","state":"SUCCESS","bucket":"pass"}]`)
+			if tc.moveBase {
+				tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+				moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+				gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+			}
+			reason, err := (&CIStep{}).VerifyApprovalOverride(f.sctx)
+			if err != nil {
+				t.Fatalf("VerifyApprovalOverride() error = %v", err)
+			}
+			if tc.want == "" {
+				if reason != "" {
+					t.Fatalf("an honored run was recorded as an override: %s", reason)
+				}
+				return
+			}
+			if !strings.Contains(reason, tc.want) {
+				t.Fatalf("override reason = %q, want it to name the refusal (%q)", reason, tc.want)
+			}
+		})
+	}
+}

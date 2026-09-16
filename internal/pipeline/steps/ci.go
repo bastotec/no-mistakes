@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -206,7 +207,14 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
+	pr := &scm.PR{Number: prNumber, URL: prURL}
+	// A preserve-history run's whole point is the pinned head/base
+	// relationship, so a refusal still standing at approval time is the
+	// override's reason even when every live check is green.
+	if refusal := historyConstraintRefusal(sctx, host, pr); refusal != nil {
+		return refusal.Error(), nil
+	}
+	checks, err := host.GetChecks(ctx, pr)
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
@@ -244,9 +252,6 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
-	if err := AssertHistoryPolicy(sctx); err != nil {
-		return nil, err
-	}
 	refusalFindings := ""
 	if sctx.StepResultID != "" {
 		stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
@@ -291,6 +296,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		outcome, err = &pipeline.StepOutcome{NeedsApproval: true, Findings: encoded}, nil
 	}()
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		if errors.Is(err, ErrHistoryConstraint) {
+			return ciHistoryRefusalOutcome(sctx, err), nil
+		}
 		return nil, err
 	}
 	// A run recovered after a restart resumes the rerun budget it already
@@ -510,30 +518,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
-		if preservesHistory(sctx) {
-			// Only the GitHub host reads a live PR base, so an empty value is
-			// an unknown base, not a mismatched one, and an unreadable one is
-			// retried on the next poll exactly like the PR state above.
-			// Monitoring mutates nothing, so a constraint that genuinely can no
-			// longer be honored parks for a decision - the call the repair half
-			// already makes - instead of discarding a run whose checks may be
-			// green and which cannot be rerun in place.
-			if reader, ok := host.(scm.PRBaseBranchReader); ok {
-				actual, readErr := reader.GetPRBaseBranch(ctx, pr)
-				if readErr != nil {
-					sctx.Log(fmt.Sprintf("warning: could not verify live PR base: %v", readErr))
-				} else {
-					pr.BaseBranch = actual
-				}
-			}
-			if pr.BaseBranch != "" && (sctx.Run.PRBaseBranch == nil || pr.BaseBranch != *sctx.Run.PRBaseBranch) {
-				clearCIMonitorReady(sctx)
-				return ciHistoryRefusalOutcome(sctx, historyRefusal("the live PR base %q is not the pinned integration branch", pr.BaseBranch)), nil
-			}
-			if err := AssertHistoryPolicy(sctx); err != nil {
-				clearCIMonitorReady(sctx)
-				return ciHistoryRefusalOutcome(sctx, err), nil
-			}
+		if err := historyConstraintRefusal(sctx, host, pr); err != nil {
+			clearCIMonitorReady(sctx)
+			return ciHistoryRefusalOutcome(sctx, err), nil
 		}
 
 		// Check mergeable state if the provider supports it

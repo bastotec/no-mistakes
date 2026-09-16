@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
 // ErrHistoryConstraint must never be swallowed as a retryable CI fixer failure.
@@ -30,6 +31,33 @@ func ValidateHistoryBase(sha string) error {
 
 func preservesHistory(sctx *pipeline.StepContext) bool {
 	return sctx.Run != nil && sctx.Run.PreserveHistoryBaseSHA != nil
+}
+
+// historyConstraintRefusal is the CI step's single reading of whether a
+// preserve-history run can still be honored, shared by the poll loop and the
+// approval-override verifier so both answer the same question the same way.
+// Only the GitHub host reads a live PR base, so an empty value is an unknown
+// base, not a mismatched one, and an unreadable one is left for the next read
+// exactly as the monitor treats the PR state. It mutates nothing, so a refusal
+// here is a decision for the operator, not a reason to end the run.
+func historyConstraintRefusal(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+	if !preservesHistory(sctx) {
+		return nil
+	}
+	if reader, ok := host.(scm.PRBaseBranchReader); ok {
+		actual, readErr := reader.GetPRBaseBranch(sctx.Ctx, pr)
+		if readErr != nil {
+			if sctx.Log != nil {
+				sctx.Log(fmt.Sprintf("warning: could not verify live PR base: %v", readErr))
+			}
+		} else {
+			pr.BaseBranch = actual
+		}
+	}
+	if pr.BaseBranch != "" && (sctx.Run.PRBaseBranch == nil || pr.BaseBranch != *sctx.Run.PRBaseBranch) {
+		return historyRefusal("the live PR base %q is not the pinned integration branch", pr.BaseBranch)
+	}
+	return AssertHistoryPolicy(sctx)
 }
 
 // AssertHistoryPolicy is the pre-operation guard shared by initial integration,
