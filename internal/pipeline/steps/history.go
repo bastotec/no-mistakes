@@ -118,12 +118,7 @@ func AssertHistoryPolicy(sctx *pipeline.StepContext) error {
 	if live != *run.PreserveHistoryBaseSHA {
 		return fail(fmt.Sprintf("integration base %s moved: pinned %s, live %s; create and validate a new integration explicitly", branch, *run.PreserveHistoryBaseSHA, live))
 	}
-	head, err := stepGitHeadSHA(sctx)
-	if err != nil {
-		return unverifiable(fmt.Sprintf("cannot read the current head: %v", err))
-	}
-	_, err = historyPushDecision(sctx, resolvePushURL(sctx), normalizedBranchRef(run.Branch), head)
-	return err
+	return nil
 }
 
 // historyPushDecision never even considers lease or patch-equivalence escape

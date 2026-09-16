@@ -31,13 +31,6 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		if err := AssertHistoryPolicy(sctx); err != nil {
 			return nil, err
 		}
-		head, err := stepGitHeadSHA(sctx)
-		if err != nil {
-			return nil, err
-		}
-		if _, err := historyPushDecision(sctx, resolvePushURL(sctx), normalizedBranchRef(sctx.Run.Branch), head); err != nil {
-			return nil, err
-		}
 		sctx.Log("preserve-history: exact integration pins verified; no rebase or merge performed")
 		return &pipeline.StepOutcome{}, nil
 	}

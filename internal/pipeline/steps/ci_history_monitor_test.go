@@ -211,22 +211,88 @@ func TestPreserveHistory_ApprovingARefusalIsNeverASilentCleanPass(t *testing.T) 
 	}
 }
 
-// A pinned base nobody could read is not evidence that it moved: the monitor
-// retries it the way it retries every other read in the poll loop, instead of
-// parking a run whose pins are intact.
+// A pinned base nobody could read mid-monitor is not evidence that it moved:
+// the poll loop retries it the way it retries every other read there, instead
+// of parking a run whose pins are intact.
 func TestPreserveHistory_MonitorKeepsPollingWhenThePinnedBaseCannotBeRead(t *testing.T) {
+	f, _ := newHistoryMonitorFixture(t,
+		"FAKE_CLI_PR_BASE=main",
+		`FAKE_CLI_CHECKS=[{"name":"test","status":"IN_PROGRESS","bucket":"pending"}]`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sctx.Ctx = ctx
+	polls := 0
+	step := &CIStep{waitForNextPoll: func(ctx context.Context, d time.Duration) error {
+		polls++
+		if polls == 1 {
+			gitCmd(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+		}
+		if polls >= 3 {
+			cancel()
+		}
+		return ctx.Err()
+	}}
+	outcome, err := driveCI(t, step, f.sctx)
+	assertNoHistoryRefusal(t, outcome)
+	if err != nil && !errors.Is(err, context.Canceled) {
+		t.Fatalf("an unreadable pinned base ended the run: %v\nlog:\n%s", err, f.log())
+	}
+	if polls < 3 {
+		t.Fatalf("the monitor stopped polling after %d polls\nlog:\n%s", polls, f.log())
+	}
+	if !strings.Contains(f.log(), "cannot verify pinned base") {
+		t.Fatalf("the incomplete read was not reported, log:\n%s", f.log())
+	}
+}
+
+// Before monitoring starts, an incomplete read is not a pass either: the step
+// parks so the operator decides, and never proceeds on an unverified pin.
+func TestPreserveHistory_UnreadablePinnedBaseAtEntryParks(t *testing.T) {
 	f, _ := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
 	gitCmd(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
 	outcome, err := f.run(t)
 	if err != nil {
 		t.Fatalf("an unreadable pinned base ended the run: %v\nlog:\n%s", err, f.log())
 	}
-	assertNoHistoryRefusal(t, outcome)
-	if outcome == nil || !outcome.NeedsApproval {
-		t.Fatalf("outcome = %#v, want the failing-check observation\nlog:\n%s", outcome, f.log())
+	finding := historyRefusalFinding(t, outcome)
+	if !strings.Contains(finding.Description, "cannot verify pinned base") {
+		t.Fatalf("refusal lost its diagnostic: %s", finding.Description)
 	}
-	if !strings.Contains(f.log(), "cannot verify pinned base") {
-		t.Fatalf("the incomplete read was not reported, log:\n%s", f.log())
+}
+
+// The head-continuity guard protects against a sibling worktree clobbering the
+// reviewed head. An incomplete history read must never let the CI step skip it.
+func TestPreserveHistory_UnreadableBaseStillEnforcesHeadContinuity(t *testing.T) {
+	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+	clobber := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "sibling worktree clobber")
+	gitCmd(t, f.dir, "reset", "--hard", clobber)
+	gitCmd(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	outcome, err := f.run(t)
+	if err == nil {
+		t.Fatalf("the clobbered head was accepted: outcome = %#v\nlog:\n%s", outcome, f.log())
+	}
+	if !strings.Contains(err.Error(), "not a descendant") {
+		t.Fatalf("error = %v, want the head-continuity refusal", err)
+	}
+}
+
+// The shared continuity helper is used by steps that only commit locally, so
+// it must not carry the pre-mutation history guard: a moved base is refused
+// where history would actually move, not on every step entry.
+func TestPreserveHistory_SharedContinuityGuardIgnoresAMovedBase(t *testing.T) {
+	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+	if err := assertPipelineHeadContinuity(f.sctx, types.StepDocument); err != nil {
+		t.Fatalf("a non-mutating step was refused over a moved base: %v", err)
+	}
+	if _, err := (&RebaseStep{}).Execute(f.sctx); !errors.Is(err, ErrHistoryConstraint) {
+		t.Fatalf("the integration path stopped refusing a moved base: %v", err)
+	}
+	if err := publishRunHead(f.sctx, f.headSHA, "", nil); !errors.Is(err, ErrHistoryConstraint) {
+		t.Fatalf("publication stopped refusing a moved base: %v", err)
 	}
 }
 
@@ -241,9 +307,6 @@ func TestPreserveHistory_GateReconcilerPreservesTheParkedRefusal(t *testing.T) {
 	resolved, err := (&CIStep{}).ReconcileApprovalGate(f.sctx)
 	if resolved {
 		t.Fatal("the reconciler resolved a gate whose condition still stands")
-	}
-	if !errors.Is(err, ErrHistoryConstraint) {
-		t.Fatalf("reconcile error = %v, want the standing history refusal", err)
 	}
 	if errors.Is(err, pipeline.ErrFatalGateReconciliation) {
 		t.Fatalf("the reconciler destroyed the park it was asked to preserve: %v", err)

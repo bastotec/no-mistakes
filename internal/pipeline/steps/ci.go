@@ -2,7 +2,6 @@ package steps
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -109,12 +108,6 @@ func (s *CIStep) Name() types.StepName { return types.StepCI }
 // parked so reconciliation never guesses success.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
-		if errors.Is(err, ErrHistoryConstraint) {
-			// The refusal is the parked condition itself, and reconciliation
-			// mutates nothing; failing the gate over it would destroy the very
-			// decision the operator is being asked to make.
-			return false, err
-		}
 		return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
 	}
 	if err := sctx.Ctx.Err(); err != nil {
@@ -304,13 +297,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		outcome, err = &pipeline.StepOutcome{NeedsApproval: true, Findings: encoded}, nil
 	}()
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
-		switch {
-		case historyReadUnverifiable(sctx, err):
-		case errors.Is(err, ErrHistoryConstraint):
-			return ciHistoryRefusalOutcome(sctx, err), nil
-		default:
-			return nil, err
-		}
+		return nil, err
+	}
+	if err := AssertHistoryPolicy(sctx); err != nil {
+		return ciHistoryRefusalOutcome(sctx, err), nil
 	}
 	// A run recovered after a restart resumes the rerun budget it already
 	// spent. Without this the fresh in-memory budget would grant reruns the
