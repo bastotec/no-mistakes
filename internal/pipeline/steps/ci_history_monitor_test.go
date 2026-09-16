@@ -245,17 +245,63 @@ func TestPreserveHistory_MonitorKeepsPollingWhenThePinnedBaseCannotBeRead(t *tes
 	}
 }
 
-// Before monitoring starts, an incomplete read is not a pass either: the step
-// parks so the operator decides, and never proceeds on an unverified pin.
-func TestPreserveHistory_UnreadablePinnedBaseAtEntryParks(t *testing.T) {
-	f, _ := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+// An incomplete read never parks on its own - not at entry, where the monitor
+// is about to re-read the pin anyway - but a pin that stays unreadable must
+// escalate on the same consecutive-read budget a provider read spends, rather
+// than warning its way to the timeout.
+func TestPreserveHistory_PersistentlyUnreadablePinnedBaseEscalates(t *testing.T) {
+	f, _ := newHistoryMonitorFixture(t,
+		"FAKE_CLI_PR_BASE=main",
+		`FAKE_CLI_CHECKS=[{"name":"test","status":"IN_PROGRESS","bucket":"pending"}]`)
 	gitCmd(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
-	outcome, err := f.run(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	f.sctx.Ctx = ctx
+	polls := 0
+	step := &CIStep{waitForNextPoll: func(context.Context, time.Duration) error {
+		polls++
+		if polls > ConsecutiveCheckErrorLimit() {
+			cancel()
+		}
+		return ctx.Err()
+	}}
+	outcome, err := driveCI(t, step, f.sctx)
 	if err != nil {
 		t.Fatalf("an unreadable pinned base ended the run: %v\nlog:\n%s", err, f.log())
 	}
 	finding := historyRefusalFinding(t, outcome)
 	if !strings.Contains(finding.Description, "cannot verify pinned base") {
+		t.Fatalf("refusal lost its diagnostic: %s", finding.Description)
+	}
+	if polls != ConsecutiveCheckErrorLimit()-1 {
+		t.Fatalf("escalated after %d polls, want the shared consecutive-read budget of %d", polls, ConsecutiveCheckErrorLimit())
+	}
+}
+
+// A re-entry that exists to finish a retained protected-path repair must not
+// relabel a standing preserve-history refusal as a repair the operator can
+// retry: the refusal is the reason, and retrying would hit it again.
+func TestPreserveHistory_RetainedRepairReentryKeepsTheHistoryRefusal(t *testing.T) {
+	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+	retained := `{"findings":[{"id":"protected-path-refusal","severity":"error","description":"the CI fixer touched a protected path","action":"ask-user"}],"summary":"protected path refusal"}`
+	sr, err := f.sctx.DB.InsertStepResult(f.sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.sctx.DB.ParkStepForApproval(f.sctx.Run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 1, &retained); err != nil {
+		t.Fatal(err)
+	}
+	f.sctx.StepResultID = sr.ID
+	f.sctx.Fixing = true
+	outcome, err := f.run(t)
+	if err != nil {
+		t.Fatalf("the retained repair re-entry ended the run: %v\nlog:\n%s", err, f.log())
+	}
+	finding := historyRefusalFinding(t, outcome)
+	if !strings.Contains(finding.Description, "moved") {
 		t.Fatalf("refusal lost its diagnostic: %s", finding.Description)
 	}
 }

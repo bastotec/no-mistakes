@@ -355,11 +355,32 @@ func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 // ending the run here would throw the whole validation away over a decision
 // only the operator can make. This is the same call the repair half makes on
 // ErrHistoryConstraint.
+// carriesHistoryRefusal reports whether an outcome already parks over a
+// preserve-history refusal, so a later handler does not replace that
+// diagnostic with a generic one.
+func carriesHistoryRefusal(outcome *pipeline.StepOutcome) bool {
+	if outcome == nil {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		return false
+	}
+	for _, item := range findings.Items {
+		if item.ID == ciHistoryRefusalFindingID {
+			return true
+		}
+	}
+	return false
+}
+
+const ciHistoryRefusalFindingID = "ci-preserve-history-refusal"
+
 func ciHistoryRefusalOutcome(sctx *pipeline.StepContext, err error) *pipeline.StepOutcome {
 	findings := Findings{
 		Summary: "preserve-history constraint can no longer be honored",
 		Items: []Finding{{
-			ID:          "ci-preserve-history-refusal",
+			ID:          ciHistoryRefusalFindingID,
 			Severity:    types.FindingSeverityWarning,
 			Description: fmt.Sprintf("%v. Nothing was rebased, reset, or force-updated. Prepare and validate a new integration explicitly, or finish this PR outside the pipeline.", err),
 			Action:      types.ActionAskUser,

@@ -286,6 +286,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			outcome, err = refusal, nil
 			return
 		}
+		if err == nil && carriesHistoryRefusal(outcome) {
+			return
+		}
 		findings, _ := types.ParseFindingsJSON(refusalFindings)
 		findings.Summary = "Retained CI repair could not finish; resolve the failure and retry with fix"
 		if err != nil {
@@ -299,7 +302,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
-	if err := AssertHistoryPolicy(sctx); err != nil {
+	if err := AssertHistoryPolicy(sctx); err != nil && !historyReadUnverifiable(sctx, err) {
 		return ciHistoryRefusalOutcome(sctx, err), nil
 	}
 	// A run recovered after a restart resumes the rerun budget it already
@@ -519,9 +522,23 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
-		if err := historyConstraintRefusal(sctx, host, pr); err != nil && !historyReadUnverifiable(sctx, err) {
+		if err := historyConstraintRefusal(sctx, host, pr); err != nil {
 			clearCIMonitorReady(sctx)
-			return ciHistoryRefusalOutcome(sctx, err), nil
+			if !historyReadUnverifiable(sctx, err) {
+				return ciHistoryRefusalOutcome(sctx, err), nil
+			}
+			// This poll never learned whether the pin still holds, so it spends
+			// the same consecutive-read budget a provider read does instead of
+			// warning its way to the timeout.
+			consecutiveCheckErrs++
+			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+				sctx.Log(fmt.Sprintf("the pinned integration base could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
+				return ciHistoryRefusalOutcome(sctx, err), nil
+			}
+			if err := waitForPoll(); err != nil {
+				return nil, err
+			}
+			continue
 		}
 
 		// Check mergeable state if the provider supports it
