@@ -393,3 +393,52 @@ func latestRunID(t *testing.T, h *Harness) string {
 	}
 	return newest.ID
 }
+
+// TestExistingUpstreamPRIntegratesABaseSharingTheSourceBranchName is the
+// name-collision shape: the pull request targets an upstream branch whose NAME
+// equals the fork source branch's. Two bare branch names are not the same ref
+// once the integration base lives in another repository, so the run must still
+// integrate with the upstream branch instead of reading itself as already
+// integrated and validating a head that was never measured against the base.
+func TestExistingUpstreamPRIntegratesABaseSharingTheSourceBranchName(t *testing.T) {
+	w := newExistingPRWorld(t)
+	h := w.h
+	ctx := context.Background()
+
+	// The UPSTREAM repository gets a branch named exactly like the fork's
+	// source branch, carrying a commit the source branch does not have.
+	upstreamOnly := h.CommitChange("upstream-base-seed", "upstream-note.txt", "the upstream base moved\n", "advance the upstream base")
+	if out, err := h.runGit(ctx, h.WorkDir, "push", w.upstreamDir, "upstream-base-seed:refs/heads/"+w.branch); err != nil {
+		t.Fatalf("seed the upstream base branch: %v\n%s", err, out)
+	}
+	if out, err := h.runGit(ctx, h.WorkDir, "checkout", "main"); err != nil {
+		t.Fatalf("return to main: %v\n%s", err, out)
+	}
+	if out, err := h.runGit(ctx, h.WorkDir, "branch", "-D", "upstream-base-seed"); err != nil {
+		t.Fatalf("drop the seed branch: %v\n%s", err, out)
+	}
+	w.writeForgeState(t, func(s *existingPRForgeState) { s.BaseRef = w.branch })
+
+	w.commitAndPublish(t, "quota.go", "package quota // account context\n", "add account context")
+
+	out, err := w.drive(t, "axi", "run", "--existing-pr", w.prURL, "--intent", "validate against an upstream base that shares the source branch name", "--yes")
+	if err != nil {
+		t.Fatalf("associated run with a same-named base: %v\n%s", err, out)
+	}
+	run := w.settledRun(t, "same-named base", out)
+	w.refuseAnyPRCreate(t, "same-named base")
+
+	// The validated head carries the upstream base commit, which is only true
+	// if the run integrated with the upstream branch.
+	forkTip, err := h.runGit(ctx, w.forkDir, "rev-parse", "refs/heads/"+w.branch)
+	if err != nil {
+		t.Fatalf("fork branch missing: %v\n%s", err, forkTip)
+	}
+	if got := strings.TrimSpace(string(forkTip)); got != run.HeadSHA {
+		t.Fatalf("fork branch at %s, want the run head %s", got, run.HeadSHA)
+	}
+	if ancestryOut, err := h.runGit(ctx, w.forkDir, "merge-base", "--is-ancestor", upstreamOnly, run.HeadSHA); err != nil {
+		t.Fatalf("validated head %s does not contain the upstream base commit %s - the run skipped integration: %v\n%s\n%s",
+			run.HeadSHA, upstreamOnly, err, ancestryOut, out)
+	}
+}
