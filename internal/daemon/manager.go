@@ -1224,13 +1224,18 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	}
 	if active != nil && active.PreserveHistoryBaseSHA != nil {
 		trackStartFailure("preserve_history_protected")
-		pinned := active.HeadSHA
-		if active.SubmittedHeadSHA != nil {
-			pinned = *active.SubmittedHeadSHA
+		recorded := active.HeadSHA
+		if active.LastPushedSHA != nil {
+			recorded = *active.LastPushedSHA
+		} else if active.SubmittedHeadSHA != nil {
+			recorded = *active.SubmittedHeadSHA
 		}
-		return "", fmt.Errorf("preserve-history: run %[1]s pins branch %[2]s to integration head %[3]s, so no superseding run was started. "+
+		if headSHA == recorded || headSHA == active.HeadSHA {
+			return "", fmt.Errorf("preserve-history: the gate branch %s is at run %s's recorded integration head %s; no new run was started and run %s continues", branch, active.ID, headSHA, active.ID)
+		}
+		return "", fmt.Errorf("preserve-history: run %[1]s pins branch %[2]s to its integration, recorded at %[3]s, so no superseding run was started. "+
 			"If a push triggered this launch, it has already moved the gate branch and run %[1]s cannot publish until the gate branch is back at %[3]s: "+
-			"restore it with `git push --force %[4]s %[3]s:refs/heads/%[2]s`, or abort run %[1]s", active.ID, branch, pinned, gate.RemoteName)
+			"restore it with `git push --force %[4]s %[3]s:refs/heads/%[2]s`, or abort run %[1]s", active.ID, branch, recorded, gate.RemoteName)
 	}
 	m.cancelActiveRuns(repo.ID, branch)
 

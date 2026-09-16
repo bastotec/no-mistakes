@@ -487,6 +487,9 @@ func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
 
 func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
 	state := inspectAxiBranchSync(ctx, env)
+	if blocked := protectedRunOwnership(env, state); blocked != nil {
+		return blocked
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		// The ownership block exists to keep a fresh push from discarding
@@ -494,11 +497,8 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 		// head has not moved yet holds none, so the pre-existing supersede
 		// flow (push new commits over an in-flight run) stays available; a
 		// terminal unmoved run never reaches here because cancellation
-		// releases the branch as user_owned. A preserve-history run is the
-		// exception: its pinned integration is exactly what a superseding push
-		// would move, and the daemon refuses that launch only after the gate
-		// branch has already moved.
-		if branchsync.RunHeadUnmoved(state) && !runPreservesHistory(env, state.Pipeline.RunID) {
+		// releases the branch as user_owned.
+		if branchsync.RunHeadUnmoved(state) {
 			return nil
 		}
 		return &state
@@ -509,11 +509,26 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 	}
 }
 
-// runPreservesHistory fails closed: an unreadable run is treated as protected
-// so a push never moves a pinned integration on a lookup error.
-func runPreservesHistory(env *axiEnv, runID string) bool {
-	run, err := env.d.GetRun(runID)
-	return err != nil || run == nil || run.PreserveHistoryBaseSHA != nil
+// protectedRunOwnership blocks a fresh gate push while the branch's active run
+// pins a preserve-history integration, whatever branch-sync concluded about
+// the worktree: the daemon can refuse that launch only after the post-receive
+// hook has already moved the gate branch the protected run publishes from. A
+// caller already at the run's head pushes nothing new and may reattach. It
+// fails closed when the active run cannot be read.
+func protectedRunOwnership(env *axiEnv, state branchsync.State) *branchsync.State {
+	run, err := env.d.GetActiveRun(env.repo.ID, state.Local.Branch)
+	if err == nil && (run == nil || run.PreserveHistoryBaseSHA == nil || run.HeadSHA == state.Local.Head) {
+		return nil
+	}
+	blocked := state
+	blocked.Safety = "blocked_preserve_history"
+	if err != nil {
+		blocked.Error = fmt.Sprintf("could not confirm whether an active run pins this branch with --preserve-history: %v", err)
+	} else {
+		blocked.Error = fmt.Sprintf("run %s pins this branch's integration with --preserve-history; a fresh run would move the gate branch it publishes from, so none was started", run.ID)
+	}
+	blocked.NextAction = &branchsync.NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+	return &blocked
 }
 
 // triggerRun starts a fresh run for branch: it pushes the current HEAD through

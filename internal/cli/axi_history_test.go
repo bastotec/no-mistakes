@@ -74,10 +74,15 @@ func TestAxiFreshRunOwnershipGuardBlocksSupersedingAProtectedRun(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
 		protected bool
+		published bool
+		change    string
 		wantBlock bool
 	}{
-		{name: "ordinary_unmoved_run_stays_supersedable", protected: false, wantBlock: false},
-		{name: "protected_unmoved_run_blocks_the_push", protected: true, wantBlock: true},
+		{name: "ordinary_unmoved_run_stays_supersedable", change: "amend"},
+		{name: "protected_unmoved_run_blocks_an_amend", protected: true, change: "amend", wantBlock: true},
+		{name: "protected_published_run_blocks_a_follow_up_commit", protected: true, published: true, change: "follow-up", wantBlock: true},
+		{name: "protected_published_run_blocks_an_amend", protected: true, published: true, change: "amend", wantBlock: true},
+		{name: "caller_at_the_protected_head_may_reattach", protected: true, published: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("NM_HOME", filepath.Join(t.TempDir(), "nm-home"))
@@ -126,11 +131,24 @@ func TestAxiFreshRunOwnershipGuardBlocksSupersedingAProtectedRun(t *testing.T) {
 			if tc.protected {
 				pin = base
 			}
-			if _, err := database.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature/pinned", submitted, base, nil, "", "", "", "main", pin); err != nil {
+			run, err := database.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature/pinned", submitted, base, nil, "", "", "", "main", pin)
+			if err != nil {
 				t.Fatal(err)
 			}
+			if tc.published {
+				if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+					HeadSHA: submitted, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/feature/pinned",
+				}); err != nil {
+					t.Fatal(err)
+				}
+			}
 
-			cliGit(t, local, "commit", "--amend", "-m", "rewritten integration")
+			switch tc.change {
+			case "amend":
+				cliGit(t, local, "commit", "--amend", "-m", "rewritten integration")
+			case "follow-up":
+				cliGit(t, local, "commit", "--allow-empty", "-m", "follow-up during CI repair")
+			}
 			chdir(t, local)
 			env := &axiEnv{p: p, d: database, repo: repo, cfg: config.DefaultGlobalConfig()}
 			state := freshRunBranchOwnershipState(context.Background(), env)

@@ -170,15 +170,27 @@ func TestHistoryLaunch_OrdinaryLaunchRefusesToSupersedeAProtectedRun(t *testing.
 	}
 	manager := NewRunManager(database, p, func() []pipeline.Step { return nil })
 	t.Cleanup(manager.Shutdown)
-	_, err = manager.startRun(context.Background(), repo, "main", head, head, "push", nil, "ordinary launch", "")
+	rewritten := strings.Repeat("d", 40)
+	_, err = manager.startRun(context.Background(), repo, "main", rewritten, head, "push", nil, "ordinary launch", "")
 	if err == nil {
 		t.Fatal("an ordinary launch superseded a preserve-history run")
 	}
 	if !strings.Contains(err.Error(), protected.ID) || !strings.Contains(err.Error(), "preserve-history") {
 		t.Fatalf("refusal = %v, want it to name the protected run %s", err, protected.ID)
 	}
-	if !strings.Contains(err.Error(), "git push --force no-mistakes "+head+":refs/heads/main") {
-		t.Fatalf("refusal = %v, want the command that restores the gate branch to the pinned head", err)
+	restore := "git push --force no-mistakes " + head + ":refs/heads/main"
+	if !strings.Contains(err.Error(), restore) {
+		t.Fatalf("refusal = %v, want the command that restores the gate branch to the recorded head", err)
+	}
+
+	// Following that advice pushes the recorded head back to the gate, which
+	// fires the same launch path. It must read as the recovery it is.
+	_, err = manager.startRun(context.Background(), repo, "main", head, head, "push", nil, "restore", "")
+	if err == nil {
+		t.Fatal("the restoring push started a run over the protected one")
+	}
+	if strings.Contains(err.Error(), restore) || !strings.Contains(err.Error(), "no new run was started") {
+		t.Fatalf("restoring push reply = %v, want an acknowledgement that the gate branch is back", err)
 	}
 	still, err := database.GetActiveRun(repo.ID, "main")
 	if err != nil {
