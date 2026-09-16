@@ -68,8 +68,9 @@ type ciIssues struct {
 //   - a provider-attributed outcome no rerun will replace is an ask-user
 //     warning, exactly as before findings existed: nothing a fix agent does
 //     can clear it;
-//   - checks held for a maintainer's approval never ran, so they are one
-//     blocking ask-user error: only approving the runs can clear it, and
+//   - action_required checks (runs held for a maintainer's approval, or app
+//     checks asking for an action) are one blocking ask-user error: only
+//     approving the runs or taking that action can clear it, and
 //     selecting it for a fix round resumes monitoring without an agent.
 //
 // The classification reads provider structure only - bucket, state, the
@@ -132,8 +133,8 @@ func ciObservationFindings(issues ciIssues) Findings {
 	return Findings{Summary: strings.Join(parts, "; "), Items: items}
 }
 
-// awaitingApprovalFinding reports the checks held for a maintainer's approval
-// as one error. It names no Check, so a fix round selecting it has nothing to
+// awaitingApprovalFinding reports the action_required checks, held for a
+// maintainer's approval or asking for an action outside the code, as one error. It names no Check, so a fix round selecting it has nothing to
 // repair and goes straight back to monitoring.
 func awaitingApprovalFinding(held []scm.Check, forkPR bool) ([]Finding, string) {
 	if len(held) == 0 {
@@ -141,20 +142,24 @@ func awaitingApprovalFinding(held []scm.Check, forkPR bool) ([]Finding, string) 
 	}
 	names := make([]string, 0, len(held))
 	for _, check := range held {
-		names = append(names, check.Name)
+		name := check.Name
+		if check.Link != "" {
+			name += " (" + check.Link + ")"
+		}
+		names = append(names, name)
 	}
 	sort.Strings(names)
 	where := "this PR"
 	if forkPR {
 		where = "this fork PR"
 	}
-	summary := fmt.Sprintf("%d check(s) held for maintainer approval", len(held))
+	summary := fmt.Sprintf("%d check(s) awaiting maintainer approval or action", len(held))
 	return []Finding{{
 		Severity: types.FindingSeverityError,
 		Action:   types.ActionAskUser,
 		Category: types.FindingCategoryCIApproval,
 		Description: fmt.Sprintf(
-			"%d check(s) are held for maintainer approval on %s and never ran (GitHub reports action_required): %s. Approve the workflow runs, then resume with fix; no code change can clear this.",
+			"%d check(s) report action_required on %s: %s. A workflow run held for maintainer approval never ran, so approve it; any other check is asking for an action at its details link. Then resume with fix; no code change can clear this.",
 			len(held), where, strings.Join(names, ", "),
 		),
 	}}, summary

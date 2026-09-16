@@ -248,7 +248,7 @@ func TestCIStep_ActionRequiredParksForApprovalWithoutAFixRound(t *testing.T) {
 			if item.Category != types.FindingCategoryCIApproval || item.Action != types.ActionAskUser || item.Severity != types.FindingSeverityError {
 				t.Fatalf("finding = %+v, want a blocking ask-user approval finding", item)
 			}
-			if !strings.Contains(item.Description, "1 check(s) are held for maintainer approval on this fork PR") || !strings.Contains(item.Description, "CI") {
+			if !strings.Contains(item.Description, "1 check(s) report action_required on this fork PR") || !strings.Contains(item.Description, "CI") {
 				t.Fatalf("description = %q", item.Description)
 			}
 			if strings.Contains(findings.Summary, "failing") {

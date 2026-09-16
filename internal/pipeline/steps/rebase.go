@@ -283,14 +283,18 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 	// remote default branch (typically a fork's) or to none at all: the first
 	// ride into the PR although they were pushed, the second were never pushed.
 	remoteDefaults := contributorRemoteDefaults(ctx, workingPath, defaultBranch)
+	notOnRemote := make([]map[string]bool, len(remoteDefaults))
+	for i, rd := range remoteDefaults {
+		notOnRemote[i] = commitsMissingFrom(ctx, workingPath, localTip, rd.ref)
+	}
 	var pushed, unpushed []string
 	pushedTo := map[string]bool{}
 	var pushedNames []string
 	for _, line := range strings.Split(strings.TrimSpace(commitLog), "\n") {
 		sha, oneline, _ := strings.Cut(line, " ")
 		remote := ""
-		for _, rd := range remoteDefaults {
-			if isAncestor(ctx, workingPath, sha, rd.ref) {
+		for i, rd := range remoteDefaults {
+			if notOnRemote[i] != nil && !notOnRemote[i][sha] {
 				remote = rd.name
 				break
 			}
@@ -381,6 +385,20 @@ func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepCo
 func isAncestor(ctx context.Context, workDir, ancestor, descendant string) bool {
 	_, err := git.Run(ctx, workDir, "merge-base", "--is-ancestor", ancestor, descendant)
 	return err == nil
+}
+
+// commitsMissingFrom returns the commits reachable from tip but not from ref,
+// or nil when git cannot list them.
+func commitsMissingFrom(ctx context.Context, workDir, tip, ref string) map[string]bool {
+	out, err := git.Run(ctx, workDir, "rev-list", tip, "^"+ref)
+	if err != nil {
+		return nil
+	}
+	missing := map[string]bool{}
+	for _, sha := range strings.Fields(out) {
+		missing[sha] = true
+	}
+	return missing
 }
 
 type remoteDefault struct {

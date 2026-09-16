@@ -606,7 +606,7 @@ With a positive budget, a rerun is requested when the provider attributes the ou
 
 The remaining outcomes are the job's own verdict on the commit and are never re-run:
 
-- `failure`, `error`, `action_required`, and `startup_failure` (after any repository step ran) are the job's verdict, so they escalate on the first failure with no added latency.
+- `failure`, `error`, and `startup_failure` (after any repository step ran) are the job's verdict, so they escalate on the first failure with no added latency.
 - `timed_out` means the job exceeded its own `timeout-minutes`, which is usually the branch's own code hanging. Re-running it burns another full timeout window reproducing the same failure, so it is treated as a genuine failure and is not opt-in.
 - `stale` is already treated as skipped rather than failed, so it never reaches this decision.
 - An outcome no-mistakes recognizes as none of the above never earns a rerun either.
