@@ -129,6 +129,7 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `-y`, `--yes`   | `bool`   | `false` | Auto-resolve eligible gates until a decision point or outcome                                       |
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
+| `--preserve-history` | `string` | (none) | Full integration-base commit SHA; requires `--base-branch`, preserves the submitted head and forbids automatic integration and forced publication |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
 | `--validation-generation` | `string` | (none) | Caller-selected validation generation bound to `--launch-nonce`; requires that flag |
@@ -157,12 +158,27 @@ Backgrounding a call is fine for an agent harness, but the run never advances pa
 When the CI step is still monitoring an open PR and checks are green - or the trusted default-branch config declares [`no_ci: true`](/no-mistakes/reference/repo-config/#no_ci) with no registered checks - `axi run` exits successfully with `outcome: checks-passed` instead of waiting for a human merge. A generic empty check list without that declaration is not ready.
 Treat that as the agent stopping point: ask the user to review and merge the PR from the `help` line.
 If that PR later falls behind the default branch or hits a merge conflict, do not run `axi run`, `rerun`, or a manual rebase while the CI monitor is still running.
-The monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command.
+By default, the monitor auto-rebases onto the base, resolves actual conflicts, revalidates from Review because rebasing cannot prove continuity with the reviewed head, and re-pushes the branch through Push; a PR that is merely behind but clean needs no command. [History-preserving runs](#history-preserving-validation) refuse that integration instead.
 After that monitor ends, see [`no-mistakes rerun`](#no-mistakes-rerun) for the restart conditions.
 Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `passed-with-skips`) also carry `help` instructions telling the agent to summarize the run.
 `passed-with-override` is a completed run whose CI approval gate was approved by a human while a live check was still failing; it stays a success but reads distinctly from a genuinely green `passed`, and its `help` names the failure the operator approved past.
 `passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL. It retains exit code 0: missing verification is not a failing code verdict. `run.automatic_skips` names each affected step and cause, and `run.head_sha` gives the full recorded head in both drive output and `axi status`. Report that missing evidence; this outcome does not establish CI readiness or a merge. Explicit per-run skips retain their existing behavior. If the run also has a CI approval override, `passed-with-override` takes precedence and the automatic skip causes remain visible. Legacy rows without a recorded skip cause keep their prior classification; their logs remain inspectable.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
+
+### History-preserving validation
+
+For an already prepared integration whose exact history must survive validation:
+
+```sh
+no-mistakes axi run --intent "the user's goal" \
+  --base-branch main --preserve-history <full-base-commit-sha>
+```
+
+The clean, checked-out feature branch's exact submitted HEAD, the named base branch, and its full commit SHA are immutable run pins. The base must already be an ancestor of that HEAD and must still be the live base tip. Pins survive additive fixes and daemon recovery; `axi status` and drive output show them under `run.preserve_history`. A moved or unreadable base, lost submitted-head ancestry, or an unverified/non-fast-forward publication target stops with a `preserve-history` diagnostic. No rebase or merge is attempted, regardless of `rebase.strategy` or repair budgets. CI merge-conflict repair parks rather than launching a resolver. Additive repairs remain allowed under the existing revalidation policy, and every branch publication uses ordinary Git push, never force or force-with-lease; Git rejects a racing non-fast-forward update.
+
+This is per-run, not repository configuration. It cannot be combined with `--skip`. A matching active run can be reattached to without changing its pins; a conflicting active run is never superseded. With explicit receipt flags, replay requires the same pins and intent, and a new nonce refuses an already-active branch. `rerun` cannot implicitly repin a protected run: recover custody if necessary, explicitly prepare the desired integration, and start a new constrained run. Ordinary callers without the flag keep their existing behavior.
+
+Both the CLI **and running daemon** must support this flag. Constrained launch uses a distinct RPC and imports the exact local commit without a gate push, so an older daemon or receive hook cannot silently start an unconstrained run. There is no legacy fallback or automatic daemon restart. These are pipeline-operation guards, not a sandbox against arbitrary trusted commands or agent tools; agents receive additive-only guidance, and ancestry is rechecked before publication. The mode does not create an attestation for prior work, skip validation, or merge a PR.
 
 ### Strict launch receipts
 

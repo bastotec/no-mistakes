@@ -27,6 +27,20 @@ func (s *RebaseStep) Name() types.StepName { return types.StepRebase }
 const forkBranchRefPrefix = "refs/remotes/no-mistakes-push/"
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if preservesHistory(sctx) {
+		if err := AssertHistoryPolicy(sctx); err != nil {
+			return nil, err
+		}
+		head, err := stepGitHeadSHA(sctx)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := historyPushDecision(sctx, resolvePushURL(sctx), normalizedBranchRef(sctx.Run.Branch), head); err != nil {
+			return nil, err
+		}
+		sctx.Log("preserve-history: exact integration pins verified; no rebase or merge performed")
+		return &pipeline.StepOutcome{}, nil
+	}
 	ctx := sctx.Ctx
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	defaultBranch := effectivePRBaseBranch(sctx)

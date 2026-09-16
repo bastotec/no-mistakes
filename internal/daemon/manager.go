@@ -1081,6 +1081,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 
+	if selectedRun.PreserveHistoryBaseSHA != nil {
+		return "", fmt.Errorf("preserve-history run cannot be implicitly repinned by rerun; recover custody if needed, then use axi run --preserve-history <exact-base-sha> --base-branch <branch> for a new explicit integration")
+	}
 	storedPRBaseBranch := strings.TrimSpace(prBaseBranch)
 	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil {
 		storedPRBaseBranch = strings.TrimSpace(*selectedRun.PRBaseBranch)
@@ -1184,7 +1187,7 @@ func (m *RunManager) withBranchLock(repoID, branch string, action func() (string
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
-func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL string) (string, error) {
+func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL string, preserveHistoryBase ...string) (string, error) {
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1231,7 +1234,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", err
 	}
 
-	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch)
+	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, preserveHistoryBase...)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)

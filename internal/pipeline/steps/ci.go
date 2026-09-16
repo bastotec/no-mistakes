@@ -244,6 +244,9 @@ func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedH
 }
 
 func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutcome, err error) {
+	if err := AssertHistoryPolicy(sctx); err != nil {
+		return nil, err
+	}
 	refusalFindings := ""
 	if sctx.StepResultID != "" {
 		stepResult, err := sctx.DB.GetStepResult(sctx.StepResultID)
@@ -503,6 +506,23 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return &pipeline.StepOutcome{}, nil
 		} else if state == scm.PRStateOpen {
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
+				return nil, err
+			}
+		}
+
+		if preservesHistory(sctx) {
+			if reader, ok := host.(scm.PRBaseBranchReader); ok {
+				actual, readErr := reader.GetPRBaseBranch(ctx, pr)
+				if readErr != nil {
+					return nil, historyRefusal("cannot verify live PR base: %v", readErr)
+				}
+				pr.BaseBranch = actual
+			}
+			if sctx.Run.PRBaseBranch == nil || pr.BaseBranch != *sctx.Run.PRBaseBranch {
+				return nil, historyRefusal("live PR base is not the pinned integration branch")
+			}
+			if err := AssertHistoryPolicy(sctx); err != nil {
+				clearCIMonitorReady(sctx)
 				return nil, err
 			}
 		}

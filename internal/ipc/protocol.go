@@ -9,8 +9,11 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived       = "push_received"
-	MethodStartFreshRun      = "start_fresh_run"
+	MethodPushReceived  = "push_received"
+	MethodStartFreshRun = "start_fresh_run"
+	// A distinct method prevents an older daemon from silently ignoring the
+	// history contract. This path imports locally; it never fires a gate hook.
+	MethodStartHistoryRun    = "start_history_run"
 	MethodClaimLaunchReceipt = "claim_launch_receipt"
 	MethodGetRun             = "get_run"
 	MethodGetStepDiff        = "get_step_diff"
@@ -98,6 +101,18 @@ type StartFreshRunParams struct {
 	LaunchNonce          string           `json:"launch_nonce"`
 	ValidationGeneration string           `json:"validation_generation"`
 	PRBaseBranch         string           `json:"pr_base_branch,omitempty"`
+}
+
+// StartHistoryRunParams starts an explicitly history-preserving run from a
+// verified invoking checkout. The source head, base SHA and branch are immutable.
+// Older daemons refuse the distinct RPC before any gate push can start a run.
+type StartHistoryRunParams struct {
+	StartFreshRunParams
+	WorkDir                string `json:"work_dir"`
+	PreserveHistoryBaseSHA string `json:"preserve_history_base_sha"`
+	// Ordinary reattachment may reuse matching pins. A strict new nonce must
+	// never silently acquire another request's receipt or supersede its run.
+	ReuseActive bool `json:"reuse_active,omitempty"`
 }
 
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.
@@ -322,7 +337,8 @@ type RunInfo struct {
 	CIReadyNoCI      bool            `json:"ci_ready_no_ci,omitempty"`
 	// PRBaseBranch is the per-run PR target override, if the operator set
 	// --base-branch when starting this run.
-	PRBaseBranch *string `json:"pr_base_branch,omitempty"`
+	PRBaseBranch           *string `json:"pr_base_branch,omitempty"`
+	PreserveHistoryBaseSHA *string `json:"preserve_history_base_sha,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both

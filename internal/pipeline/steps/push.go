@@ -23,6 +23,9 @@ type PushStep struct{}
 func (s *PushStep) Name() types.StepName { return types.StepPush }
 
 func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if err := AssertHistoryPolicy(sctx); err != nil {
+		return nil, err
+	}
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -119,6 +122,14 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 // revalidation); pass this run's current steps (sctx.DB.GetStepsByRun) for
 // the ordinary Push step.
 func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate string, attestationSteps []*db.StepResult) error {
+	if err := AssertHistoryPolicy(sctx); err != nil {
+		return err
+	}
+	if preservesHistory(sctx) {
+		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", *sctx.Run.SubmittedHeadSHA, headBeingPushed); err != nil {
+			return fmt.Errorf("preserve-history: proposed publication %s does not contain the pinned integration head", headBeingPushed)
+		}
+	}
 	ctx := sctx.Ctx
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")
@@ -156,7 +167,12 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	// remote-tracking refs), so the anchor is explicit.
 	lastSeen := lastKnownBranchTip(ctx, sctx, branch, usingFork)
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
-	decision, err := resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
+	var decision forcePushDecision
+	if preservesHistory(sctx) {
+		decision, err = historyPushDecision(sctx, pushURL, ref, headBeingPushed)
+	} else {
+		decision, err = resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)
+	}
 	if err != nil {
 		return fmt.Errorf("push to %s: %w", pushTarget, err)
 	}

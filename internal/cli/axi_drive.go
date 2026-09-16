@@ -119,6 +119,7 @@ func newAxiRunCmd() *cobra.Command {
 	var launchNonce string
 	var validationGeneration string
 	var baseBranch string
+	var preserveHistoryBase string
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -165,6 +166,9 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
+				if preserveHistoryBase != "" || cmd.Flags().Changed("preserve-history") {
+					return runAxiPreserveHistory(cmd, autoYes, skipSteps, intent, baseBranch, preserveHistoryBase, launchNonce, validationGeneration, wait)
+				}
 				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait)
 			})
 		},
@@ -175,6 +179,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().StringVar(&preserveHistoryBase, "preserve-history", "", "pin the exact integration base SHA and submitted history; require --base-branch, forbid rebase/merge and force updates (including CI repair)")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }

@@ -117,6 +117,9 @@ func hasBlockingFindings(items []Finding) bool {
 // step and the whole run abort (executor.failRun) before doing more work -
 // nothing is committed or shipped.
 func assertPipelineHeadContinuity(sctx *pipeline.StepContext, stepName types.StepName) error {
+	if err := AssertHistoryPolicy(sctx); err != nil {
+		return err
+	}
 	recorded := strings.TrimSpace(sctx.Run.HeadSHA)
 	if recorded == "" {
 		return nil
