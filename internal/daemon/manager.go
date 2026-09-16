@@ -1267,13 +1267,17 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", err
 	}
 
-	// The insert commits the run's pin and the branch's association together,
-	// so the association this run publishes under is the one the next launch
-	// reads back, whatever happens to the daemon from here on.
-	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, target)
+	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch)
 	if err != nil {
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
+	}
+	// The target constrains this run from here on, but it is not durable until
+	// the forge has proven it below: a launch that is refused there must leave
+	// the branch mapped exactly where it already was, so the next unflagged run
+	// cannot inherit a target the forge check rejected.
+	if target != "" {
+		run.ExistingPRURL, run.PRURL = &target, &target
 	}
 	if inherited := strings.TrimSpace(inheritedPRURL); inherited != "" && run.ExistingPRURL == nil {
 		if err := m.db.UpdateRunPRURL(run.ID, inherited); err != nil {
@@ -1447,6 +1451,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// The run integrates with the branch the pull request actually targets, not
 	// the repository default: rebase, PR and CI all read this.
 	if explicitPR != nil {
+		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			trackStartFailure("associate_existing_pr")
+			return "", err
+		}
 		base, err := normalizeRunPRBaseBranch(explicitPR.BaseBranch)
 		if err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())

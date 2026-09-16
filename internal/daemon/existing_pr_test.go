@@ -415,3 +415,68 @@ func (s *existingPRObserveStep) Execute(ctx *pipeline.StepContext) (*pipeline.St
 	}
 	return &pipeline.StepOutcome{}, nil
 }
+
+// A target the forge check rejects must leave the branch exactly as it was.
+// Persisting it at run creation made the refusal establish the association
+// anyway, and the next unflagged launch - which only revalidates the identity,
+// never the head - then published to the very pull request the operator's
+// explicit validation had just refused.
+func TestRefusedExplicitLaunchLeavesNoAssociationToInherit(t *testing.T) {
+	bin := t.TempDir()
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	const target = "https://github.com/upstream/widgets/pull/168"
+	var calls atomic.Int32
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&existingPRObserveStep{calls: &calls, target: target}} })
+	repo, _ := setupTestGitRepo(t, p, d, "refused-explicit-pr")
+	repo, err := d.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubExplicitUpstream(t, p, repo, "main")
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	writeCommit(t, repo.WorkingPath, "new.txt", "new committed work")
+	head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	// The pull request's live head is a commit this branch is not at, so the
+	// explicit head check refuses the launch.
+	payload := fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","base":{"ref":"main","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, target, strings.Repeat("f", 40))
+	t.Setenv("FAKE_CLI_EXISTING_PR_JSON", payload)
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "validate existing upstream PR", URL: target}, &ipc.RerunResult{}); err == nil {
+		t.Fatal("explicit launch with a mismatched live head was accepted")
+	}
+	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != "" {
+		t.Fatalf("refused launch left association %q (%v), want none", stored, err)
+	}
+
+	// The next unflagged launch must discover for itself, not inherit the
+	// refused target - that path only revalidates the identity, which the
+	// refused pull request still satisfies.
+	previous, err := d.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(previous.ID, types.RunCompleted); err != nil {
+		t.Fatal(err)
+	}
+	var unflagged ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "feature", PreviousRunID: previous.ID, Intent: "ordinary follow-up"}, &unflagged); err != nil {
+		t.Fatal(err)
+	}
+	ordinary := waitForRunTerminalState(t, d, unflagged.RunID)
+	if ordinary.ExistingPRURL != nil {
+		t.Fatalf("unflagged run inherited the refused target: %v", *ordinary.ExistingPRURL)
+	}
+}

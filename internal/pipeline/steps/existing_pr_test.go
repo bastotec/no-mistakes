@@ -52,7 +52,14 @@ func pinFixturePR(t *testing.T, sctx *pipeline.StepContext) {
 	t.Helper()
 	sctx.Repo.UpstreamURL = fixtureSourceURL
 	sctx.Repo.URLsVerified = true
-	run, err := sctx.DB.InsertRunWithIntentAndLaunchNonce(sctx.Repo.ID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA, nil, "", "", "", "", fixtureExistingPR)
+	run, err := sctx.DB.InsertRunWithIntentAndLaunchNonce(sctx.Repo.ID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA, nil, "", "", "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.AssociateRunWithExistingPR(run.ID, sctx.Repo.ID, sctx.Run.Branch, fixtureExistingPR); err != nil {
+		t.Fatal(err)
+	}
+	run, err = sctx.DB.GetRun(run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}

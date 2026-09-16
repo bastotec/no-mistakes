@@ -6,11 +6,49 @@ import (
 	"fmt"
 )
 
+// AssociateRunWithExistingPR makes a validated target durable. The run's pin
+// and the branch's canonical association are one fact, so they are one write:
+// a daemon exit can never leave a run publishing to a pull request its own
+// branch no longer maps to, which is what would let a later unflagged launch
+// discover or create another one. Nothing here is written before the forge has
+// proven the target, so a refused launch leaves the branch mapped exactly
+// where it already was.
+func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL string) error {
+	ts := now()
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("associate run with existing pr: begin: %w", err)
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
+		`UPDATE runs SET existing_pr_url = ?, pr_url = ?, updated_at = ? WHERE id = ?`,
+		prURL, prURL, ts, runID,
+	)
+	if err != nil {
+		return fmt.Errorf("pin run to existing pr: %w", err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("pin run to existing pr: %w", err)
+	}
+	if affected == 0 {
+		return fmt.Errorf("pin run to existing pr: run %s not found", runID)
+	}
+	if err := setBranchPRTarget(tx, repoID, branch, prURL, ts); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("associate run with existing pr: commit: %w", err)
+	}
+	return nil
+}
+
 // setBranchPRTarget records the canonical pull request a branch publishes to.
 // It outlives the run that established it: later launches, push-hook runs and
 // CI repairs reuse it until it is replaced by another explicit association or
-// retired. It is transaction-scoped on purpose - the only writer is the run
-// insert that pins the same pull request, and the two must commit together.
+// retired. It is transaction-scoped on purpose - the only writer is
+// AssociateRunWithExistingPR, which pins the same pull request on the run in
+// the same transaction.
 func setBranchPRTarget(tx *sql.Tx, repoID, branch, prURL string, ts int64) error {
 	_, err := tx.Exec(
 		`INSERT INTO branch_pr_targets (repo_id, branch, pr_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)

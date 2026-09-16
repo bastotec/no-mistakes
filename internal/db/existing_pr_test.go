@@ -16,12 +16,12 @@ func TestExistingPRPinSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := "https://github.com/upstream/widgets/pull/168"
-	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "", target)
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.ExistingPRURL == nil || *run.ExistingPRURL != target || run.PRURL == nil || *run.PRURL != target {
-		t.Fatalf("creation did not atomically pin target: %+v", run)
+	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target); err != nil {
+		t.Fatal(err)
 	}
 	if err := d.Close(); err != nil {
 		t.Fatal(err)
@@ -50,40 +50,59 @@ func TestExplicitTargetPinsTheRunAndAssociatesTheBranchInOneWrite(t *testing.T) 
 		t.Fatal(err)
 	}
 	target := "https://github.com/upstream/widgets/pull/168"
-	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "", target)
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if run.ExistingPRURL == nil || *run.ExistingPRURL != target {
-		t.Fatalf("run not pinned to %s: %+v", target, run)
+	// Creating the run proves nothing about the target, so it pins nothing and
+	// associates nothing.
+	if run.ExistingPRURL != nil || run.PRURL != nil {
+		t.Fatalf("run insert pinned an unproven target: %+v", run)
+	}
+	if stored, err := d.GetBranchPRTarget(repo.ID, "feature"); err != nil || stored != "" {
+		t.Fatalf("branch association after insert = %q (%v), want none", stored, err)
+	}
+	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target); err != nil {
+		t.Fatal(err)
+	}
+	pinned, err := d.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pinned.ExistingPRURL == nil || *pinned.ExistingPRURL != target || pinned.PRURL == nil || *pinned.PRURL != target {
+		t.Fatalf("run not pinned to %s: %+v", target, pinned)
 	}
 	stored, err := d.GetBranchPRTarget(repo.ID, "feature")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if stored != target {
-		t.Fatalf("branch association after insert = %q, want %q", stored, target)
+		t.Fatalf("branch association = %q, want %q", stored, target)
 	}
 }
 
 // A replacement that does not commit must leave the previous association
 // intact: the alternative is a branch mapped to a pull request no run is
 // pinned to, which the next unflagged launch would publish to.
-func TestFailedExplicitRunInsertLeavesThePriorAssociationIntact(t *testing.T) {
+func TestFailedExplicitAssociationLeavesThePriorAssociationIntact(t *testing.T) {
 	d := openTestDB(t)
 	repo, err := d.InsertRepo("/test/repo", "https://github.com/contributor/widgets.git", "main")
 	if err != nil {
 		t.Fatal(err)
 	}
 	original := "https://github.com/upstream/widgets/pull/168"
-	if _, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "nonce-1", "gen", "digest", "", original); err != nil {
+	first, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "")
+	if err != nil {
 		t.Fatal(err)
 	}
-	// Same repository, branch and launch nonce: the partial unique index
-	// refuses this insert, so nothing it carries may land.
+	if err := d.AssociateRunWithExistingPR(first.ID, repo.ID, "feature", original); err != nil {
+		t.Fatal(err)
+	}
+	// No such run: the pin cannot land, so neither may the association it
+	// travels with.
 	replacement := "https://github.com/upstream/widgets/pull/999"
-	if _, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head2", "base", nil, "nonce-1", "gen", "digest", "", replacement); err == nil {
-		t.Fatal("expected duplicate launch nonce insert to fail")
+	if err := d.AssociateRunWithExistingPR("run-that-does-not-exist", repo.ID, "feature", replacement); err == nil {
+		t.Fatal("expected association against an unknown run to fail")
 	}
 	stored, err := d.GetBranchPRTarget(repo.ID, "feature")
 	if err != nil {
