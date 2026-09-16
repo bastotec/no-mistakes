@@ -23,7 +23,7 @@ func stubExplicitUpstream(t *testing.T, p *paths.Paths, repo *db.Repo, baseBranc
 	t.Helper()
 	upstream := t.TempDir()
 	gitCmd(t, "", "init", "--bare", upstream)
-	gitCmd(t, repo.WorkingPath, "push", upstream, "main:refs/heads/"+baseBranch)
+	gitCmd(t, repo.WorkingPath, "push", upstream, "HEAD:refs/heads/"+baseBranch)
 	gitCmd(t, p.RepoDir(repo.ID), "config", "url."+upstream+".insteadOf", "https://github.com/upstream/widgets.git")
 }
 

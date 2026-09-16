@@ -305,7 +305,7 @@ func TestExplicitPRIntegrationFetchUsesTheRunsOwnForgeEnvironment(t *testing.T) 
 			}
 			mapping := func(target string) string {
 				path := filepath.Join(t.TempDir(), "gitconfig")
-				body := "[url \"" + target + "\"]\n\tinsteadOf = https://github.com/upstream/widgets.git\n"
+				body := "[url \"" + filepath.ToSlash(target) + "\"]\n\tinsteadOf = https://github.com/upstream/widgets.git\n"
 				if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 					t.Fatal(err)
 				}
