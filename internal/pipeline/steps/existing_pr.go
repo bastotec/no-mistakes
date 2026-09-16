@@ -27,7 +27,10 @@ func ValidateExistingPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm
 	if err != nil || pr == nil {
 		return host, pr, err
 	}
-	if head == "" || pr.HeadSHA != head {
+	if head == "" {
+		return nil, nil, staleAssociation(sctx, fmt.Errorf("the push remote has no head for the source branch, so there is nothing to validate the pull request against"))
+	}
+	if pr.HeadSHA != head {
 		return nil, nil, fmt.Errorf("%w: %s is at %s, not the %s this run published: its source branch moved outside this run - validate the new head with a fresh run on the branch, or run `no-mistakes axi run --retire-existing-pr` on it if that pull request is no longer the target", errExplicitPRHeadMismatch, existingPRURL(sctx), shortSHA(pr.HeadSHA), shortSHA(head))
 	}
 	return host, pr, nil

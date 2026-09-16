@@ -58,6 +58,11 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
 	defaultBranch := effectivePRBaseBranch(sctx)
 	integrationRef := runIntegrationRef(sctx, defaultBranch)
+	// An associated run's branch lives in the fork while its integration base
+	// lives in the pull request's repository, so the two are never the same ref
+	// however their names compare. Only an unassociated run can be sitting on
+	// the branch it would otherwise integrate with.
+	integrationIsOwnBranch := branch == defaultBranch && existingPRURL(sctx) == ""
 	branchTarget := ""
 	pushRemote := resolveUpstreamURL(sctx)
 	if branch != "" {
@@ -91,7 +96,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// when the remote carries an out-of-band commit - silently clobbering it
 	// (the original #281/#305 hazard, in the force-push path). Leaving it stale is
 	// what lets the push step's content check catch that case.
-	if !forcePush && branch != "" && branch != defaultBranch {
+	if !forcePush && branch != "" && !integrationIsOwnBranch {
 		if !branchTrackedInPushNamespace(sctx) {
 			if err := FetchRunUpstreamBranch(ctx, sctx, branch); err != nil {
 				sctx.LogFile(fmt.Sprintf("warning: could not fetch origin/%s: %v", branch, err))
@@ -109,7 +114,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, integrationRef); outcome != nil {
 		return outcome, nil
 	}
-	if forcePush && branch == defaultBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, integrationRef, sctx.Run.BaseSHA) {
+	if forcePush && integrationIsOwnBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, integrationRef, sctx.Run.BaseSHA) {
 		findingsJSON, _ := json.Marshal(Findings{
 			Items: []Finding{{
 				Severity:    "warning",
@@ -124,10 +129,10 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 		}, nil
 	}
 
-	targets := rebaseTargetsForBranch(branch, defaultBranch, branchTarget, integrationRef)
+	targets := rebaseTargetsForBranch(branch, branchTarget, integrationRef, integrationIsOwnBranch)
 	if forcePush {
 		sctx.Log("force push detected, skipping " + branchTarget + " sync")
-		targets = forcePushRebaseTargets(branch, defaultBranch, integrationRef)
+		targets = forcePushRebaseTargets(integrationRef, integrationIsOwnBranch)
 	}
 
 	merging := mergesMovedBase(sctx)
@@ -204,27 +209,27 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	return updateHeadSHA(ctx, sctx)
 }
 
-// rebaseTargets returns the ordered list of refs to rebase onto.
-func rebaseTargets(branch, defaultBranch string) []string {
-	return rebaseTargetsForBranch(branch, defaultBranch, "origin/"+branch, "origin/"+defaultBranch)
-}
-
-func rebaseTargetsForBranch(branch, defaultBranch, branchTarget, integrationRef string) []string {
+// rebaseTargetsForBranch returns the ordered list of refs to integrate. A run
+// sitting on the branch it would integrate with has nothing to integrate;
+// integrationIsOwnBranch is the only thing that decides that, because two bare
+// branch names are not evidence of the same ref once the integration base can
+// live in another repository.
+func rebaseTargetsForBranch(branch, branchTarget, integrationRef string, integrationIsOwnBranch bool) []string {
+	if integrationIsOwnBranch {
+		return nil
+	}
 	var targets []string
-	if branch != "" && branch != defaultBranch {
+	if branch != "" {
 		targets = append(targets, branchTarget)
 	}
-	if branch != defaultBranch {
-		targets = append(targets, integrationRef)
-	}
-	return targets
+	return append(targets, integrationRef)
 }
 
 // forcePushRebaseTargets returns rebase targets for a force push. The pushed
 // branch target is skipped because it may contain autofix commits from prior
 // pipeline runs that the force push intended to discard.
-func forcePushRebaseTargets(branch, defaultBranch, integrationRef string) []string {
-	if branch == defaultBranch {
+func forcePushRebaseTargets(integrationRef string, integrationIsOwnBranch bool) []string {
+	if integrationIsOwnBranch {
 		return nil
 	}
 	return []string{integrationRef}

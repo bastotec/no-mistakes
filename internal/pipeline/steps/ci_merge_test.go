@@ -206,8 +206,8 @@ func TestCIStep_MergeConflictOnly_AutoFix(t *testing.T) {
 	if strings.Contains(capturedPrompt, "You MUST produce file changes that fix the failing checks") {
 		t.Fatalf("merge-conflict-only prompt should not require file changes for failing checks, got:\n%s", capturedPrompt)
 	}
-	if !strings.Contains(capturedPrompt, "Rebase onto the base branch and resolve the merge conflicts") {
-		t.Fatalf("expected merge-conflict-only prompt to focus on rebase flow, got:\n%s", capturedPrompt)
+	if !strings.Contains(capturedPrompt, "The PR has merge conflicts with origin/main. Rebase onto the rebase target commit given below") {
+		t.Fatalf("expected merge-conflict-only prompt to name the conflicted base and point at the proven commit, got:\n%s", capturedPrompt)
 	}
 
 	// Should log about merge conflict
