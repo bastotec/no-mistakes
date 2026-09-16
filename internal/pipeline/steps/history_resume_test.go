@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -14,6 +15,9 @@ import (
 
 func TestPreserveHistory_ResumeKeepsPinsBeforeFixing(t *testing.T) {
 	f, base, originalParents := newHistoryFixture(t, false)
+	f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
+	}}
 	sequence := []pipeline.Step{&RebaseStep{}, &ReviewStep{}, &PushStep{}}
 	for _, step := range sequence {
 		sr, err := f.sctx.DB.InsertStepResult(f.sctx.Run.ID, step.Name())
@@ -48,6 +52,7 @@ func TestPreserveHistory_ResumeKeepsPinsBeforeFixing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	publishedBefore := f.remoteHead(t)
 	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
 	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "base advanced during restart")
 	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
@@ -64,6 +69,22 @@ func TestPreserveHistory_ResumeKeepsPinsBeforeFixing(t *testing.T) {
 	err = executor.Resume(ctx, run, f.sctx.Repo, f.dir)
 	if err == nil || !strings.Contains(err.Error(), "integration base main moved") {
 		t.Fatalf("resumed fixer discarded its pins: %v", err)
+	}
+	results, dbErr := f.sctx.DB.GetStepsByRun(f.sctx.Run.ID)
+	if dbErr != nil {
+		t.Fatal(dbErr)
+	}
+	publication := false
+	for _, result := range results {
+		if result.StepName == types.StepPush && result.Status == types.StepStatusFailed {
+			publication = true
+		}
+	}
+	if !publication {
+		t.Fatalf("the moved base was not refused at publication: %+v", results)
+	}
+	if f.remoteHead(t) != publishedBefore {
+		t.Fatal("a base-constrained refusal was published")
 	}
 	assertRestoredToReviewedHead(t, f.dir, f.headSHA)
 	assertHistoryUntouched(t, f, originalParents)

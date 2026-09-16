@@ -122,11 +122,6 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	if err := AssertHistoryPolicy(sctx); err != nil {
 		return err
 	}
-	if preservesHistory(sctx) {
-		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", *sctx.Run.SubmittedHeadSHA, headBeingPushed); err != nil {
-			return fmt.Errorf("preserve-history: proposed publication %s does not contain the pinned integration head", headBeingPushed)
-		}
-	}
 	ctx := sctx.Ctx
 	ref := normalizedBranchRef(sctx.Run.Branch)
 	branch := strings.TrimPrefix(ref, "refs/heads/")

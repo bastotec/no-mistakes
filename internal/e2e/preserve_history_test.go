@@ -84,6 +84,10 @@ func TestPreserveHistoryMovedBaseWhileParkedStopsWithoutPublicationJourney(t *te
 	if gitIn(t, h, operator, "rev-parse", "HEAD") != head || failed.HeadSHA != head {
 		t.Fatal("refusal changed the original or recorded integration head")
 	}
+	push, ok := findStep(failed.Steps, types.StepPush)
+	if !ok || push.Status != types.StepStatusFailed {
+		t.Fatalf("the moved base was not refused at publication: %+v", failed.Steps)
+	}
 	if _, err := h.runGit(context.Background(), h.UpstreamDir, "show-ref", "--verify", "refs/heads/"+branch); err == nil {
 		t.Fatal("a base-constrained refusal was published")
 	}
