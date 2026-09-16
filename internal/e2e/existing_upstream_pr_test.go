@@ -5,6 +5,7 @@ package e2e
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -286,6 +287,25 @@ func TestExistingUpstreamPRAssociationJourney(t *testing.T) {
 	if !strings.Contains(body, "no-mistakes") {
 		t.Fatalf("no no-mistakes appendix appended to the PR body:\n%s", body)
 	}
+
+	// Reattach: the run is still active (monitoring CI), so the documented
+	// reattach form - same URL, no --intent - lands on that same run, while a
+	// different pull request is a conflict the caller must rephrase (exit 2).
+	reattachOut, err := w.drive(t, "axi", "run", "--existing-pr", w.prURL)
+	if err != nil {
+		t.Fatalf("reattach to the active associated run: %v\n%s", err, reattachOut)
+	}
+	if reattached := w.settledRun(t, "reattach", reattachOut); reattached.ID != run.ID {
+		t.Fatalf("reattach landed on %s, want the active run %s\n%s", reattached.ID, run.ID, reattachOut)
+	}
+	otherURL := "https://github.com/" + existingPRUpstreamRepo + "/pull/999"
+	conflictOut, conflictErr := w.drive(t, "axi", "run", "--existing-pr", otherURL)
+	var exitErr *exec.ExitError
+	if !errors.As(conflictErr, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("another PR while a run is active: err=%v, want exit 2\n%s", conflictErr, conflictOut)
+	}
+	t.Logf("reattach transcript:\n%s\nother-PR conflict transcript (%v):\n%s", reattachOut, conflictErr, conflictOut)
+	w.refuseAnyPRCreate(t, "reattach")
 
 	// Reuse: a later launch with NO flag publishes to the same pull request.
 	w.commitAndPublish(t, "quota.go", "package quota // account context, revised\n", "revise account context")
