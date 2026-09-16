@@ -526,7 +526,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			// warning its way to the timeout.
 			consecutiveCheckErrs++
 			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
-				sctx.Log(fmt.Sprintf("the pinned integration base could not be read %d consecutive times, parking for a decision", consecutiveCheckErrs))
+				sctx.Log(fmt.Sprintf("required CI reads failed on %d consecutive polls, the latest unable to read the pinned integration base; parking for a decision", consecutiveCheckErrs))
 				return ciHistoryRefusalOutcome(sctx, err), nil
 			}
 			if err := waitForPoll(); err != nil {

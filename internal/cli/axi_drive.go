@@ -494,8 +494,11 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 		// head has not moved yet holds none, so the pre-existing supersede
 		// flow (push new commits over an in-flight run) stays available; a
 		// terminal unmoved run never reaches here because cancellation
-		// releases the branch as user_owned.
-		if branchsync.RunHeadUnmoved(state) {
+		// releases the branch as user_owned. A preserve-history run is the
+		// exception: its pinned integration is exactly what a superseding push
+		// would move, and the daemon refuses that launch only after the gate
+		// branch has already moved.
+		if branchsync.RunHeadUnmoved(state) && !runPreservesHistory(env, state.Pipeline.RunID) {
 			return nil
 		}
 		return &state
@@ -504,6 +507,13 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 	default:
 		return nil
 	}
+}
+
+// runPreservesHistory fails closed: an unreadable run is treated as protected
+// so a push never moves a pinned integration on a lookup error.
+func runPreservesHistory(env *axiEnv, runID string) bool {
+	run, err := env.d.GetRun(runID)
+	return err != nil || run == nil || run.PreserveHistoryBaseSHA != nil
 }
 
 // triggerRun starts a fresh run for branch: it pushes the current HEAD through

@@ -177,6 +177,9 @@ func TestHistoryLaunch_OrdinaryLaunchRefusesToSupersedeAProtectedRun(t *testing.
 	if !strings.Contains(err.Error(), protected.ID) || !strings.Contains(err.Error(), "preserve-history") {
 		t.Fatalf("refusal = %v, want it to name the protected run %s", err, protected.ID)
 	}
+	if !strings.Contains(err.Error(), "git push --force no-mistakes "+head+":refs/heads/main") {
+		t.Fatalf("refusal = %v, want the command that restores the gate branch to the pinned head", err)
+	}
 	still, err := database.GetActiveRun(repo.ID, "main")
 	if err != nil {
 		t.Fatal(err)

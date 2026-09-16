@@ -3,11 +3,17 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
 )
@@ -54,6 +60,85 @@ func TestAxiPreserveHistory_RejectsInvalidControlsBeforeOpeningEnvironment(t *te
 			err := runAxiPreserveHistory(cmd, false, tc.skip, "intent", tc.base, tc.sha, tc.nonce, tc.generation, time.Minute)
 			if err == nil || !strings.Contains(out.String(), tc.want) {
 				t.Fatalf("want %q: %v\n%s", tc.want, err, &out)
+			}
+		})
+	}
+}
+
+// An active run whose head has not moved may be superseded by a fresh push -
+// unless it pins a preserve-history integration. The agent-side sequence is an
+// amend (or rebase) of the local commit followed by `axi run`: the guard must
+// refuse before the gate push, because the daemon can only refuse after the
+// post-receive hook has already moved the gate branch.
+func TestAxiFreshRunOwnershipGuardBlocksSupersedingAProtectedRun(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		protected bool
+		wantBlock bool
+	}{
+		{name: "ordinary_unmoved_run_stays_supersedable", protected: false, wantBlock: false},
+		{name: "protected_unmoved_run_blocks_the_push", protected: true, wantBlock: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("NM_HOME", filepath.Join(t.TempDir(), "nm-home"))
+			root := t.TempDir()
+			local := filepath.Join(root, "operator")
+			cliGit(t, root, "init", "-b", "main", local)
+			cliGit(t, local, "config", "user.name", "Test")
+			cliGit(t, local, "config", "user.email", "test@example.com")
+			if err := os.WriteFile(filepath.Join(local, "file.txt"), []byte("base\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cliGit(t, local, "add", "file.txt")
+			cliGit(t, local, "commit", "-m", "base")
+			base := cliGit(t, local, "rev-parse", "HEAD")
+			cliGit(t, local, "checkout", "-b", "feature/pinned")
+			if err := os.WriteFile(filepath.Join(local, "file.txt"), []byte("integration\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			cliGit(t, local, "commit", "-am", "integration")
+			submitted := cliGit(t, local, "rev-parse", "HEAD")
+
+			p, err := paths.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			registeredRoot, err := git.FindGitRoot(local)
+			if err != nil {
+				t.Fatal(err)
+			}
+			repo, err := database.InsertRepo(registeredRoot, filepath.Join(root, "remote.git"), "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gate := p.RepoDir(repo.ID)
+			cliGit(t, filepath.Dir(gate), "init", "--bare", gate)
+			cliGit(t, local, "push", gate, "refs/heads/feature/pinned:refs/heads/feature/pinned")
+			pin := ""
+			if tc.protected {
+				pin = base
+			}
+			if _, err := database.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature/pinned", submitted, base, nil, "", "", "", "main", pin); err != nil {
+				t.Fatal(err)
+			}
+
+			cliGit(t, local, "commit", "--amend", "-m", "rewritten integration")
+			chdir(t, local)
+			env := &axiEnv{p: p, d: database, repo: repo, cfg: config.DefaultGlobalConfig()}
+			state := freshRunBranchOwnershipState(context.Background(), env)
+			if blocked := state != nil; blocked != tc.wantBlock {
+				t.Fatalf("blocked = %v, want %v (state %+v)", blocked, tc.wantBlock, state)
+			}
+			if got := cliGit(t, gate, "rev-parse", "refs/heads/feature/pinned"); got != submitted {
+				t.Fatalf("gate branch = %s, want the pinned integration %s", got, submitted)
 			}
 		})
 	}
