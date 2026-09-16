@@ -111,7 +111,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 	// origin/<default>. Rebasing onto the fresh remote default keeps those
 	// commits in the branch's history, so the PR may bundle another
 	// workstream's unpushed work. Surface the ambiguity for a human decision.
-	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, integrationRef); outcome != nil {
+	if outcome := detectBundledLocalDefaultCommits(ctx, sctx, branch, defaultBranch, integrationRef, integrationIsOwnBranch); outcome != nil {
 		return outcome, nil
 	}
 	if forcePush && integrationIsOwnBranch && remoteDefaultBranchAdvanced(ctx, sctx.WorkDir, integrationRef, sctx.Run.BaseSHA) {
@@ -266,8 +266,14 @@ func effectivePRBaseBranch(sctx *pipeline.StepContext) string {
 // evidence of an additional bundled workstream.
 // Detection is best-effort - if the local default tip advanced past the branch
 // point, or the working repo cannot be read, it returns nil rather than guess.
-func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch, remoteRef string) *pipeline.StepOutcome {
-	if branch == "" || branch == defaultBranch {
+//
+// A run sitting on the branch it integrates with has no separate workstream to
+// bundle, and integrationIsOwnBranch is the only thing that decides that: for
+// an associated run the two names can match across repositories (fork:develop
+// against upstream:develop) while the refs are different commits, and that run
+// is exactly the one whose local default commits need surfacing.
+func detectBundledLocalDefaultCommits(ctx context.Context, sctx *pipeline.StepContext, branch, defaultBranch, remoteRef string, integrationIsOwnBranch bool) *pipeline.StepOutcome {
+	if branch == "" || integrationIsOwnBranch {
 		return nil
 	}
 	workingPath := strings.TrimSpace(sctx.Repo.WorkingPath)

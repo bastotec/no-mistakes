@@ -166,12 +166,28 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 	if existingPR != "" {
 		r.ExistingPRURL, r.PRURL = &existingPR, &existingPR
 	}
-	_, err := d.sql.Exec(
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return nil, fmt.Errorf("insert run: begin: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, existing_pr_url, pr_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.ExistingPRURL, r.PRURL, r.CreatedAt, r.UpdatedAt,
-	)
-	if err != nil {
+	); err != nil {
 		return nil, fmt.Errorf("insert run: %w", err)
+	}
+	// The run's pin and the branch's canonical association are one fact, so
+	// they are one write: a daemon exit can never leave a run publishing to a
+	// pull request its own branch no longer maps to, which is what would let a
+	// later unflagged launch discover or create another one.
+	if existingPR != "" {
+		if err := setBranchPRTarget(tx, repoID, branch, existingPR, ts); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("insert run: commit: %w", err)
 	}
 	return r, nil
 }

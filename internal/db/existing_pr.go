@@ -6,13 +6,13 @@ import (
 	"fmt"
 )
 
-// SetBranchPRTarget records the canonical pull request a branch publishes to.
+// setBranchPRTarget records the canonical pull request a branch publishes to.
 // It outlives the run that established it: later launches, push-hook runs and
 // CI repairs reuse it until it is replaced by another explicit association or
-// retired.
-func (d *DB) SetBranchPRTarget(repoID, branch, prURL string) error {
-	ts := now()
-	_, err := d.sql.Exec(
+// retired. It is transaction-scoped on purpose - the only writer is the run
+// insert that pins the same pull request, and the two must commit together.
+func setBranchPRTarget(tx *sql.Tx, repoID, branch, prURL string, ts int64) error {
+	_, err := tx.Exec(
 		`INSERT INTO branch_pr_targets (repo_id, branch, pr_url, created_at, updated_at) VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT(repo_id, branch) DO UPDATE SET pr_url = excluded.pr_url, updated_at = excluded.updated_at`,
 		repoID, branch, prURL, ts, ts,

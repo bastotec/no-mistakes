@@ -1267,6 +1267,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", err
 	}
 
+	// The insert commits the run's pin and the branch's association together,
+	// so the association this run publishes under is the one the next launch
+	// reads back, whatever happens to the daemon from here on.
 	run, err := m.db.InsertRunWithIntentAndLaunchNonce(repo.ID, branch, headSHA, baseSHA, runIntent, launchNonce, validationGeneration, intentDigest, storedPRBaseBranch, target)
 	if err != nil {
 		trackStartFailure("create_run")
@@ -1462,13 +1465,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			return "", err
 		}
 		run.PRBaseBranch = &base
-		if existingPR != "" {
-			if err := m.db.SetBranchPRTarget(repo.ID, branch, existingPR); err != nil {
-				m.db.UpdateRunError(run.ID, err.Error())
-				trackStartFailure("store_branch_pr_target")
-				return "", err
-			}
-		}
 	}
 
 	// Create agent. In demo mode, newPipelineAgent returns a no-op agent, and it
