@@ -487,10 +487,13 @@ func TestExplicitPRMergeConflictPromptNamesTheUpstreamBase(t *testing.T) {
 	if !strings.Contains(instruction, "merge conflicts with upstream/widgets:main") {
 		t.Fatalf("repair instruction does not name the conflicted upstream base: %q", instruction)
 	}
-	if !strings.Contains(instruction, "rebase target commit given below") {
+	if !strings.Contains(instruction, "Rebase onto the base commit named in Context - not onto a local branch ref") {
 		t.Fatalf("repair instruction does not point the rebase at the proven commit: %q", instruction)
 	}
-	if !strings.Contains(capturedPrompt, "rebase target commit: "+upstreamTip) {
-		t.Fatalf("repair prompt does not point the rebase at the proven upstream tip %s:\n%s", upstreamTip, capturedPrompt)
+	if !strings.Contains(capturedPrompt, "- base commit: "+upstreamTip) {
+		t.Fatalf("repair prompt does not carry the proven upstream tip %s as the base commit:\n%s", upstreamTip, capturedPrompt)
+	}
+	if strings.Count(capturedPrompt, upstreamTip) != 1 {
+		t.Fatalf("the rebase target is carried under more than one label:\n%s", capturedPrompt)
 	}
 }

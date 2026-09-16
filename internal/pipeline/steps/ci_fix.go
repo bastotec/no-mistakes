@@ -202,15 +202,21 @@ func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR
 	var promptRules string
 	// An associated run integrates with a branch in the pull request's
 	// repository, and the fork's own origin/<base> is a different commit that
-	// resolves locally, so the conflicted base is named and the rebase is
-	// pointed at the proven commit rather than at "the base branch".
+	// resolves locally, so its rebase is pointed at the commit the run proved.
+	// An unassociated run's integration branch is the local origin/<base> the
+	// step has always used, and its recorded tip is not proven, so it keeps
+	// being named as the ref to rebase onto.
 	conflictBase := integrationBranchLabel(sctx, baseBranch)
+	rebaseDirective := "Rebase onto " + conflictBase
+	if existingPRURL(sctx) != "" {
+		rebaseDirective = "Rebase onto the base commit named in Context - not onto a local branch ref"
+	}
 	switch {
 	case len(failingNames) > 0 && mergeConflict:
-		promptIntro = fmt.Sprintf("The following CI checks have failed and the PR has merge conflicts with %s. Diagnose and fix the CI issues, then rebase onto the rebase target commit given below - not onto a local branch ref - and resolve the merge conflicts.", conflictBase)
+		promptIntro = fmt.Sprintf("The following CI checks have failed and the PR has merge conflicts with %s. Diagnose and fix the CI issues first. %s and resolve the merge conflicts.", conflictBase, rebaseDirective)
 		promptRules = ciFailingCheckFixRules
 	case mergeConflict:
-		promptIntro = fmt.Sprintf("The PR has merge conflicts with %s. Rebase onto the rebase target commit given below - not onto a local branch ref - and resolve the merge conflicts.", conflictBase)
+		promptIntro = fmt.Sprintf("The PR has merge conflicts with %s. %s and resolve the merge conflicts.", conflictBase, rebaseDirective)
 		promptRules = `- Resolve the merge conflicts by applying the minimal necessary changes.
 		- Do not make unrelated file edits.
 		- Verify the rebase completes cleanly before finishing.`
@@ -244,9 +250,6 @@ Context:
 		mergeConflict,
 		promptRules,
 	)
-	if mergeConflict {
-		prompt += fmt.Sprintf("\n- rebase target commit: %s", rebaseBaseSHA)
-	}
 	if logOutput != "" {
 		prompt += fmt.Sprintf(`
 
