@@ -52,7 +52,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - **Intent first** so downstream agent prompts and generated PR descriptions can include author intent supplied by the agent or inferred from transcripts.
 - **Rebase next** so everything else runs against the latest upstream and pushed-branch target.
-  It also stops when the branch would silently bundle commits from your local default branch that are not on the PR base, and says whether they were never pushed or were pushed to another remote's default branch (for example your fork's) that the PR base does not have. The base is named by repository and commit, not by a remote-tracking spelling such as `origin/main`, which can mean a different commit in your clone than in the gate.
+  It also stops when the branch would silently bundle commits from your local default branch that are not on the PR base ([details](/no-mistakes/reference/pipeline-steps/#rebase)).
   If there's no diff left after the rebase, the pipeline skips the rest.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
