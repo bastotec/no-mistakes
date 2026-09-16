@@ -596,6 +596,14 @@ func fakeCIGHHandler(args []string) {
 		fmt.Println(state)
 		os.Exit(0)
 	}
+	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json baseRefName") {
+		if baseErr := os.Getenv("FAKE_CLI_PR_BASE_ERR"); baseErr != "" {
+			fmt.Fprintln(os.Stderr, baseErr)
+			os.Exit(1)
+		}
+		fmt.Println(os.Getenv("FAKE_CLI_PR_BASE"))
+		os.Exit(0)
+	}
 	if strings.Contains(joined, "pr checks") {
 		if checksErr != "" {
 			fmt.Fprintln(os.Stderr, checksErr)

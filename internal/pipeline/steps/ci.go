@@ -511,19 +511,28 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		}
 
 		if preservesHistory(sctx) {
+			// Only the GitHub host reads a live PR base, so an empty value is
+			// an unknown base, not a mismatched one, and an unreadable one is
+			// retried on the next poll exactly like the PR state above.
+			// Monitoring mutates nothing, so a constraint that genuinely can no
+			// longer be honored parks for a decision - the call the repair half
+			// already makes - instead of discarding a run whose checks may be
+			// green and which cannot be rerun in place.
 			if reader, ok := host.(scm.PRBaseBranchReader); ok {
 				actual, readErr := reader.GetPRBaseBranch(ctx, pr)
 				if readErr != nil {
-					return nil, historyRefusal("cannot verify live PR base: %v", readErr)
+					sctx.Log(fmt.Sprintf("warning: could not verify live PR base: %v", readErr))
+				} else {
+					pr.BaseBranch = actual
 				}
-				pr.BaseBranch = actual
 			}
-			if sctx.Run.PRBaseBranch == nil || pr.BaseBranch != *sctx.Run.PRBaseBranch {
-				return nil, historyRefusal("live PR base is not the pinned integration branch")
+			if pr.BaseBranch != "" && (sctx.Run.PRBaseBranch == nil || pr.BaseBranch != *sctx.Run.PRBaseBranch) {
+				clearCIMonitorReady(sctx)
+				return ciHistoryRefusalOutcome(sctx, historyRefusal("the live PR base %q is not the pinned integration branch", pr.BaseBranch)), nil
 			}
 			if err := AssertHistoryPolicy(sctx); err != nil {
 				clearCIMonitorReady(sctx)
-				return nil, err
+				return ciHistoryRefusalOutcome(sctx, err), nil
 			}
 		}
 
