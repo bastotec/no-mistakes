@@ -120,6 +120,7 @@ func newAxiRunCmd() *cobra.Command {
 	var launchNonce string
 	var validationGeneration string
 	var baseBranch string
+	var preserveHistoryBase string
 	var existingPR string
 	var retireExistingPR bool
 	var wait time.Duration
@@ -185,6 +186,12 @@ func newAxiRunCmd() *cobra.Command {
 					}
 					return runAxiRetireExistingPR(cmd)
 				}
+				if preserveHistoryBase != "" || cmd.Flags().Changed("preserve-history") {
+					if cmd.Flags().Changed("existing-pr") {
+						return emitError(cmd, 2, "--preserve-history cannot be combined with --existing-pr")
+					}
+					return runAxiPreserveHistory(cmd, autoYes, skipSteps, intent, baseBranch, preserveHistoryBase, launchNonce, validationGeneration, wait)
+				}
 				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait, existingPR)
 			})
 		},
@@ -195,6 +202,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
+	cmd.Flags().StringVar(&preserveHistoryBase, "preserve-history", "", "pin the exact integration base SHA and submitted history; require --base-branch, forbid rebase/merge and force updates (including CI repair)")
 	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
 	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
 	bindAxiWaitFlag(cmd, &wait)
@@ -210,7 +218,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 // --yes and --wait shape how a run is driven rather than what it validates, so
 // a retirement that drives nothing simply leaves them with nothing to do - and
 // refusing them would lock out any harness that appends them to every command.
-var launchShapingFlags = []string{"intent", "skip", "base-branch", "existing-pr", "launch-nonce", "validation-generation"}
+var launchShapingFlags = []string{"intent", "skip", "base-branch", "preserve-history", "existing-pr", "launch-nonce", "validation-generation"}
 
 func changedLaunchFlags(cmd *cobra.Command) []string {
 	var conflicting []string
@@ -605,6 +613,9 @@ func inspectAxiBranchSync(ctx context.Context, env *axiEnv) branchsync.State {
 
 func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.State {
 	state := inspectAxiBranchSync(ctx, env)
+	if blocked := protectedRunOwnership(env, state); blocked != nil {
+		return blocked
+	}
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		// The ownership block exists to keep a fresh push from discarding
@@ -622,6 +633,28 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 	default:
 		return nil
 	}
+}
+
+// protectedRunOwnership blocks a fresh gate push while the branch's active run
+// pins a preserve-history integration, whatever branch-sync concluded about
+// the worktree: the daemon can refuse that launch only after the post-receive
+// hook has already moved the gate branch the protected run publishes from. A
+// caller already at the run's head pushes nothing new and may reattach. It
+// fails closed when the active run cannot be read.
+func protectedRunOwnership(env *axiEnv, state branchsync.State) *branchsync.State {
+	run, err := env.d.GetActiveRun(env.repo.ID, state.Local.Branch)
+	if err == nil && (run == nil || run.PreserveHistoryBaseSHA == nil || run.HeadSHA == state.Local.Head) {
+		return nil
+	}
+	blocked := state
+	blocked.Safety = "blocked_preserve_history"
+	if err != nil {
+		blocked.Error = fmt.Sprintf("could not confirm whether an active run pins this branch with --preserve-history: %v", err)
+	} else {
+		blocked.Error = fmt.Sprintf("run %s pins this branch's integration with --preserve-history; a fresh run would move the gate branch it publishes from, so none was started", run.ID)
+	}
+	blocked.NextAction = &branchsync.NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+	return &blocked
 }
 
 // triggerRun starts a fresh run for branch: it pushes the current HEAD through

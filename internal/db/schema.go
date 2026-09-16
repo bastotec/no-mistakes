@@ -53,6 +53,7 @@ CREATE TABLE IF NOT EXISTS runs (
     launch_intent_digest TEXT,
     launch_receipt_claimed_at INTEGER,
     pr_base_branch       TEXT,
+    preserve_history_base_sha TEXT,
     existing_pr_url      TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
@@ -288,6 +289,7 @@ var migrationStatements = []string{
 	// --base-branch). Nullable: absent means fall back to repo config and the
 	// forge default branch.
 	`ALTER TABLE runs ADD COLUMN pr_base_branch TEXT`,
+	`ALTER TABLE runs ADD COLUMN preserve_history_base_sha TEXT`,
 	`ALTER TABLE runs ADD COLUMN existing_pr_url TEXT`,
 	// The start of the currently displayed execution/fix round is separate
 	// from started_at, which remains the whole-step clock.

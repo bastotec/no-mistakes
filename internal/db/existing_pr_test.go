@@ -16,7 +16,7 @@ func TestExistingPRPinSurvivesReopen(t *testing.T) {
 		t.Fatal(err)
 	}
 	target := "https://github.com/upstream/widgets/pull/168"
-	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "")
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestExplicitTargetPinsTheRunAndAssociatesTheBranchInOneWrite(t *testing.T) 
 		t.Fatal(err)
 	}
 	target := "https://github.com/upstream/widgets/pull/168"
-	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "")
+	run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestFailedExplicitAssociationLeavesThePriorAssociationIntact(t *testing.T) 
 		t.Fatal(err)
 	}
 	original := "https://github.com/upstream/widgets/pull/168"
-	first, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "")
+	first, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "feature", "head", "base", nil, "", "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}

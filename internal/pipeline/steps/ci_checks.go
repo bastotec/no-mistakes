@@ -348,6 +348,29 @@ func ciCheckReadFailureOutcome(err error) *pipeline.StepOutcome {
 	}
 }
 
+// ciHistoryRefusalOutcome parks the CI monitor over a preserve-history
+// constraint it can no longer honor. The refusal itself is unchanged - nothing
+// is rebased, reset, or force-updated - but the PR is open and its checks may
+// already be green, and a preserve-history run cannot be rerun in place, so
+// ending the run here would throw the whole validation away over a decision
+// only the operator can make. This is the same call the repair half makes on
+// ErrHistoryConstraint.
+const ciHistoryRefusalFindingID = "ci-preserve-history-refusal"
+
+func ciHistoryRefusalOutcome(sctx *pipeline.StepContext, err error) *pipeline.StepOutcome {
+	findings := Findings{
+		Summary: "preserve-history constraint can no longer be honored",
+		Items: []Finding{{
+			ID:          ciHistoryRefusalFindingID,
+			Severity:    types.FindingSeverityWarning,
+			Description: fmt.Sprintf("%v. Nothing was rebased, reset, or force-updated. Prepare and validate a new integration explicitly, or finish this PR outside the pipeline.", err),
+			Action:      types.ActionAskUser,
+		}},
+	}
+	encoded, _ := types.MarshalFindingsJSON(findings)
+	return ciTerminalRepairOutcome(&pipeline.StepOutcome{NeedsApproval: true, Findings: encoded}, Findings{}, sctx.DeferredFindings)
+}
+
 // ciFixAgentTimeoutOutcome parks the CI step for a decision after the auto-fix
 // agent burned its whole invocation budget without finishing.
 //

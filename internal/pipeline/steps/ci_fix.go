@@ -94,6 +94,9 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	if outcome := ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
+	if errors.Is(err, ErrHistoryConstraint) {
+		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
+	}
 	if err != nil && errors.Is(err, errCIAttestationUnsettled) {
 		sctx.Log(fmt.Sprintf("CI repair push is not settled: %v", err))
 		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
@@ -171,6 +174,14 @@ func resolveCIRepairBases(ctx context.Context, sctx *pipeline.StepContext, baseB
 // The result reports whether the recorded head advanced and whether the repair
 // must revalidate; a zero result means the agent produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
+	if preservesHistory(sctx) && targets.MergeConflict {
+		// Refuse before even launching a resolver; a post-rebase ancestry
+		// check would only diagnose the history loss after it happened.
+		return ciRepairResult{}, historyRefusal("CI merge-conflict repair requires integration; prepare a new integration explicitly, not an automatic rebase")
+	}
+	if err := historyConstraintRefusal(sctx, host, pr); err != nil {
+		return ciRepairResult{}, err
+	}
 	ctx := sctx.Ctx
 	failingNames := targets.checkNames()
 	mergeConflict := targets.MergeConflict
@@ -283,6 +294,9 @@ CI logs:
 		return ciRepairResult{}, fmt.Errorf("agent CI fix: %w", err)
 	}
 
+	if err := AssertHistoryPolicy(sctx); err != nil {
+		return ciRepairResult{}, err
+	}
 	conclusion, conclusionErr := extractCIFixConclusion(result)
 	if conclusionErr != nil {
 		sctx.Log(fmt.Sprintf("warning: could not parse CI repair conclusion: %v", conclusionErr))

@@ -111,13 +111,16 @@ type stepView struct {
 
 // runView is a render-ready view of a pipeline run.
 type runView struct {
-	ID          string
-	Branch      string
-	Status      string
-	HeadSHA     string
-	PRURL       string
-	CIReady     bool
-	CIReadyNoCI bool
+	ID                     string
+	Branch                 string
+	Status                 string
+	HeadSHA                string
+	PRURL                  string
+	CIReady                bool
+	CIReadyNoCI            bool
+	SubmittedHeadSHA       *string
+	PRBaseBranch           *string
+	PreserveHistoryBaseSHA *string
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -132,14 +135,17 @@ type runView struct {
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
-		ID:                 r.ID,
-		Branch:             r.Branch,
-		Status:             string(r.Status),
-		HeadSHA:            r.HeadSHA,
-		CIReady:            r.CIReady,
-		CIReadyNoCI:        r.CIReadyNoCI,
-		AwaitingAgentSince: r.AwaitingAgentSince,
-		CIOverrideReason:   r.CIOverrideReason,
+		ID:                     r.ID,
+		Branch:                 r.Branch,
+		Status:                 string(r.Status),
+		HeadSHA:                r.HeadSHA,
+		CIReady:                r.CIReady,
+		CIReadyNoCI:            r.CIReadyNoCI,
+		SubmittedHeadSHA:       r.SubmittedHeadSHA,
+		PRBaseBranch:           r.PRBaseBranch,
+		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
+		AwaitingAgentSince:     r.AwaitingAgentSince,
+		CIOverrideReason:       r.CIOverrideReason,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -177,11 +183,14 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 
 func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	rv := runView{
-		ID:                 r.ID,
-		Branch:             r.Branch,
-		Status:             string(r.Status),
-		HeadSHA:            r.HeadSHA,
-		AwaitingAgentSince: r.AwaitingAgentSince,
+		ID:                     r.ID,
+		Branch:                 r.Branch,
+		Status:                 string(r.Status),
+		HeadSHA:                r.HeadSHA,
+		SubmittedHeadSHA:       r.SubmittedHeadSHA,
+		PRBaseBranch:           r.PRBaseBranch,
+		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
+		AwaitingAgentSince:     r.AwaitingAgentSince,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -469,6 +478,16 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA})
+	if rv.PreserveHistoryBaseSHA != nil {
+		pins := []toon.Field{{Key: "base_sha", Value: *rv.PreserveHistoryBaseSHA}}
+		if rv.SubmittedHeadSHA != nil {
+			pins = append(pins, toon.Field{Key: "submitted_head_sha", Value: *rv.SubmittedHeadSHA})
+		}
+		if rv.PRBaseBranch != nil {
+			pins = append(pins, toon.Field{Key: "base_branch", Value: *rv.PRBaseBranch})
+		}
+		fields = append(fields, toon.Field{Key: "preserve_history", Value: toon.NewObject(pins...)})
+	}
 	if rv.PRURL != "" {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
 	}

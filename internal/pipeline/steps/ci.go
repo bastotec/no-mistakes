@@ -206,17 +206,26 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	if err != nil {
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
-	checks, err := host.GetChecks(ctx, &scm.PR{Number: prNumber, URL: prURL})
-	if err != nil {
-		return fmt.Sprintf("could not verify live CI state: %v", err), nil
+	pr := &scm.PR{Number: prNumber, URL: prURL}
+	// A preserve-history run's whole point is the pinned head/base
+	// relationship, so a refusal still standing at approval time is part of the
+	// override's reason even when every live check is green. Both conditions
+	// are recorded: an approval past a failing check must still name it.
+	var reasons []string
+	if refusal := historyConstraintRefusal(sctx, host, pr); refusal != nil {
+		reasons = append(reasons, refusal.Error())
 	}
-	if allChecksPassed(checks) {
-		return "", nil
+	checks, err := host.GetChecks(ctx, pr)
+	switch {
+	case err != nil:
+		reasons = append(reasons, fmt.Sprintf("could not verify live CI state: %v", err))
+	case allChecksPassed(checks):
+	case len(checks) == 0:
+		reasons = append(reasons, fmt.Sprintf("live checks for %s: no checks reported", prURL))
+	default:
+		reasons = append(reasons, fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")))
 	}
-	if len(checks) == 0 {
-		return fmt.Sprintf("live checks for %s: no checks reported", prURL), nil
-	}
-	return fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")), nil
+	return strings.Join(reasons, "; "), nil
 }
 
 func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedHead string) error {
@@ -525,6 +534,25 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
 				return nil, err
 			}
+		}
+
+		if err := historyConstraintRefusal(sctx, host, pr); err != nil {
+			clearCIMonitorReady(sctx)
+			if !historyReadUnverifiable(sctx, err) {
+				return ciHistoryRefusalOutcome(sctx, err), nil
+			}
+			// This poll never learned whether the pin still holds, so it spends
+			// the same consecutive-read budget a provider read does instead of
+			// warning its way to the timeout.
+			consecutiveCheckErrs++
+			if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+				sctx.Log(fmt.Sprintf("required CI reads failed on %d consecutive polls, the latest unable to read the pinned integration base; parking for a decision", consecutiveCheckErrs))
+				return ciHistoryRefusalOutcome(sctx, err), nil
+			}
+			if err := waitForPoll(); err != nil {
+				return nil, err
+			}
+			continue
 		}
 
 		// Check mergeable state if the provider supports it
