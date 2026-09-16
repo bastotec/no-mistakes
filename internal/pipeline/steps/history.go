@@ -14,6 +14,24 @@ import (
 // ErrHistoryConstraint must never be swallowed as a retryable CI fixer failure.
 var ErrHistoryConstraint = errors.New("preserve-history")
 
+// errHistoryUnverifiable marks a refusal produced by a read that could not be
+// completed rather than by evidence that the pinned relationship was violated.
+// Every pre-mutation caller still fails closed on it; only the CI step's
+// read-only paths, which mutate nothing and read again shortly, retry it.
+var errHistoryUnverifiable = errors.New("unverifiable")
+
+// historyReadUnverifiable reports whether err is an incomplete read rather than
+// a violated pin, logging why the caller is going to read again.
+func historyReadUnverifiable(sctx *pipeline.StepContext, err error) bool {
+	if !errors.Is(err, errHistoryUnverifiable) {
+		return false
+	}
+	if sctx.Log != nil {
+		sctx.Log(fmt.Sprintf("warning: %v", err))
+	}
+	return true
+}
+
 func historyRefusal(format string, args ...any) error {
 	return fmt.Errorf("%w: %s", ErrHistoryConstraint, fmt.Sprintf(format, args...))
 }
@@ -77,6 +95,7 @@ func AssertHistoryPolicy(sctx *pipeline.StepContext) error {
 	sctx = &guard
 	run := sctx.Run
 	fail := func(reason string) error { return historyRefusal("%s; no rebase or force update is permitted", reason) }
+	unverifiable := func(reason string) error { return fmt.Errorf("%w: %w", errHistoryUnverifiable, fail(reason)) }
 	if run.SubmittedHeadSHA == nil || ValidateHistoryBase(*run.SubmittedHeadSHA) != nil ||
 		ValidateHistoryBase(*run.PreserveHistoryBaseSHA) != nil || run.PRBaseBranch == nil {
 		return fail("missing or invalid durable integration pins")
@@ -94,14 +113,14 @@ func AssertHistoryPolicy(sctx *pipeline.StepContext) error {
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
 	live, err := lsRemoteSHA(gitRun, resolveUpstreamURL(sctx), "refs/heads/"+branch)
 	if err != nil {
-		return fail(fmt.Sprintf("cannot verify pinned base %s: %v", branch, err))
+		return unverifiable(fmt.Sprintf("cannot verify pinned base %s: %v", branch, err))
 	}
 	if live != *run.PreserveHistoryBaseSHA {
 		return fail(fmt.Sprintf("integration base %s moved: pinned %s, live %s; create and validate a new integration explicitly", branch, *run.PreserveHistoryBaseSHA, live))
 	}
 	head, err := stepGitHeadSHA(sctx)
 	if err != nil {
-		return fail(fmt.Sprintf("cannot read the current head: %v", err))
+		return unverifiable(fmt.Sprintf("cannot read the current head: %v", err))
 	}
 	_, err = historyPushDecision(sctx, resolvePushURL(sctx), normalizedBranchRef(run.Branch), head)
 	return err
@@ -119,7 +138,7 @@ func historyPushDecision(sctx *pipeline.StepContext, url, ref, head string) (for
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
 	remote, err := lsRemoteSHA(gitRun, url, ref)
 	if err != nil {
-		return forcePushDecision{}, historyRefusal("verify publication target: %v", err)
+		return forcePushDecision{}, fmt.Errorf("%w: %w", errHistoryUnverifiable, historyRefusal("verify publication target: %v", err))
 	}
 	if remote == "" {
 		return forcePushDecision{newBranch: true}, nil

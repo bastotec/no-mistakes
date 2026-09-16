@@ -109,6 +109,12 @@ func (s *CIStep) Name() types.StepName { return types.StepCI }
 // parked so reconciliation never guesses success.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+		if errors.Is(err, ErrHistoryConstraint) {
+			// The refusal is the parked condition itself, and reconciliation
+			// mutates nothing; failing the gate over it would destroy the very
+			// decision the operator is being asked to make.
+			return false, err
+		}
 		return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
 	}
 	if err := sctx.Ctx.Err(); err != nil {
@@ -209,22 +215,24 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
 	// A preserve-history run's whole point is the pinned head/base
-	// relationship, so a refusal still standing at approval time is the
-	// override's reason even when every live check is green.
+	// relationship, so a refusal still standing at approval time is part of the
+	// override's reason even when every live check is green. Both conditions
+	// are recorded: an approval past a failing check must still name it.
+	var reasons []string
 	if refusal := historyConstraintRefusal(sctx, host, pr); refusal != nil {
-		return refusal.Error(), nil
+		reasons = append(reasons, refusal.Error())
 	}
 	checks, err := host.GetChecks(ctx, pr)
-	if err != nil {
-		return fmt.Sprintf("could not verify live CI state: %v", err), nil
+	switch {
+	case err != nil:
+		reasons = append(reasons, fmt.Sprintf("could not verify live CI state: %v", err))
+	case allChecksPassed(checks):
+	case len(checks) == 0:
+		reasons = append(reasons, fmt.Sprintf("live checks for %s: no checks reported", prURL))
+	default:
+		reasons = append(reasons, fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")))
 	}
-	if allChecksPassed(checks) {
-		return "", nil
-	}
-	if len(checks) == 0 {
-		return fmt.Sprintf("live checks for %s: no checks reported", prURL), nil
-	}
-	return fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")), nil
+	return strings.Join(reasons, "; "), nil
 }
 
 func verifyMergedProof(ctx context.Context, host scm.Host, pr *scm.PR, expectedHead string) error {
@@ -296,10 +304,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		outcome, err = &pipeline.StepOutcome{NeedsApproval: true, Findings: encoded}, nil
 	}()
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
-		if errors.Is(err, ErrHistoryConstraint) {
+		switch {
+		case historyReadUnverifiable(sctx, err):
+		case errors.Is(err, ErrHistoryConstraint):
 			return ciHistoryRefusalOutcome(sctx, err), nil
+		default:
+			return nil, err
 		}
-		return nil, err
 	}
 	// A run recovered after a restart resumes the rerun budget it already
 	// spent. Without this the fresh in-memory budget would grant reruns the
@@ -518,7 +529,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		}
 
-		if err := historyConstraintRefusal(sctx, host, pr); err != nil {
+		if err := historyConstraintRefusal(sctx, host, pr); err != nil && !historyReadUnverifiable(sctx, err) {
 			clearCIMonitorReady(sctx)
 			return ciHistoryRefusalOutcome(sctx, err), nil
 		}

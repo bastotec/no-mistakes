@@ -2,6 +2,8 @@ package steps
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -206,5 +208,63 @@ func TestPreserveHistory_ApprovingARefusalIsNeverASilentCleanPass(t *testing.T) 
 				t.Fatalf("override reason = %q, want it to name the refusal (%q)", reason, tc.want)
 			}
 		})
+	}
+}
+
+// A pinned base nobody could read is not evidence that it moved: the monitor
+// retries it the way it retries every other read in the poll loop, instead of
+// parking a run whose pins are intact.
+func TestPreserveHistory_MonitorKeepsPollingWhenThePinnedBaseCannotBeRead(t *testing.T) {
+	f, _ := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+	gitCmd(t, f.dir, "remote", "set-url", "origin", filepath.Join(t.TempDir(), "gone.git"))
+	outcome, err := f.run(t)
+	if err != nil {
+		t.Fatalf("an unreadable pinned base ended the run: %v\nlog:\n%s", err, f.log())
+	}
+	assertNoHistoryRefusal(t, outcome)
+	if outcome == nil || !outcome.NeedsApproval {
+		t.Fatalf("outcome = %#v, want the failing-check observation\nlog:\n%s", outcome, f.log())
+	}
+	if !strings.Contains(f.log(), "cannot verify pinned base") {
+		t.Fatalf("the incomplete read was not reported, log:\n%s", f.log())
+	}
+}
+
+// The gate reconciler runs every two minutes while a gate is parked. A parked
+// preserve-history refusal is the condition being decided, so reconciling it
+// must preserve the park rather than fail the step and the run.
+func TestPreserveHistory_GateReconcilerPreservesTheParkedRefusal(t *testing.T) {
+	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main")
+	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+	resolved, err := (&CIStep{}).ReconcileApprovalGate(f.sctx)
+	if resolved {
+		t.Fatal("the reconciler resolved a gate whose condition still stands")
+	}
+	if !errors.Is(err, ErrHistoryConstraint) {
+		t.Fatalf("reconcile error = %v, want the standing history refusal", err)
+	}
+	if errors.Is(err, pipeline.ErrFatalGateReconciliation) {
+		t.Fatalf("the reconciler destroyed the park it was asked to preserve: %v", err)
+	}
+}
+
+// An approval past both a standing refusal and a failing check must record
+// both: the override_reason is what names the failure the operator approved.
+func TestPreserveHistory_OverrideReasonNamesBothTheRefusalAndTheFailingCheck(t *testing.T) {
+	f, base := newHistoryMonitorFixture(t, "FAKE_CLI_PR_BASE=main",
+		`FAKE_CLI_CHECKS=[{"name":"build","state":"FAILURE","bucket":"fail"}]`)
+	tree := gitCmd(t, f.dir, "rev-parse", base+"^{tree}")
+	moved := gitCmd(t, f.dir, "commit-tree", tree, "-p", base, "-m", "later main")
+	gitCmd(t, f.dir, "push", "origin", moved+":refs/heads/main")
+	reason, err := (&CIStep{}).VerifyApprovalOverride(f.sctx)
+	if err != nil {
+		t.Fatalf("VerifyApprovalOverride() error = %v", err)
+	}
+	for _, want := range []string{"moved", "build"} {
+		if !strings.Contains(reason, want) {
+			t.Fatalf("override reason = %q, want it to name %q too", reason, want)
+		}
 	}
 }
