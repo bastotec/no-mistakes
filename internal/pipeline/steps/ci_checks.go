@@ -48,8 +48,8 @@ func hasPendingChecks(checks []scm.Check) bool {
 	return false
 }
 
-// awaitingApprovalChecks returns the checks the provider is holding for a
-// maintainer's approval.
+// awaitingApprovalChecks returns the checks waiting on a maintainer's
+// approval or another action outside the code.
 func awaitingApprovalChecks(checks []scm.Check) []scm.Check {
 	var held []scm.Check
 	for _, c := range checks {

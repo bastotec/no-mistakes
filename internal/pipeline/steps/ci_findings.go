@@ -134,8 +134,9 @@ func ciObservationFindings(issues ciIssues) Findings {
 }
 
 // awaitingApprovalFinding reports the action_required checks, held for a
-// maintainer's approval or asking for an action outside the code, as one error. It names no Check, so a fix round selecting it has nothing to
-// repair and goes straight back to monitoring.
+// maintainer's approval or asking for an action outside the code, as one
+// error. It names no Check, so a fix round selecting it has nothing to repair
+// and goes straight back to monitoring.
 func awaitingApprovalFinding(held []scm.Check, forkPR bool) ([]Finding, string) {
 	if len(held) == 0 {
 		return nil, ""

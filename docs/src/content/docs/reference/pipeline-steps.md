@@ -72,7 +72,7 @@ On a branch associated with an [explicit existing upstream PR](/no-mistakes/refe
 - If the push rewrote the PR base branch and `origin/<PR base branch>` advanced after that rewrite, pauses for manual approval before updating the branch
 - If the local default tip equals the branch `HEAD`, treats those local-only commits as the intended delivery work and continues
 - If the local default tip is a strict ancestor of the branch `HEAD`, pauses with an `ask-user` finding instead of silently bundling potentially unrelated local work into the PR
-- The local-default check is best-effort and only fires when the local default tip is ahead of `origin/<PR base branch>` and a strict ancestor of the branch `HEAD`
+- The local-default check is best-effort and only fires when the local default tip is ahead of the PR base and a strict ancestor of the branch `HEAD`
 - The finding separates commits you pushed to another remote's default branch (for example your fork's) that the PR base does not have - this PR would bring them along - from commits on no remote at all, and names the PR base by repository and commit (`owner/repo main at abc1234`), never by a remote-tracking spelling such as `origin/main`, which can resolve to a different commit in your clone than in the gate
 - Skips targets that don't exist or are already ancestors
 - If a fast-forward is possible, does a hard-reset instead of a rebase

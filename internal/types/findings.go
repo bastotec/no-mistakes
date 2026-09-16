@@ -95,8 +95,8 @@ const (
 // Finding.Check, a merge-conflict finding asks for a rebase, a transient
 // finding is a provider-attributed outcome no code change can clear, and a
 // review-bot finding carries one unresolved comment from a third-party
-// review bot's check, and an approval finding names checks the provider is
-// holding for a maintainer's approval, which never ran.
+// review bot's check, and an approval finding names action_required checks
+// waiting on a maintainer's approval or another action outside the code.
 const (
 	FindingCategoryCICheck         = "ci-check"
 	FindingCategoryCIMergeConflict = "ci-merge-conflict"
