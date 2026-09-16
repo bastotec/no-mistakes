@@ -341,8 +341,9 @@ func TestNoMistakesBinary_WaitAndSlowDaemon(t *testing.T) {
 }
 
 type axiTimeoutOpts struct {
-	responded *atomic.Bool
-	subscribe ipc.StreamHandlerFunc
+	responded     *atomic.Bool
+	subscribe     ipc.StreamHandlerFunc
+	existingPRRun func(ipc.StartExistingPRRunParams) (string, error)
 }
 
 type axiTimeoutFixture struct {
@@ -472,6 +473,19 @@ func newAxiTimeoutFixture(t *testing.T, opts axiTimeoutOpts) *axiTimeoutFixture 
 		srv.Handle(ipc.MethodRespond, func(context.Context, json.RawMessage) (interface{}, error) {
 			opts.responded.Store(true)
 			return &ipc.RespondResult{OK: true}, nil
+		})
+	}
+	if opts.existingPRRun != nil {
+		srv.Handle(ipc.MethodStartExistingPRRun, func(_ context.Context, raw json.RawMessage) (interface{}, error) {
+			var params ipc.StartExistingPRRunParams
+			if err := json.Unmarshal(raw, &params); err != nil {
+				return nil, err
+			}
+			runID, err := opts.existingPRRun(params)
+			if err != nil {
+				return nil, err
+			}
+			return &ipc.RerunResult{RunID: runID}, nil
 		})
 	}
 	var getRunCalls atomic.Int32
