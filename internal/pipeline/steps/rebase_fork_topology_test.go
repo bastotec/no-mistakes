@@ -27,13 +27,12 @@ func newForkTopology(t *testing.T, gateFromFork bool) forkTopology {
 	t.Helper()
 	var ft forkTopology
 	ft.upstream = t.TempDir()
-	gitCmd(t, ft.upstream, "init", "--bare")
+	gitCmd(t, ft.upstream, "init", "--bare", "--initial-branch=main")
 	ft.fork = t.TempDir()
-	gitCmd(t, ft.fork, "init", "--bare")
+	gitCmd(t, ft.fork, "init", "--bare", "--initial-branch=main")
 
 	seed := t.TempDir()
-	gitCmd(t, seed, "init")
-	gitCmd(t, seed, "checkout", "-b", "main")
+	gitCmd(t, seed, "init", "--initial-branch=main")
 	if err := os.WriteFile(filepath.Join(seed, "base.txt"), []byte("base"), 0o644); err != nil {
 		t.Fatal(err)
 	}
