@@ -142,6 +142,12 @@ const (
 	CheckBucketPending CheckBucket = "pending"
 	CheckBucketCancel  CheckBucket = "cancel"
 	CheckBucketSkip    CheckBucket = "skipping"
+	// CheckBucketAwaitingApproval is a check the provider is holding for a
+	// maintainer's approval (GitHub's action_required, which a fork PR's
+	// workflow runs get until someone approves them). Nothing ran, so it is
+	// neither a failure nor a pass, and unlike pending it never starts on its
+	// own.
+	CheckBucketAwaitingApproval CheckBucket = "awaiting_approval"
 )
 
 type CheckKind string
@@ -258,6 +264,10 @@ func IsReviewBotLogin(login string) bool {
 
 // Pending reports whether the check is still running or queued.
 func (c Check) Pending() bool { return c.Bucket == CheckBucketPending }
+
+// AwaitingApproval reports whether the provider is holding the check for a
+// maintainer's approval.
+func (c Check) AwaitingApproval() bool { return c.Bucket == CheckBucketAwaitingApproval }
 
 // Capabilities declares which optional Host methods return meaningful data.
 // Callers must consult Capabilities before invoking optional methods.
