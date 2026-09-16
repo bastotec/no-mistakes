@@ -168,6 +168,15 @@ func TestHistoryLaunch_OrdinaryLaunchRefusesToSupersedeAProtectedRun(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
+	// The run has since published a pipeline fix the operator's clone never
+	// received, so the only head the operator is known to hold is the one
+	// they submitted.
+	fixed := strings.Repeat("f", 40)
+	if err := database.UpdateRunPublication(protected.ID, db.PushBinding{
+		HeadSHA: fixed, TargetKind: "upstream", TargetFingerprint: "fingerprint", Ref: "refs/heads/main",
+	}); err != nil {
+		t.Fatal(err)
+	}
 	manager := NewRunManager(database, p, func() []pipeline.Step { return nil })
 	t.Cleanup(manager.Shutdown)
 	rewritten := strings.Repeat("d", 40)
@@ -180,17 +189,20 @@ func TestHistoryLaunch_OrdinaryLaunchRefusesToSupersedeAProtectedRun(t *testing.
 	}
 	restore := "git push --force no-mistakes " + head + ":refs/heads/main"
 	if !strings.Contains(err.Error(), restore) {
-		t.Fatalf("refusal = %v, want the command that restores the gate branch to the recorded head", err)
+		t.Fatalf("refusal = %v, want the restore command to name the submitted head the operator holds", err)
 	}
 
-	// Following that advice pushes the recorded head back to the gate, which
-	// fires the same launch path. It must read as the recovery it is.
-	_, err = manager.startRun(context.Background(), repo, "main", head, head, "push", nil, "restore", "")
-	if err == nil {
-		t.Fatal("the restoring push started a run over the protected one")
-	}
-	if strings.Contains(err.Error(), restore) || !strings.Contains(err.Error(), "no new run was started") {
-		t.Fatalf("restoring push reply = %v, want an acknowledgement that the gate branch is back", err)
+	// Following that advice pushes a recorded head back to the gate, which
+	// fires the same launch path. Each head the run recorded must read as the
+	// recovery it is.
+	for _, restored := range []string{head, fixed} {
+		_, err = manager.startRun(context.Background(), repo, "main", restored, head, "push", nil, "restore", "")
+		if err == nil {
+			t.Fatalf("the restoring push to %s started a run over the protected one", restored)
+		}
+		if strings.Contains(err.Error(), restore) || !strings.Contains(err.Error(), "no new run was started") {
+			t.Fatalf("restoring push to %s replied %v, want an acknowledgement that the gate branch is back", restored, err)
+		}
 	}
 	still, err := database.GetActiveRun(repo.ID, "main")
 	if err != nil {

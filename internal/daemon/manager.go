@@ -1225,12 +1225,10 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	if active != nil && active.PreserveHistoryBaseSHA != nil {
 		trackStartFailure("preserve_history_protected")
 		recorded := active.HeadSHA
-		if active.LastPushedSHA != nil {
-			recorded = *active.LastPushedSHA
-		} else if active.SubmittedHeadSHA != nil {
+		if active.SubmittedHeadSHA != nil {
 			recorded = *active.SubmittedHeadSHA
 		}
-		if headSHA == recorded || headSHA == active.HeadSHA {
+		if headSHA == recorded || headSHA == active.HeadSHA || (active.LastPushedSHA != nil && headSHA == *active.LastPushedSHA) {
 			return "", fmt.Errorf("preserve-history: the gate branch %s is at run %s's recorded integration head %s; no new run was started and run %s continues", branch, active.ID, headSHA, active.ID)
 		}
 		return "", fmt.Errorf("preserve-history: run %[1]s pins branch %[2]s to its integration, recorded at %[3]s, so no superseding run was started. "+
