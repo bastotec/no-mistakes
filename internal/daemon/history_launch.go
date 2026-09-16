@@ -108,7 +108,7 @@ func (m *RunManager) HandleStartHistoryRun(ctx context.Context, p *ipc.StartHist
 			}
 		}
 		id, err := m.startRunWithIntentSourceLocked(ctx, repo, p.Branch, p.HeadSHA, p.HeadSHA, "history", nil,
-			p.Intent, db.RunIntentSourceAgent, p.LaunchNonce, p.ValidationGeneration, digestIntent(p.Intent), base, "", p.PreserveHistoryBaseSHA)
+			p.Intent, db.RunIntentSourceAgent, p.LaunchNonce, p.ValidationGeneration, digestIntent(p.Intent), base, "", "", p.PreserveHistoryBaseSHA)
 		if err != nil {
 			return "", err
 		}

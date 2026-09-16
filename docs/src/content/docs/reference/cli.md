@@ -130,6 +130,8 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `--skip`        | `string` | (none)  | Comma-separated pipeline steps to skip                                                               |
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
 | `--preserve-history` | `string` | (none) | Full integration-base commit SHA; requires `--base-branch`, preserves the submitted head and forbids automatic integration and forced publication |
+| `--existing-pr` | `string` | (none) | Explicit existing github.com PR URL; validates repository, source ref and head; remembered for the branch; never falls back to another PR |
+| `--retire-existing-pr` | `bool` | `false` | Drop the branch's remembered PR association and start no run |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
 | `--validation-generation` | `string` | (none) | Caller-selected validation generation bound to `--launch-nonce`; requires that flag |
@@ -176,9 +178,44 @@ no-mistakes axi run --intent "the user's goal" \
 
 The clean, checked-out feature branch's exact submitted HEAD, the named base branch, and its full commit SHA are immutable run pins. The base must already be an ancestor of that HEAD and must still be the live base tip. Pins survive additive fixes and daemon recovery; `axi status` and drive output show them under `run.preserve_history`. A moved or unreadable base, lost submitted-head ancestry, or an unverified/non-fast-forward publication target stops with a `preserve-history` diagnostic. No rebase or merge is attempted, regardless of `rebase.strategy` or repair budgets. CI merge-conflict repair parks rather than launching a resolver. Additive repairs remain allowed under the existing revalidation policy, and every branch publication uses ordinary Git push, never force or force-with-lease; Git rejects a racing non-fast-forward update.
 
-This is per-run, not repository configuration. It cannot be combined with `--skip`. A matching active run can be reattached to without changing its pins, and no other launch supersedes an active protected run: `axi run` refuses before pushing whenever the caller is not at that run's head, and a push that reaches the gate directly is refused with the command that restores the gate branch to the run's submitted head. With explicit receipt flags, replay requires the same pins and intent, and a new nonce refuses an already-active branch. `rerun` cannot implicitly repin a protected run: recover custody if necessary, explicitly prepare the desired integration, and start a new constrained run. Ordinary callers without the flag keep their existing behavior.
+This is per-run, not repository configuration. It cannot be combined with `--skip` or `--existing-pr`. A matching active run can be reattached to without changing its pins, and no other launch supersedes an active protected run: `axi run` refuses before pushing whenever the caller is not at that run's head, and a push that reaches the gate directly is refused with the command that restores the gate branch to the run's submitted head. With explicit receipt flags, replay requires the same pins and intent, and a new nonce refuses an already-active branch. `rerun` cannot implicitly repin a protected run: recover custody if necessary, explicitly prepare the desired integration, and start a new constrained run. Ordinary callers without the flag keep their existing behavior.
 
 Both the CLI **and running daemon** must support this flag. Constrained launch uses a distinct RPC and imports the exact local commit without a gate push, so an older daemon or receive hook cannot silently start an unconstrained run. There is no legacy fallback or automatic daemon restart. These are pipeline-operation guards, not a sandbox against arbitrary trusted commands or agent tools; agents receive no extra history guidance, and ancestry is rechecked before publication. The mode does not create an attestation for prior work, skip validation, or merge a PR.
+
+### Explicit existing upstream PR
+
+When `origin` points at your fork but the PR lives upstream, select the existing review object explicitly:
+
+```sh
+no-mistakes axi run \
+  --existing-pr https://github.com/upstream/widgets/pull/168 \
+  --intent "Validate the account-context change in the existing upstream PR"
+```
+
+Run this from the PR's clean, checked-out source branch. The URL supplies both the upstream repository and PR number; no remote rewrite or separate repository flag is needed. This mode currently supports canonical `https://github.com/OWNER/REPO/pull/NUMBER` URLs only, not GitHub Enterprise Server or other providers.
+
+Before any pipeline step starts, the daemon requires an open PR whose returned URL, number and base repository match the request, whose full source repository matches the configured push target (`fork_url` when configured, otherwise `origin`), and whose source branch and full head SHA match the submitted local branch and commit. **The source head must already be published**: local-only commits, stale local heads, deleted forks, closed/merged PRs, authentication failures and unavailable or incomplete validation fail rather than select or create another PR. A newer CLI also refuses an older daemon that lacks this launch protocol; it does not fall back to the ordinary push hook.
+
+The association is stored atomically with the run and survives recovery and `rerun`. PR updates, pre-push attestation writes and CI target that exact upstream PR, without branch-based discovery. The PR's existing title and body are the author's: an explicit target is only ever appended to, through the same owned-appendix mechanism [`pr.template`](/no-mistakes/reference/repo-config/#prtemplate) uses, so the run adds its evidence section and never redrafts the description. An empty description stays empty - a repository template fills a blank body on that repository's own pull requests, never on an associated one. Before each pipeline push, the PR's live head must match the source remote head verified by the existing push-safety checks; publication and CI also validate the published head. Pipeline fixes still push to the source repository. Integration-branch fetches use the explicit upstream repository, while trusted configuration still comes from the registered repository's pinned default branch. The integration branch is the one the PR actually targets, read from the PR at launch and stored on the run, so Rebase, PR and CI all use it instead of the repository default or [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch), and every gate measures its diff from that branch rather than your fork's default. It is fetched at launch, so an unreachable upstream refuses the run instead of silently reviewing against the fork. The gates then measure from that validated snapshot; only CI repair re-reads the branch, because a maintainer can retarget the PR mid-run. If the branch it must measure against cannot be read, the run stops: no other branch and no empty diff is ever substituted for it. This option does not retarget the PR.
+
+Like every other launch, this one binds the branch in the daemon's gate repository to the submitted commit, which is what lets `rerun` and recovery read the validated head after a run that stopped at a gate. It only ever advances that branch: if the gate holds a head your submission does not contain, the launch is refused and you reconcile the branch (`no-mistakes sync`) first.
+
+`--existing-pr` cannot be combined with `--base-branch`, `--skip`, or the strict launch-receipt flags. Reattach with the same URL or omit it; reattaching needs no `--intent` and accepts either the commit you submitted or the head the run has since moved to (for example after you fetch its fixes). A different or absent explicit target on an active run is refused with exit code `2` when you supply the flag. The same two restrictions hold for every later run on an associated branch, flag or not: a run that publishes to someone else's pull request delivers the whole pipeline, and its base comes from that pull request, so `--skip` (including a `no-mistakes.skip=` push option) and `--base-branch` are refused at launch until the association is retired.
+
+#### Association lifecycle
+
+A validated association belongs to the **branch**, so you name the pull request once:
+
+| Step | Command | Effect |
+| --- | --- | --- |
+| Establish | `axi run --existing-pr <url> --intent "..."` | Validates the target and records it for this branch |
+| Reuse | `axi run --intent "..."`, a `git push` that fires the hook, `rerun`, CI repair | Publishes to the recorded pull request; no discovery, no new PR |
+| Replace | `axi run --existing-pr <other-url> --intent "..."` | Validates the new target and replaces the record |
+| Retire | `axi run --retire-existing-pr` | Removes the record and starts no run; later runs use ordinary discovery. It refuses the flags that describe a run (`--intent`, `--skip`, `--base-branch`, `--preserve-history`, `--existing-pr`, `--launch-nonce`, `--validation-generation`) rather than discarding them; `--yes` and `--wait` are accepted and have nothing to do |
+
+Establishing and replacing require the submitted head to already be the pull request's live head, because you are asserting which commit the target is at. A reused association does not: those runs exist to publish a new head, so they prove the association itself - the pull request is open, lives in the recorded repository, and its source is this push repository and branch - and the head is proven against the remote before the push and again by the PR and CI steps. A head this run just published is re-read a bounded number of times before a mismatch is reported, because the forge serves pull requests from a replica; the comparison itself stays exact, and an ancestor is never accepted. Either way a stale, ambiguous or unreadable target - a merged or closed pull request, a source ref that moved - fails the run rather than discovering, creating or updating a different pull request, and the failure names the branch, its pull request and the retire command. Nothing is retired automatically. Retiring is refused while a run is active on the branch, so an in-flight run never changes where it publishes.
+
+Branches with no association are untouched: ordinary repository-scoped discovery is unchanged, and an `origin` pointing at a fork does **not** automatically discover upstream PRs. For general fork routing, including new PR creation, use [`init --fork-url`](#no-mistakes-init).
 
 ### Strict launch receipts
 

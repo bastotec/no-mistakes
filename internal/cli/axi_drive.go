@@ -23,6 +23,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
+	"github.com/kunchenguid/no-mistakes/internal/scm/github"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/spf13/cobra"
@@ -120,6 +121,8 @@ func newAxiRunCmd() *cobra.Command {
 	var validationGeneration string
 	var baseBranch string
 	var preserveHistoryBase string
+	var existingPR string
+	var retireExistingPR bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -145,6 +148,14 @@ func newAxiRunCmd() *cobra.Command {
 			"--base-branch targets an integration branch other than the repository default\n" +
 			"for this run only (for example an epic branch). It overrides pr.base_branch\n" +
 			"in repo config and is persisted on the run for rebase, PR, and CI steps.\n\n" +
+			"--existing-pr URL binds this branch to an open github.com PR, including an upstream\n" +
+			"PR when origin is your fork. The clean source branch head must already be\n" +
+			"published and match the PR. The run integrates with the branch that PR targets.\n" +
+			"The association is remembered for the branch, so later runs - including push-hook\n" +
+			"runs and CI repairs - publish to that same PR; pass a different URL to replace it\n" +
+			"and --retire-existing-pr (which starts no run) to drop it. Validation failure never\n" +
+			"creates another PR.\n" +
+			"Cannot be combined with --skip, --base-branch, or launch-receipt flags.\n\n" +
 			"The calling agent drives AXI approval gates but does not become the pipeline\n" +
 			"agent. The daemon requires a supported native agent binary, the `agent: cursor`\n" +
 			"ACP alias, or an explicit `acp:<target>` through `acpx`, and fails before the\n" +
@@ -166,10 +177,22 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
 				}
+				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
+					return emitError(cmd, 2, "--existing-pr requires a PR URL")
+				}
+				if retireExistingPR {
+					if conflicting := changedLaunchFlags(cmd); len(conflicting) > 0 {
+						return emitError(cmd, 2, fmt.Sprintf("--retire-existing-pr starts no run, so it cannot be combined with %s", strings.Join(conflicting, ", ")))
+					}
+					return runAxiRetireExistingPR(cmd)
+				}
 				if preserveHistoryBase != "" || cmd.Flags().Changed("preserve-history") {
+					if cmd.Flags().Changed("existing-pr") {
+						return emitError(cmd, 2, "--preserve-history cannot be combined with --existing-pr")
+					}
 					return runAxiPreserveHistory(cmd, autoYes, skipSteps, intent, baseBranch, preserveHistoryBase, launchNonce, validationGeneration, wait)
 				}
-				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait)
+				return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, launchNonce, validationGeneration, wait, existingPR)
 			})
 		},
 	}
@@ -180,15 +203,72 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
 	cmd.Flags().StringVar(&preserveHistoryBase, "preserve-history", "", "pin the exact integration base SHA and submitted history; require --base-branch, forbid rebase/merge and force updates (including CI repair)")
+	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
+	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
 
 func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch string) error {
-	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait)
+	return runAxiRunWithLaunchProof(cmd, autoYes, skipSteps, intent, baseBranch, "", "", defaultAxiWait, "")
 }
 
-func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration) error {
+// launchShapingFlags are the flags that describe a run. Retiring an association
+// starts none, so passing one with it describes work that will never happen.
+// --yes and --wait shape how a run is driven rather than what it validates, so
+// a retirement that drives nothing simply leaves them with nothing to do - and
+// refusing them would lock out any harness that appends them to every command.
+var launchShapingFlags = []string{"intent", "skip", "base-branch", "preserve-history", "existing-pr", "launch-nonce", "validation-generation"}
+
+func changedLaunchFlags(cmd *cobra.Command) []string {
+	var conflicting []string
+	for _, name := range launchShapingFlags {
+		if cmd.Flags().Changed(name) {
+			conflicting = append(conflicting, "--"+name)
+		}
+	}
+	return conflicting
+}
+
+// runAxiRetireExistingPR drops the current branch's remembered pull request
+// association and reports what it removed. It deliberately starts no run: the
+// next ordinary launch is the run, and keeping them separate leaves one
+// readable document per command.
+func runAxiRetireExistingPR(cmd *cobra.Command) error {
+	ctx := cmd.Context()
+	env, err := openAxiRunEnv()
+	if err != nil {
+		return emitError(cmd, 1, err.Error(), repoInitHelp(err)...)
+	}
+	defer env.close()
+	branch, err := git.CurrentBranch(ctx, ".")
+	if err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("get current branch: %v", err))
+	}
+	if branch == "HEAD" {
+		return emitError(cmd, 1, "detached HEAD: check out the branch whose association you are retiring")
+	}
+	var retired ipc.RetireExistingPRResult
+	if err := env.client.Call(ipc.MethodRetireExistingPR, &ipc.RetireExistingPRParams{RepoID: env.repo.ID, Branch: branch}, &retired); err != nil {
+		return emitError(cmd, 1, fmt.Sprintf("retire pull request association: %v", err))
+	}
+	value := retired.RetiredURL
+	if value == "" {
+		value = "none"
+	}
+	emitDoc(cmd, toon.Field{Key: "branch", Value: branch}, toon.Field{Key: "retired_pr_association", Value: value})
+	return nil
+}
+
+func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, intent, baseBranch, launchNonce, validationGeneration string, wait time.Duration, existingPR string) error {
+	if existingPR != "" {
+		if _, _, err := github.ExistingPRTarget(existingPR); err != nil {
+			return emitError(cmd, 2, err.Error())
+		}
+		if baseBranch != "" || launchNonce != "" || validationGeneration != "" || len(skipSteps) != 0 {
+			return emitError(cmd, 2, "--existing-pr cannot be combined with --base-branch, --skip, or launch proof flags")
+		}
+	}
 	if err := validateAxiWait(wait); err != nil {
 		return emitError(cmd, 2, err.Error(), "Pass a positive duration such as --wait 8m")
 	}
@@ -250,11 +330,25 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return emitError(cmd, 1, fmt.Sprintf("get active run: %v", err))
 		}
 		if active != nil {
-			if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
-				return emitError(cmd, 2, err.Error(),
-					"Omit --base-branch to reattach, or abort the active run before starting a new one")
+			if existingPR != "" {
+				// Whether this reattaches or conflicts is the daemon's call,
+				// not this lookup's. `runs.existing_pr_url` is legitimately
+				// absent both for an ordinary run's whole life and while an
+				// explicit launch is still proving its target, and without the
+				// branch lock those two cannot be told apart - so the call goes
+				// to the daemon, whose own check does hold that lock, and its
+				// answer is reported verbatim.
+				runID, err = startExistingPRRun(env, branch, headSHA, intent, existingPR)
+				if err != nil {
+					return emitError(cmd, existingPRLaunchExitCode(err), err.Error())
+				}
+			} else {
+				if err := conflictingActiveRunPRBaseBranch(active, baseBranch); err != nil {
+					return emitError(cmd, 2, err.Error(),
+						"Omit --base-branch to reattach, or abort the active run before starting a new one")
+				}
+				runID = active.ID
 			}
-			runID = active.ID
 		}
 	}
 	if runID == "" {
@@ -280,7 +374,15 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 			return guard(cmd)
 		}
 		var err error
-		if launchNonce != "" {
+		if existingPR != "" {
+			if state := freshRunBranchOwnershipState(ctx, env); state != nil {
+				return emitBranchOwnershipError(cmd, &branchOwnershipError{state: *state})
+			}
+			runID, err = startExistingPRRun(env, branch, headSHA, intent, existingPR)
+			if err != nil {
+				return emitError(cmd, existingPRLaunchExitCode(err), err.Error())
+			}
+		} else if launchNonce != "" {
 			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, launchNonce, validationGeneration)
 			if err == nil {
 				runID = launchReceipt.RunID
@@ -307,6 +409,30 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, run, ciReady)
+}
+
+// startExistingPRRun asks the daemon to launch or reattach an explicit-target
+// run. The daemon holds the branch lock for that whole decision, so it is the
+// only place that can tell a reattach from a conflict.
+func startExistingPRRun(env *axiEnv, branch, headSHA, intent, existingPR string) (string, error) {
+	var result ipc.RerunResult
+	if err := env.client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: headSHA, Intent: intent, URL: existingPR}, &result); err != nil {
+		return "", err
+	}
+	return result.RunID, nil
+}
+
+// existingPRLaunchExitCode keeps the agent-facing contract that exit 2 means
+// "change the invocation". A refusal the daemon reasoned about - the branch
+// already has a different active run, the submitted head is not the branch's -
+// is exactly that. A daemon that does not know the method, or a transport
+// failure, is not something the caller can rephrase, so it stays exit 1.
+func existingPRLaunchExitCode(err error) int {
+	var rpcErr *ipc.RPCError
+	if errors.As(err, &rpcErr) && rpcErr.Code != ipc.ErrMethodNotFound {
+		return 2
+	}
+	return 1
 }
 
 func digestLaunchIntent(intent string) string {
