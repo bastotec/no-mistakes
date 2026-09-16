@@ -198,13 +198,9 @@ func TestExplicitPRDiffBaseFollowsTheCallerSelectedUpstreamBranch(t *testing.T) 
 	gitCmd(t, dir, "config", "url."+parent+".insteadOf", "https://github.com/upstream/widgets.git")
 	gitCmd(t, dir, "config", "url."+fork+".insteadOf", fixtureSourceURL)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
-	pinFixturePR(t, sctx)
 	// The run was launched against main; the maintainer has since retargeted.
 	launchBase := "main"
-	if err := sctx.DB.SetRunPRBaseBranch(sctx.Run.ID, launchBase); err != nil {
-		t.Fatal(err)
-	}
-	sctx.Run.PRBaseBranch = &launchBase
+	pinFixturePRWithBase(t, sctx, launchBase)
 	ctx := context.Background()
 	if err := FetchRunUpstreamBranch(ctx, sctx, launchBase); err != nil {
 		t.Fatal(err)
@@ -256,12 +252,8 @@ func TestExplicitPRUnreadableIntegrationBaseStopsInsteadOfSubstituting(t *testin
 	gitCmd(t, dir, "config", "url."+parent+".insteadOf", "https://github.com/upstream/widgets.git")
 	gitCmd(t, dir, "config", "url."+fork+".insteadOf", fixtureSourceURL)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
-	pinFixturePR(t, sctx)
 	launchBase := "main"
-	if err := sctx.DB.SetRunPRBaseBranch(sctx.Run.ID, launchBase); err != nil {
-		t.Fatal(err)
-	}
-	sctx.Run.PRBaseBranch = &launchBase
+	pinFixturePRWithBase(t, sctx, launchBase)
 	ctx := context.Background()
 	if err := FetchRunUpstreamBranch(ctx, sctx, launchBase); err != nil {
 		t.Fatal(err)
@@ -386,12 +378,7 @@ func TestExplicitPRIntegratesWhenTheSourceBranchSharesTheUpstreamBaseName(t *tes
 	sctx.Repo.DefaultBranch = "master"
 	sctx.Run.Branch = "refs/heads/develop"
 	sctx.Run.HeadSHA = head
-	pinFixturePR(t, sctx)
-	if err := sctx.DB.SetRunPRBaseBranch(sctx.Run.ID, "develop"); err != nil {
-		t.Fatal(err)
-	}
-	upstreamBase := "develop"
-	sctx.Run.PRBaseBranch = &upstreamBase
+	pinFixturePRWithBase(t, sctx, "develop")
 
 	if _, err := (&RebaseStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)

@@ -531,3 +531,75 @@ func TestExplicitLaunchRefusedAfterValidationLeavesNoAssociation(t *testing.T) {
 		t.Fatalf("refused launch ran the pipeline: calls=%d", calls.Load())
 	}
 }
+
+// A run moves its own head while validating - rebase onto a moved base, an
+// auto-fix commit, a published CI repair - and the operator who fetched those
+// commits before reattaching arrives carrying the later one. The submitted head
+// is frozen at launch, so comparing only against it refuses the documented
+// reattach form for the very run the caller is already attached to.
+func TestExistingPRReattachAcceptsTheRunsAdvancedHead(t *testing.T) {
+	bin := t.TempDir()
+	name := "gh"
+	if runtime.GOOS == "windows" {
+		name += ".exe"
+	}
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	const target = "https://github.com/upstream/widgets/pull/168"
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return nil })
+	repo, _ := setupTestGitRepo(t, p, d, "explicit-pr-reattach")
+	repo, err := d.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	writeCommit(t, repo.WorkingPath, "new.txt", "new committed work")
+	submitted := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	run, err := d.InsertRun(repo.ID, "feature", submitted, submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.AssociateRunWithExistingPR(run.ID, repo.ID, "feature", target, "main"); err != nil {
+		t.Fatal(err)
+	}
+	// The pipeline rebases and commits a fix: the run's head is no longer the
+	// commit it was launched with.
+	writeCommit(t, repo.WorkingPath, "fix.txt", "pipeline repair")
+	advanced := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	if advanced == submitted {
+		t.Fatal("expected the run head to advance")
+	}
+	if err := d.UpdateRunHeadSHA(run.ID, advanced); err != nil {
+		t.Fatal(err)
+	}
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	for _, tc := range []struct{ name, head string }{
+		{"submitted head", submitted},
+		{"advanced head", advanced},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var result ipc.RerunResult
+			if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: tc.head, URL: target}, &result); err != nil {
+				t.Fatalf("reattach refused: %v", err)
+			}
+			if result.RunID != run.ID {
+				t.Fatalf("reattached to %s, want the active run %s", result.RunID, run.ID)
+			}
+		})
+	}
+	// A head belonging to neither is still a conflict, and so is another target.
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: strings.Repeat("a", 40), URL: target}, &ipc.RerunResult{}); err == nil {
+		t.Fatal("reattached against a head the run never carried")
+	}
+	if err := client.Call(ipc.MethodStartExistingPRRun, &ipc.StartExistingPRRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: advanced, URL: "https://github.com/upstream/widgets/pull/200"}, &ipc.RerunResult{}); err == nil {
+		t.Fatal("reattached against another pull request")
+	}
+}

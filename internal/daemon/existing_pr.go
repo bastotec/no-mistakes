@@ -34,7 +34,7 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 			return "", err
 		}
 		if active != nil {
-			if active.ExistingPRURL != nil && *active.ExistingPRURL == p.URL && active.SubmittedHeadSHA != nil && *active.SubmittedHeadSHA == p.HeadSHA {
+			if active.ExistingPRURL != nil && *active.ExistingPRURL == p.URL && activeRunCarriesHead(active, p.HeadSHA) {
 				return active.ID, nil
 			}
 			return "", fmt.Errorf("branch already has an active run; explicit PR target cannot replace it")
@@ -119,4 +119,17 @@ func explicitRunTarget(run *db.Run) string {
 		return ""
 	}
 	return *run.ExistingPRURL
+}
+
+// activeRunCarriesHead reports whether a head identifies this run to its own
+// caller. The submitted head is frozen at launch while `head_sha` advances on
+// every rebase, auto-fix commit and published repair, so an operator who
+// fetched the pipeline's own commits before reattaching arrives with the
+// later one. Both are the same run, and refusing the current head would refuse
+// the documented reattach form.
+func activeRunCarriesHead(run *db.Run, head string) bool {
+	if run == nil {
+		return false
+	}
+	return run.HeadSHA == head || (run.SubmittedHeadSHA != nil && *run.SubmittedHeadSHA == head)
 }

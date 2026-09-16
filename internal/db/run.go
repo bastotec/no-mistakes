@@ -459,17 +459,6 @@ func (d *DB) UpdateRunStatus(id string, status types.RunStatus) error {
 	return nil
 }
 
-// SetRunPRBaseBranch records the integration branch this run must use. It is
-// written after launch only for an explicit PR target, whose base branch is
-// the forge's answer rather than an operator request.
-func (d *DB) SetRunPRBaseBranch(id, branch string) error {
-	ts := now()
-	if _, err := d.sql.Exec(`UPDATE runs SET pr_base_branch = ?, updated_at = ? WHERE id = ?`, branch, ts, id); err != nil {
-		return fmt.Errorf("set run pr base branch: %w", err)
-	}
-	return nil
-}
-
 // UpdateRunPRURL sets the PR URL on a run. A delayed PR-step write must not
 // regress terminal lifecycle truth already observed by the CI monitor.
 func (d *DB) UpdateRunPRURL(id, prURL string) error {

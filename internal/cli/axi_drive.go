@@ -371,6 +371,9 @@ func runAxiRunWithLaunchProof(cmd *cobra.Command, autoYes bool, skipSteps []type
 				return emitBranchOwnershipError(cmd, &branchOwnershipError{state: *state})
 			}
 			runID, err = startExistingPRRun(env, branch, headSHA, intent, existingPR)
+			if err != nil {
+				return emitError(cmd, existingPRLaunchExitCode(err), err.Error())
+			}
 		} else if launchNonce != "" {
 			launchReceipt, err = triggerProofRun(ctx, env, branch, headSHA, skipSteps, intent, baseBranch, launchNonce, validationGeneration)
 			if err == nil {

@@ -101,6 +101,24 @@ func TestAxiExistingPRActiveRunIsAdjudicatedByTheDaemon(t *testing.T) {
 	}
 }
 
+// The exit code a daemon refusal reaches the caller with is a property of the
+// refusal, not of whether a run happened to be active when the CLI looked, so
+// the fresh-run path maps it exactly as the active-run path does.
+func TestAxiExistingPRFreshRunRefusalKeepsTheSameExitCode(t *testing.T) {
+	const refusal = "submitted head does not match local source branch"
+	fx := newAxiTimeoutFixture(t, axiTimeoutOpts{
+		existingPRRun: func(ipc.StartExistingPRRunParams) (string, error) { return "", fmt.Errorf(refusal) },
+	})
+	fx.setGetActive(func(context.Context) (*ipc.RunInfo, error) { return nil, nil })
+	out, err := executeCmd("axi", "run", "--existing-pr", axiExistingPRURL, "--intent", "validate upstream contribution", "--wait", "3s")
+	if !strings.Contains(out, refusal) {
+		t.Fatalf("daemon refusal not reported: %v\n%s", err, out)
+	}
+	if code := exitCodeOf(err); code != 2 {
+		t.Fatalf("fresh-run refusal exit code = %d, want 2: %s", code, out)
+	}
+}
+
 // A conflict the daemon reasoned about is something the caller can rephrase, so
 // it keeps exit 2; a daemon that does not know the method is not, so it stays
 // exit 1.

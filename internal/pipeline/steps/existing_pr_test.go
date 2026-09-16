@@ -50,13 +50,20 @@ func recordCompletedReviewStep(t *testing.T, sctx *pipeline.StepContext) {
 
 func pinFixturePR(t *testing.T, sctx *pipeline.StepContext) {
 	t.Helper()
+	pinFixturePRWithBase(t, sctx, "")
+}
+
+// pinFixturePRWithBase establishes the association exactly the way a launch
+// does: the pin and the pull request's own base branch commit together.
+func pinFixturePRWithBase(t *testing.T, sctx *pipeline.StepContext, base string) {
+	t.Helper()
 	sctx.Repo.UpstreamURL = fixtureSourceURL
 	sctx.Repo.URLsVerified = true
 	run, err := sctx.DB.InsertRunWithIntentAndLaunchNonce(sctx.Repo.ID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA, nil, "", "", "", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := sctx.DB.AssociateRunWithExistingPR(run.ID, sctx.Repo.ID, sctx.Run.Branch, fixtureExistingPR, ""); err != nil {
+	if err := sctx.DB.AssociateRunWithExistingPR(run.ID, sctx.Repo.ID, sctx.Run.Branch, fixtureExistingPR, base); err != nil {
 		t.Fatal(err)
 	}
 	run, err = sctx.DB.GetRun(run.ID)
