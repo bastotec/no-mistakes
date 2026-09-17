@@ -1,4 +1,38 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# A build stamps VERSION into `internal/buildinfo`, and that string is what
+# every minimum-version check reads back out of `no-mistakes version`.  A
+# version check cannot be asked to accept a label with no version number in
+# it - it would then have to accept every label, including `dev`, and stop
+# meaning anything - so a build that stamps one reports itself as NOT
+# INSTALLED and invites the operator to install over the very binary that is
+# running.  That is exactly what `VERSION=fork-7e84d0d` produced: a hand
+# passed label discarded `v1.76.0-5-g7e84d0d`, the comparable version this
+# repository already knew.  Mark a fork with semantic versioning's build
+# metadata BESIDE the real version (`v1.76.0-5-g7e84d0d+fork`), never instead
+# of it.
+#
+# A comparable version is a semver core of at least major.minor, optionally
+# `v`-prefixed, with any prerelease/build metadata after it - what
+# `git describe --tags` and every release tag produce, and what
+# `internal/update`'s parseVersion accepts.  A bare abbreviated commit is
+# deliberately not comparable.
+VERSION_PATTERN := ^v?[0-9]+\.[0-9]+(\.[0-9]+)?([.+-][0-9A-Za-z.+-]*)?$$
+comparable_version = $(shell printf '%s' '$(1)' | grep -Eq '$(VERSION_PATTERN)' && echo yes)
+
+DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
+# Loud normalization for the derived value: outside a checkout, or in a
+# shallow/tagless clone where `git describe` can only report a commit, fall
+# back to the `dev` sentinel that `internal/update` already understands
+# rather than stamping a label that looks like a version and is not.
+VERSION ?= $(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERSION),dev)
+
+# A hand-passed VERSION (command line or environment) gets no sentinel
+# fallback: refusing here is what keeps the broken outcome from silently
+# becoming a shipped binary again.
+ifneq ($(origin VERSION),file)
+ifneq ($(call comparable_version,$(VERSION)),yes)
+$(error VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(if $(DESCRIBED_VERSION),$(DESCRIBED_VERSION),v1.2.3)+fork, or omit VERSION to use git describe)
+endif
+endif
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com

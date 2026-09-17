@@ -42,6 +42,10 @@ make build
 make install
 ```
 
+`make build` stamps the version `no-mistakes version` reports from `git describe --tags --always --dirty`, so a full clone already carries a comparable version such as `v1.76.0-5-g7e84d0d`. Outside a checkout, or in a shallow or tagless clone where `git describe` can only report a commit, it falls back to the `dev` sentinel.
+
+Passing `VERSION=` by hand overrides that, and the build refuses a value with no version number in it (`VERSION=fork-7e84d0d`, `VERSION=dev`). A version string with nothing comparable in it makes every minimum-version check read the tool as not installed and offer to install over the build that is running. To mark a fork, keep the marker beside a real version using semantic versioning's build metadata - `make build VERSION="$(git describe --tags --always --dirty)+fork"` - rather than in place of it.
+
 `make build` embeds the telemetry host from `NO_MISTAKES_UMAMI_HOST` in a repo-local `.env` first, then `UMAMI_HOST` from the shell, then the default self-hosted host. It embeds the telemetry website ID from `NO_MISTAKES_UMAMI_WEBSITE_ID` in `.env` first, then `UMAMI_WEBSITE_ID` from the shell, then the default website ID.
 
 ## Prerequisites

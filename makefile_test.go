@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/testgit"
 )
 
 func TestMakeBuildPrioritizesDotEnvUmamiWebsiteID(t *testing.T) {
@@ -167,6 +169,127 @@ func TestMakeBuildPreservesQuotedHashInDotEnvUmamiWebsiteID(t *testing.T) {
 	}
 }
 
+// A hand-passed VERSION carrying no comparable version number is what
+// produced `no-mistakes version fork-7e84d0d (...)`: a binary every
+// minimum-version check reads as not installed, and then offers to install
+// over. The build refuses it rather than shipping it.
+func TestMakeBuildRefusesHandPassedVersionWithoutAComparableVersionNumber(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	workDir := writeTestMakeWorkspace(t)
+
+	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork"} {
+		t.Run(version, func(t *testing.T) {
+			output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"VERSION=" + version}, nil)
+
+			if !strings.Contains(output, "carries no comparable version number") {
+				t.Fatalf("make build should refuse VERSION=%s with an explanation, got:\n%s", version, output)
+			}
+			if strings.Contains(output, "/internal/buildinfo.Version="+version) {
+				t.Fatalf("make build should not stamp VERSION=%s, got:\n%s", version, output)
+			}
+		})
+	}
+}
+
+// The environment is a hand-passed VERSION too; `?=` would otherwise take it
+// silently.
+func TestMakeBuildRefusesUncomparableVersionFromTheEnvironment(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	workDir := writeTestMakeWorkspace(t)
+
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
+
+	if !strings.Contains(output, "carries no comparable version number") {
+		t.Fatalf("make build should refuse an uncomparable VERSION from the environment, got:\n%s", output)
+	}
+}
+
+// Marking a fork is fine as long as the marker rides beside a comparable
+// version instead of replacing it - semantic versioning's build metadata.
+// The release path (a plain tag) has to keep working exactly as it does.
+func TestMakeBuildAcceptsComparableVersions(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	workDir := writeTestMakeWorkspace(t)
+
+	for _, version := range []string{"v1.76.0", "1.76.0", "v1.76.0-5-g7e84d0d", "v1.76.0-5-g7e84d0d-dirty+fork", "v1.76.0+fork.7e84d0d"} {
+		t.Run(version, func(t *testing.T) {
+			output := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": version})
+
+			if !strings.Contains(output, "/internal/buildinfo.Version="+version) {
+				t.Fatalf("make build should stamp VERSION=%s, got:\n%s", version, output)
+			}
+		})
+	}
+}
+
+// Outside a checkout - and in a shallow or tagless clone, where `git
+// describe` can only report a commit - the derived value is normalized to
+// the `dev` sentinel internal/update already understands, never to a label
+// that looks like a version and is not.
+func TestMakeBuildFallsBackToDevWhenGitDescribeCarriesNoVersion(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	workDir := writeTestMakeWorkspace(t)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=dev") {
+		t.Fatalf("make build outside a checkout should stamp the dev sentinel, got:\n%s", output)
+	}
+}
+
+// The documented from-source path: a full clone already knows a comparable
+// version, which is the one the broken build threw away.
+func TestMakeBuildDerivesTheDescribedVersionInATaggedCheckout(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	runGit := func(args ...string) {
+		t.Helper()
+		cmd := exec.Command(gitPath, args...)
+		cmd.Dir = workDir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+		)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+	runGit("init", "-q")
+	runGit("add", "Makefile")
+	runGit("commit", "-q", "-m", "makefile")
+	runGit("tag", "v1.76.0")
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=v1.76.0") {
+		t.Fatalf("make build should stamp the described version, got:\n%s", output)
+	}
+}
+
+func lookupMake(t *testing.T) string {
+	t.Helper()
+	makePath, err := exec.LookPath("make")
+	if err != nil {
+		t.Skip("make not available")
+	}
+	return makePath
+}
+
 func skipMakeBuildTestsOnWindows(t *testing.T) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
@@ -196,13 +319,33 @@ func runMakeDryBuild(t *testing.T, makePath, workDir string, extraEnv map[string
 
 	cmd := exec.CommandContext(ctx, makePath, "-n", "build")
 	cmd.Dir = workDir
-	cmd.Env = filteredEnv(os.Environ(), "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
+	cmd.Env = filteredEnv(os.Environ(), "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
 	for key, value := range extraEnv {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("make -n build failed: %v\n%s", err, out)
+	}
+	return string(out)
+}
+
+func runMakeDryBuildExpectingFailure(t *testing.T, makePath, workDir string, makeArgs []string, extraEnv map[string]string) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	args := append([]string{"-n", "build"}, makeArgs...)
+	cmd := exec.CommandContext(ctx, makePath, args...)
+	cmd.Dir = workDir
+	cmd.Env = filteredEnv(os.Environ(), "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("make -n build should have failed, got:\n%s", out)
 	}
 	return string(out)
 }
