@@ -265,7 +265,7 @@ func TestMakeBuildDerivesTheDescribedVersionInATaggedCheckout(t *testing.T) {
 
 	output := runMakeDryBuild(t, makePath, workDir, nil)
 
-	if !strings.Contains(output, "/internal/buildinfo.Version=v1.76.0") {
+	if !strings.Contains(output, "/internal/buildinfo.Version=v1.76.0 ") {
 		t.Fatalf("make build should stamp the described version, got:\n%s", output)
 	}
 }
@@ -305,6 +305,20 @@ func commitTestMakeWorkspace(t *testing.T, gitPath, workDir string) {
 	runScratchGit(t, gitPath, workDir, "commit", "-q", "-m", "makefile")
 }
 
+// Make itself runs `git describe` from the scratch workspace, so the
+// measuring invocations need the same repository-discovery and config
+// isolation as the setup commands: an inherited GIT_DIR would otherwise
+// point describe at the real repository and steer the value under test.
+func scratchEnv(t *testing.T, alsoExcluded ...string) []string {
+	t.Helper()
+
+	excluded := append([]string{"GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL"}, alsoExcluded...)
+	return append(filteredEnv(os.Environ(), excluded...),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM=1",
+	)
+}
+
 // The developer's own git config must not decide this: commit signing or an
 // inherited GIT_DIR would otherwise fail the commit and report correct
 // Makefile behaviour as a red.
@@ -313,10 +327,7 @@ func runScratchGit(t *testing.T, gitPath, workDir string, args ...string) {
 
 	cmd := exec.Command(gitPath, args...)
 	cmd.Dir = workDir
-	cmd.Env = append(
-		filteredEnv(os.Environ(), "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL"),
-		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
-		"GIT_CONFIG_NOSYSTEM=1",
+	cmd.Env = append(scratchEnv(t),
 		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
 	)
@@ -363,7 +374,7 @@ func runMakeDryBuild(t *testing.T, makePath, workDir string, extraEnv map[string
 
 	cmd := exec.CommandContext(ctx, makePath, "-n", "build")
 	cmd.Dir = workDir
-	cmd.Env = filteredEnv(os.Environ(), "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
+	cmd.Env = scratchEnv(t, "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
 	for key, value := range extraEnv {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
@@ -383,7 +394,7 @@ func runMakeDryBuildExpectingFailure(t *testing.T, makePath, workDir string, mak
 	args := append([]string{"-n", "build"}, makeArgs...)
 	cmd := exec.CommandContext(ctx, makePath, args...)
 	cmd.Dir = workDir
-	cmd.Env = filteredEnv(os.Environ(), "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
+	cmd.Env = scratchEnv(t, "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
 	for key, value := range extraEnv {
 		cmd.Env = append(cmd.Env, key+"="+value)
 	}
