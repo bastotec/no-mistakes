@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
@@ -184,7 +185,7 @@ func TestMakeBuildRefusesHandPassedVersionWithoutAComparableVersionNumber(t *tes
 	// guard must not accept what the version check cannot read.
 	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork", "1.2.3.4", "v2026.01.15.3", "1.2.3-rc.", "1.2.3-rc..1"} {
 		t.Run(version, func(t *testing.T) {
-			output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"VERSION=" + version}, nil)
+			output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=" + version}, nil)
 
 			if !strings.Contains(output, "carries no comparable version number") {
 				t.Fatalf("make build should refuse VERSION=%s with an explanation, got:\n%s", version, output)
@@ -204,7 +205,7 @@ func TestMakeBuildRefusesUncomparableVersionFromTheEnvironment(t *testing.T) {
 	makePath := lookupMake(t)
 	workDir := writeTestMakeWorkspace(t)
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build"}, map[string]string{"VERSION": "fork-7e84d0d"})
 
 	if !strings.Contains(output, "carries no comparable version number") {
 		t.Fatalf("make build should refuse an uncomparable VERSION from the environment, got:\n%s", output)
@@ -285,16 +286,101 @@ func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testin
 	workDir := writeTestMakeWorkspace(t)
 	commitTestMakeWorkspace(t, gitPath, workDir)
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"VERSION=fork-x"}, nil)
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
-	if !strings.Contains(output, "VERSION=v1.2.3+fork") {
-		t.Fatalf("refusal should suggest a version its own guard accepts, got:\n%s", output)
+	suggested := suggestedVersion(t, output)
+	if !strings.HasPrefix(suggested, "v1.2.3+") {
+		t.Fatalf("a tagless checkout knows no release, so the suggestion should fall back to the placeholder core, got %q in:\n%s", suggested, output)
 	}
+	assertPureBuildMetadata(t, suggested)
 
-	suggested := "v1.2.3+fork"
 	accepted := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": suggested})
 	if !strings.Contains(accepted, "/internal/buildinfo.Version="+suggested) {
 		t.Fatalf("the suggested VERSION=%s should itself pass the guard, got:\n%s", suggested, accepted)
+	}
+}
+
+// A prerelease-shaped fork marker sorts BELOW the release it names, so the
+// updater offers to replace the fork with the older build it came from. The
+// suggestion must carry the release the repository knows plus the commit as
+// build metadata instead.
+func TestMakeBuildSuggestsTheKnownReleaseWithBuildMetadataNotAPrerelease(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.76.0")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the tag")
+
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
+
+	suggested := suggestedVersion(t, output)
+	if !strings.HasPrefix(suggested, "v1.76.0+") {
+		t.Fatalf("the suggestion should carry the release the repository knows, got %q in:\n%s", suggested, output)
+	}
+	assertPureBuildMetadata(t, suggested)
+
+	accepted := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": suggested})
+	if !strings.Contains(accepted, "/internal/buildinfo.Version="+suggested) {
+		t.Fatalf("the suggested VERSION=%s should itself pass the guard, got:\n%s", suggested, accepted)
+	}
+}
+
+// The refusal belongs to the targets that stamp a binary: an ambient VERSION
+// nobody aimed at this build must not kill a target that ships nothing.
+func TestMakeCleanSurvivesAnUncomparableVersionInTheEnvironment(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	workDir := writeTestMakeWorkspace(t)
+
+	runMakeTarget(t, makePath, workDir, []string{"clean"}, map[string]string{"VERSION": "fork-7e84d0d"})
+}
+
+// A bare `make` with no goal named still builds, so it still refuses.
+func TestMakeWithNoGoalRefusesAnUncomparableVersion(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	workDir := writeTestMakeWorkspace(t)
+
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
+
+	if !strings.Contains(output, "carries no comparable version number") {
+		t.Fatalf("a bare make should refuse an uncomparable VERSION, got:\n%s", output)
+	}
+}
+
+var suggestionPattern = regexp.MustCompile(`Pass a comparable version such as VERSION=(\S+?),`)
+
+func suggestedVersion(t *testing.T, refusal string) string {
+	t.Helper()
+
+	match := suggestionPattern.FindStringSubmatch(refusal)
+	if match == nil {
+		t.Fatalf("refusal should suggest a replacement version, got:\n%s", refusal)
+	}
+	return match[1]
+}
+
+func assertPureBuildMetadata(t *testing.T, version string) {
+	t.Helper()
+
+	core, metadata, found := strings.Cut(version, "+")
+	if !found {
+		t.Fatalf("suggested VERSION=%s should carry the fork marker as build metadata", version)
+	}
+	if strings.Contains(core, "-") {
+		t.Fatalf("suggested VERSION=%s is prerelease-shaped, which semver ranks below the release it names", version)
+	}
+	if !strings.HasPrefix(metadata, "fork") {
+		t.Fatalf("suggested VERSION=%s should mark the build as a fork, got metadata %q", version, metadata)
 	}
 }
 
@@ -366,6 +452,25 @@ func writeTestMakeWorkspace(t *testing.T) string {
 	return workDir
 }
 
+func runMakeTarget(t *testing.T, makePath, workDir string, makeArgs []string, extraEnv map[string]string) string {
+	t.Helper()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, makePath, makeArgs...)
+	cmd.Dir = workDir
+	cmd.Env = scratchEnv(t, "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
+	for key, value := range extraEnv {
+		cmd.Env = append(cmd.Env, key+"="+value)
+	}
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("make %v failed: %v\n%s", makeArgs, err, out)
+	}
+	return string(out)
+}
+
 func runMakeDryBuild(t *testing.T, makePath, workDir string, extraEnv map[string]string) string {
 	t.Helper()
 
@@ -391,7 +496,7 @@ func runMakeDryBuildExpectingFailure(t *testing.T, makePath, workDir string, mak
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	args := append([]string{"-n", "build"}, makeArgs...)
+	args := append([]string{"-n"}, makeArgs...)
 	cmd := exec.CommandContext(ctx, makePath, args...)
 	cmd.Dir = workDir
 	cmd.Env = scratchEnv(t, "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
@@ -400,7 +505,7 @@ func runMakeDryBuildExpectingFailure(t *testing.T, makePath, workDir string, mak
 	}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("make -n build should have failed, got:\n%s", out)
+		t.Fatalf("make -n %v should have failed, got:\n%s", makeArgs, out)
 	}
 	return string(out)
 }

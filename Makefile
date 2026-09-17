@@ -7,8 +7,11 @@
 # running.  That is exactly what `VERSION=fork-7e84d0d` produced: a hand
 # passed label discarded `v1.76.0-5-g7e84d0d`, the comparable version this
 # repository already knew.  Mark a fork with semantic versioning's build
-# metadata BESIDE the real version (`v1.76.0-5-g7e84d0d+fork`), never instead
-# of it.
+# metadata BESIDE the real version (`v1.76.0+fork.7e84d0d`), never instead of
+# it.  Build metadata rather than a prerelease suffix: semver ranks a
+# prerelease BELOW the release it names, so a prerelease-shaped fork of
+# `v1.76.0` reads as older than `v1.76.0` and the updater offers to replace
+# it with the release it was built from.
 #
 # A comparable version is a semver core of at least major.minor, optionally
 # `v`-prefixed, with any prerelease/build metadata after it - what
@@ -32,17 +35,26 @@ DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
 # own commit field: nothing traceable is lost by the fallback, only the false
 # appearance of a version.
 VERSION ?= $(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERSION),dev)
-
-# A hand-passed VERSION (command line or environment) gets no sentinel
-# fallback: refusing here is what keeps the broken outcome from silently
-# becoming a shipped binary again.
-ifneq ($(origin VERSION),file)
-ifneq ($(call comparable_version,$(VERSION)),yes)
-$(error VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERSION),v1.2.3)+fork, or omit VERSION to use git describe)
-endif
-endif
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+
+# A hand-passed VERSION (command line or environment) gets no sentinel
+# fallback: refusing it is what keeps the broken outcome from silently
+# becoming a shipped binary again.  The refusal is carried by the targets
+# that stamp a binary, so an ambient VERSION nobody aimed at this build never
+# kills `make clean`.
+VERSION_REFUSED :=
+ifneq ($(origin VERSION),file)
+ifneq ($(call comparable_version,$(VERSION)),yes)
+VERSION_REFUSED := yes
+endif
+endif
+# The suggestion is the release core the repository already knows plus the
+# commit as build metadata, never a prerelease suffix - the same shape the
+# refusal is teaching.
+DESCRIBED_RELEASE := $(firstword $(subst -, ,$(DESCRIBED_VERSION)))
+FORK_SUGGESTION := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(DESCRIBED_RELEASE),v1.2.3)+fork.$(COMMIT)
+VERSION_REFUSAL := VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to use git describe
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com
 DEFAULT_UMAMI_WEBSITE_ID := f959e889-92f5-4121-8a1f-571b10861198
 DOTENV_UMAMI_HOST := $(shell [ -f .env ] && perl -ne 'next if /^\s*(?:\#|$$)/; s/^\s*export\s+//; next unless /^\s*NO_MISTAKES_UMAMI_HOST\s*=\s*(.*)$$/; $$v=$$1; $$v =~ s/^\s+|\s+$$//g; if ($$v =~ /^( ["\x27] )(.*)\1$$/x) { $$v=$$2; } else { $$v =~ s/\s+\#.*$$//; $$v =~ s/\s+$$//; } $$out=$$v; END { print $$out if defined $$out }' .env)
@@ -55,15 +67,22 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
-.PHONY: build dist install test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check
+.PHONY: build dist install version-guard test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check
 
 DIST_DIR ?= dist
 INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
 
-build:
+# `+` so the refusal is honoured under `make -n` too: a dry run that prints a
+# stamping command line must not pretend a refused VERSION would build.
+version-guard:
+ifeq ($(VERSION_REFUSED),yes)
+	+@printf '%s\n' '$(VERSION_REFUSAL)' >&2; exit 1
+endif
+
+build: version-guard
 	go build -ldflags "$(LDFLAGS)" -o bin/no-mistakes ./cmd/no-mistakes
 
-dist:
+dist: version-guard
 	rm -rf $(DIST_DIR)
 	mkdir -p $(DIST_DIR)
 	for target in darwin/amd64 darwin/arm64 linux/amd64 linux/arm64 windows/amd64 windows/arm64; do \
@@ -84,7 +103,7 @@ dist:
 		rm -f "$$out"; \
 	done
 
-install: build
+install: version-guard build
 	mkdir -p $(dir $(INSTALL_BIN))
 	install -m 755 bin/no-mistakes $(INSTALL_BIN)
 	$(INSTALL_BIN) daemon stop
