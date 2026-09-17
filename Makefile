@@ -15,7 +15,7 @@
 # `git describe --tags` and every release tag produce, and what
 # `internal/update`'s parseVersion accepts.  A bare abbreviated commit is
 # deliberately not comparable.
-VERSION_PATTERN := ^v?[0-9]+\.[0-9]+(\.[0-9]+)?([+-][0-9A-Za-z.+-]*)?$$
+VERSION_PATTERN := ^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?(\+[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$$
 comparable_version = $(shell printf '%s' '$(1)' | grep -Eq '$(VERSION_PATTERN)' && echo yes)
 
 DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)

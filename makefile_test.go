@@ -182,7 +182,7 @@ func TestMakeBuildRefusesHandPassedVersionWithoutAComparableVersionNumber(t *tes
 	// A multi-segment core is uncomparable for the same reason: it looks
 	// like a version but `internal/update`'s parseVersion rejects it, so the
 	// guard must not accept what the version check cannot read.
-	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork", "1.2.3.4", "v2026.01.15.3"} {
+	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork", "1.2.3.4", "v2026.01.15.3", "1.2.3-rc.", "1.2.3-rc..1"} {
 		t.Run(version, func(t *testing.T) {
 			output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"VERSION=" + version}, nil)
 
@@ -260,27 +260,68 @@ func TestMakeBuildDerivesTheDescribedVersionInATaggedCheckout(t *testing.T) {
 	}
 
 	workDir := writeTestMakeWorkspace(t)
-	runGit := func(args ...string) {
-		t.Helper()
-		cmd := exec.Command(gitPath, args...)
-		cmd.Dir = workDir
-		cmd.Env = append(os.Environ(),
-			"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
-			"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
-		)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v failed: %v\n%s", args, err, out)
-		}
-	}
-	runGit("init", "-q")
-	runGit("add", "Makefile")
-	runGit("commit", "-q", "-m", "makefile")
-	runGit("tag", "v1.76.0")
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.76.0")
 
 	output := runMakeDryBuild(t, makePath, workDir, nil)
 
 	if !strings.Contains(output, "/internal/buildinfo.Version=v1.76.0") {
 		t.Fatalf("make build should stamp the described version, got:\n%s", output)
+	}
+}
+
+// A tagless clone derives a bare commit from `git describe`, which the guard
+// itself refuses. The suggested replacement must therefore be a value the
+// same guard accepts, not that commit dressed up with `+fork`.
+func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"VERSION=fork-x"}, nil)
+
+	if !strings.Contains(output, "VERSION=v1.2.3+fork") {
+		t.Fatalf("refusal should suggest a version its own guard accepts, got:\n%s", output)
+	}
+
+	suggested := "v1.2.3+fork"
+	accepted := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": suggested})
+	if !strings.Contains(accepted, "/internal/buildinfo.Version="+suggested) {
+		t.Fatalf("the suggested VERSION=%s should itself pass the guard, got:\n%s", suggested, accepted)
+	}
+}
+
+func commitTestMakeWorkspace(t *testing.T, gitPath, workDir string) {
+	t.Helper()
+	runScratchGit(t, gitPath, workDir, "init", "-q")
+	runScratchGit(t, gitPath, workDir, "add", "Makefile")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "-m", "makefile")
+}
+
+// The developer's own git config must not decide this: commit signing or an
+// inherited GIT_DIR would otherwise fail the commit and report correct
+// Makefile behaviour as a red.
+func runScratchGit(t *testing.T, gitPath, workDir string, args ...string) {
+	t.Helper()
+
+	cmd := exec.Command(gitPath, args...)
+	cmd.Dir = workDir
+	cmd.Env = append(
+		filteredEnv(os.Environ(), "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_CONFIG_COUNT", "GIT_CONFIG_GLOBAL"),
+		"GIT_CONFIG_GLOBAL="+filepath.Join(t.TempDir(), "gitconfig"),
+		"GIT_CONFIG_NOSYSTEM=1",
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("git %v failed: %v\n%s", args, err, out)
 	}
 }
 
