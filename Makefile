@@ -51,10 +51,17 @@ endif
 endif
 # The suggestion is the release core the repository already knows plus the
 # commit as build metadata, never a prerelease suffix - the same shape the
-# refusal is teaching.
+# refusal is teaching.  With no release to name (a tagless or shallow clone,
+# or outside a checkout) the core is the 0.0.0 placeholder rather than a
+# plausible release number: the message has to print something that passes
+# the guard, and a copy-pasted fabricated release would ship a binary
+# claiming a version it never came from.  Shipped anyway, 0.0.0 fails a floor
+# check instead of quietly passing one.
 DESCRIBED_RELEASE := $(firstword $(subst -, ,$(DESCRIBED_VERSION)))
-FORK_SUGGESTION := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(DESCRIBED_RELEASE),v1.2.3)+fork.$(COMMIT)
-VERSION_REFUSAL := VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to use git describe
+FORK_RELEASE := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(DESCRIBED_RELEASE),v0.0.0)
+FORK_SUGGESTION := $(FORK_RELEASE)+fork.$(COMMIT)
+PLACEHOLDER_NOTE := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),, The 0.0.0 core there is a placeholder because no release tag was found here: replace it with the release your fork is built from.)
+VERSION_REFUSAL := VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to use git describe.$(PLACEHOLDER_NOTE)
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com
 DEFAULT_UMAMI_WEBSITE_ID := f959e889-92f5-4121-8a1f-571b10861198
 DOTENV_UMAMI_HOST := $(shell [ -f .env ] && perl -ne 'next if /^\s*(?:\#|$$)/; s/^\s*export\s+//; next unless /^\s*NO_MISTAKES_UMAMI_HOST\s*=\s*(.*)$$/; $$v=$$1; $$v =~ s/^\s+|\s+$$//g; if ($$v =~ /^( ["\x27] )(.*)\1$$/x) { $$v=$$2; } else { $$v =~ s/\s+\#.*$$//; $$v =~ s/\s+$$//; } $$out=$$v; END { print $$out if defined $$out }' .env)

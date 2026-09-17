@@ -289,8 +289,11 @@ func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testin
 	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
-	if !strings.HasPrefix(suggested, "v1.2.3+") {
-		t.Fatalf("a tagless checkout knows no release, so the suggestion should fall back to the placeholder core, got %q in:\n%s", suggested, output)
+	if !strings.HasPrefix(suggested, "v0.0.0+") {
+		t.Fatalf("a tagless checkout knows no release, so the suggestion should carry the placeholder core rather than a plausible release number, got %q in:\n%s", suggested, output)
+	}
+	if !strings.Contains(output, "placeholder") {
+		t.Fatalf("the refusal should say the placeholder core must be replaced, got:\n%s", output)
 	}
 	assertPureBuildMetadata(t, suggested)
 
@@ -323,6 +326,9 @@ func TestMakeBuildSuggestsTheKnownReleaseWithBuildMetadataNotAPrerelease(t *test
 	suggested := suggestedVersion(t, output)
 	if !strings.HasPrefix(suggested, "v1.76.0+") {
 		t.Fatalf("the suggestion should carry the release the repository knows, got %q in:\n%s", suggested, output)
+	}
+	if strings.Contains(output, "placeholder") {
+		t.Fatalf("a described release is not a placeholder, got:\n%s", output)
 	}
 	assertPureBuildMetadata(t, suggested)
 
