@@ -42,6 +42,12 @@ make build
 make install
 ```
 
+`make build` stamps the version `no-mistakes version` reports from `git describe --tags --always --dirty`, so a full clone already carries a comparable version such as `v1.76.0-5-g7e84d0d`, which passes every minimum-version check. That shape is a prerelease, though, and semantic versioning ranks a prerelease below the release it names, so a from-source build reads as older than the release it was built from and the updater will offer you that release. Building from source to try it out is fine on the default; installing a fork you intend to keep using wants the build-metadata form below, which ranks equal to the release instead. Outside a checkout, or in a shallow or tagless clone where `git describe` can only report a commit, it falls back to the `dev` sentinel.
+
+Passing `VERSION=` by hand overrides that, and the build refuses a value with no version number in it (`VERSION=fork-7e84d0d`, `VERSION=dev`). A version string with nothing comparable in it makes every minimum-version check read the tool as not installed and offer to install over the build that is running. To mark a fork, keep the marker beside a real version using semantic versioning's build metadata - `make build VERSION=v1.76.0+fork.7e84d0d` - rather than in place of it: the released version this build comes from, plus the commit that identifies your build. Build metadata rather than a prerelease suffix such as `v1.76.0-5-g7e84d0d+fork`, for the reason above: a prerelease-shaped fork reads as older than the `v1.76.0` it was built from and the updater offers to replace it with that older release. The refusal prints a suggestion of that shape, using the release your clone describes - or a `v0.0.0` placeholder to replace when it has no tag to read.
+
+A fork built that way is no longer a development build, so once upstream releases a version above it the updater will say so; `NO_MISTAKES_NO_UPDATE_CHECK=1` silences that notice, and taking the upstream release stays your decision.
+
 `make build` embeds the telemetry host from `NO_MISTAKES_UMAMI_HOST` in a repo-local `.env` first, then `UMAMI_HOST` from the shell, then the default self-hosted host. It embeds the telemetry website ID from `NO_MISTAKES_UMAMI_WEBSITE_ID` in `.env` first, then `UMAMI_WEBSITE_ID` from the shell, then the default website ID.
 
 ## Prerequisites
