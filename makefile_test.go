@@ -349,17 +349,54 @@ func TestMakeCleanSurvivesAnUncomparableVersionInTheEnvironment(t *testing.T) {
 	runMakeTarget(t, makePath, workDir, []string{"clean"}, map[string]string{"VERSION": "fork-7e84d0d"})
 }
 
-// A bare `make` with no goal named still builds, so it still refuses.
-func TestMakeWithNoGoalRefusesAnUncomparableVersion(t *testing.T) {
+// A bare `make` with no goal named builds the binary, so it carries the
+// guard like any other stamping invocation.
+func TestMakeWithNoGoalBuildsAndCarriesTheGuard(t *testing.T) {
 	skipMakeBuildTestsOnWindows(t)
 
 	makePath := lookupMake(t)
 	workDir := writeTestMakeWorkspace(t)
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
+	built := runMakeTarget(t, makePath, workDir, []string{"-n"}, map[string]string{"VERSION": "v1.76.0+fork.7e84d0d"})
+	if !strings.Contains(built, "/internal/buildinfo.Version=v1.76.0+fork.7e84d0d") {
+		t.Fatalf("a bare make should stamp and build the binary, got:\n%s", built)
+	}
+	if !strings.Contains(built, "-o bin/no-mistakes") {
+		t.Fatalf("a bare make should build bin/no-mistakes, got:\n%s", built)
+	}
 
-	if !strings.Contains(output, "carries no comparable version number") {
-		t.Fatalf("a bare make should refuse an uncomparable VERSION, got:\n%s", output)
+	refused := runMakeDryBuildExpectingFailure(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
+	if !strings.Contains(refused, "carries no comparable version number") {
+		t.Fatalf("a bare make should refuse an uncomparable VERSION, got:\n%s", refused)
+	}
+}
+
+// A fork of a prerelease must be told to call itself that prerelease, not
+// the release above it that was never published.
+func TestMakeBuildSuggestionKeepsAPrereleaseTagsIdentifier(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.77.0-rc.1")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the prerelease")
+
+	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
+
+	suggested := suggestedVersion(t, output)
+	if !strings.HasPrefix(suggested, "v1.77.0-rc.1+") {
+		t.Fatalf("the suggestion should keep the described prerelease rather than name the unreleased release above it, got %q in:\n%s", suggested, output)
+	}
+
+	accepted := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": suggested})
+	if !strings.Contains(accepted, "/internal/buildinfo.Version="+suggested) {
+		t.Fatalf("the suggested VERSION=%s should itself pass the guard, got:\n%s", suggested, accepted)
 	}
 }
 

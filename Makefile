@@ -56,8 +56,10 @@ endif
 # plausible release number: the message has to print something that passes
 # the guard, and a copy-pasted fabricated release would ship a binary
 # claiming a version it never came from.  Shipped anyway, 0.0.0 fails a floor
-# check instead of quietly passing one.
-DESCRIBED_RELEASE := $(firstword $(subst -, ,$(DESCRIBED_VERSION)))
+# check instead of quietly passing one.  Only `git describe`'s own trailing
+# `-<count>-g<sha>[-dirty]` is stripped, never the tag's prerelease: a fork of
+# `v1.77.0-rc.1` must not be told to call itself the unreleased `v1.77.0`.
+DESCRIBED_RELEASE := $(shell printf '%s' '$(DESCRIBED_VERSION)' | sed -E 's/-[0-9]+-g[0-9a-f]+(-dirty)?$$//; s/-dirty$$//')
 FORK_RELEASE := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(DESCRIBED_RELEASE),v0.0.0)
 FORK_SUGGESTION := $(FORK_RELEASE)+fork.$(COMMIT)
 PLACEHOLDER_NOTE := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),, The 0.0.0 core there is a placeholder because no release tag was found here: replace it with the release your fork is built from.)
@@ -74,6 +76,9 @@ LDFLAGS := -X github.com/kunchenguid/no-mistakes/internal/buildinfo.Version=$(VE
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryHost=$(UMAMI_HOST) \
            -X github.com/kunchenguid/no-mistakes/internal/buildinfo.TelemetryWebsiteID=$(UMAMI_WEBSITE_ID)
 
+# The guard target sits above `build`, so the default goal is named rather
+# than left to target order: a bare `make` builds the binary.
+.DEFAULT_GOAL := build
 .PHONY: build dist install version-guard test e2e e2e-record lint fmt clean docs docs-build docs-preview demo skill skill-check
 
 DIST_DIR ?= dist
