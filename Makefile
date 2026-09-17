@@ -38,7 +38,7 @@ VERSION ?= $(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERS
 # becoming a shipped binary again.
 ifneq ($(origin VERSION),file)
 ifneq ($(call comparable_version,$(VERSION)),yes)
-$(error VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(if $(DESCRIBED_VERSION),$(DESCRIBED_VERSION),v1.2.3)+fork, or omit VERSION to use git describe)
+$(error VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERSION),v1.2.3)+fork, or omit VERSION to use git describe)
 endif
 endif
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
