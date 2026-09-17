@@ -179,7 +179,10 @@ func TestMakeBuildRefusesHandPassedVersionWithoutAComparableVersionNumber(t *tes
 	makePath := lookupMake(t)
 	workDir := writeTestMakeWorkspace(t)
 
-	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork"} {
+	// A multi-segment core is uncomparable for the same reason: it looks
+	// like a version but `internal/update`'s parseVersion rejects it, so the
+	// guard must not accept what the version check cannot read.
+	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork", "1.2.3.4", "v2026.01.15.3"} {
 		t.Run(version, func(t *testing.T) {
 			output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"VERSION=" + version}, nil)
 
@@ -217,7 +220,7 @@ func TestMakeBuildAcceptsComparableVersions(t *testing.T) {
 	makePath := lookupMake(t)
 	workDir := writeTestMakeWorkspace(t)
 
-	for _, version := range []string{"v1.76.0", "1.76.0", "v1.76.0-5-g7e84d0d", "v1.76.0-5-g7e84d0d-dirty+fork", "v1.76.0+fork.7e84d0d"} {
+	for _, version := range []string{"v1.76.0", "1.76.0", "v1.76.0-5-g7e84d0d", "v1.76.0-5-g7e84d0d-dirty+fork", "v1.76.0+fork.7e84d0d", "v2026.1.15", "1.76.0-rc.1"} {
 		t.Run(version, func(t *testing.T) {
 			output := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": version})
 

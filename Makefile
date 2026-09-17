@@ -15,14 +15,22 @@
 # `git describe --tags` and every release tag produce, and what
 # `internal/update`'s parseVersion accepts.  A bare abbreviated commit is
 # deliberately not comparable.
-VERSION_PATTERN := ^v?[0-9]+\.[0-9]+(\.[0-9]+)?([.+-][0-9A-Za-z.+-]*)?$$
+VERSION_PATTERN := ^v?[0-9]+\.[0-9]+(\.[0-9]+)?([+-][0-9A-Za-z.+-]*)?$$
 comparable_version = $(shell printf '%s' '$(1)' | grep -Eq '$(VERSION_PATTERN)' && echo yes)
 
 DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
 # Loud normalization for the derived value: outside a checkout, or in a
 # shallow/tagless clone where `git describe` can only report a commit, fall
 # back to the `dev` sentinel that `internal/update` already understands
-# rather than stamping a label that looks like a version and is not.
+# rather than stamping a label that looks like a version and is not.  The
+# rule this guard establishes is that the version slot never carries a label
+# that looks like a version and is not, and a commit-ish produced by
+# `git describe` violates it in exactly the same way a hand-passed one does,
+# so refusing one while stamping the other would be inconsistent rather than
+# narrower.  The sentinel costs no traceability, because the commit id is
+# stamped independently in COMMIT and still appears in the version string's
+# own commit field: nothing traceable is lost by the fallback, only the false
+# appearance of a version.
 VERSION ?= $(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERSION),dev)
 
 # A hand-passed VERSION (command line or environment) gets no sentinel
