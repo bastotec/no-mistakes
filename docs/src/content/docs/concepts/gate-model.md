@@ -126,9 +126,11 @@ head is its superseded publication, and the archive tag still preserves that
 head before the mirror moves. The extension does not reach heads recorded by
 other runs, external heads, or any head this run did not publish; the
 rebase step also refreshes the mirror after every integration
-(`refreshGateMirrorAfterIntegration`) so the window where the mirror lags
-the run's own rebase stays closed. Outside the exception, unproven private
-content refuses before publication.
+(`refreshGateMirrorAfterIntegration`) - moving only a mirror that sits at
+this run's recorded publication, never an unpublished run's submitted head,
+which Decision 41-A itself already excuses - so the window where the mirror
+lags the run's own rebase stays closed. Outside the exception, unproven
+private content refuses before publication.
 
 Reconciliation requires direct private branch and archive refs; symbolic refs,
 including dangling symbolic refs, are refused before containment checks. Ref

@@ -885,16 +885,22 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 }
 
 // selectTriggeredRunForHead picks the run a fresh trigger should attach to
-// from the head-matching runs it observed. It never attaches to a TERMINAL
-// run: a fresh run must never inherit a dead run's step records, durations,
-// or crash-time error (defect 2, 2026-09-17 - `axi run` used to take runs[0]
-// with no terminal filter, so a dead run recorded for the same head answered
-// instead of the newly triggered one and replayed its stale state). Only a
-// pending or running run not present in priorRunIDs qualifies, and every run
-// for the head is scanned - a terminal run sorted ahead of the new one must
-// not hide it. nil means "keep waiting": the run this trigger created has
-// not been recorded (or observed) yet.
+// from the head-matching runs it observed. The boundary is priorRunIDs, the
+// snapshot of run IDs taken before the push: a run that predates the trigger
+// is never attached to, whatever its status - a fresh run must never inherit
+// a dead run's step records, durations, or crash-time error (defect 2,
+// 2026-09-17 - `axi run` used to take runs[0] with no such filter, so a dead
+// run recorded for the same head answered instead of the newly triggered one
+// and replayed its stale state). A run absent from that snapshot was created
+// by this trigger, so it is attachable even once terminal: an immediately
+// failed trigger must report its failure rather than be rerun behind the
+// caller's back. When runs this trigger created exist in both states, a
+// not-yet-terminal (pending or running) run is preferred, and every run for
+// the head is scanned - a prior-history run sorted ahead must not hide the
+// new one. nil means "keep waiting": the run this trigger created has not
+// been recorded (or observed) yet.
 func selectTriggeredRunForHead(runs []ipc.RunInfo, priorRunIDs map[string]struct{}) *ipc.RunInfo {
+	var triggered *ipc.RunInfo
 	for i := range runs {
 		run := &runs[i]
 		if _, existed := priorRunIDs[run.ID]; existed {
@@ -904,8 +910,11 @@ func selectTriggeredRunForHead(runs []ipc.RunInfo, priorRunIDs map[string]struct
 		case types.RunPending, types.RunRunning:
 			return run
 		}
+		if triggered == nil {
+			triggered = run
+		}
 	}
-	return nil
+	return triggered
 }
 
 func shouldRerunAfterNoActiveRun(pushErr error) bool {
