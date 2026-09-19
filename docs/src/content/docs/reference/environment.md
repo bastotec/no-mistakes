@@ -157,6 +157,17 @@ Fallback GitHub token used by `no-mistakes update` when `GITHUB_TOKEN` is unset 
 
 See [`GITHUB_TOKEN`](#github_token) for the updater's authentication behavior and precedence.
 
+## `AI_GATEWAY_API_KEY`
+
+Default environment variable holding the Vercel AI Gateway key for the optional advisory [Jev evaluation](/no-mistakes/reference/pipeline-steps/#jev) step.
+
+|         |          |
+| ------- | -------- |
+| Type    | `string` |
+| Default | (none)   |
+
+Consulted by reference only when the step is enabled ([`jev`](/no-mistakes/reference/global-config/#jev)); the variable name itself is configurable (`jev.gateway_key_env`), and [`jev.secrets_file`](/no-mistakes/reference/global-config/#jev) is the parse-only fallback. The key is never logged or embedded in findings or errors. The daemon performs the evaluation, so the variable must be visible to the daemon's environment (see [Environment the daemon sees](#environment-the-daemon-sees)); otherwise put the key in the configured secrets file.
+
 ## `NO_MISTAKES_NO_UPDATE_CHECK`
 
 Disable background update checks.

@@ -151,7 +151,7 @@ Advisory evaluation signal on the diff, using the Jev evaluation model (typed bo
 
 - Diffs the integration base against head - the same diff base the Review step measures from - truncating it at `jev.max_diff_bytes` with a visible truncation marker in both the evaluated state and the reported summary
 - Asks one fixed set of typed boolean questions defined in code (`breaking`, `data_loss`, `security`, `bug`), so no repository can steer what is asked
-- Reports the verdict (`flagged` at or above `jev.threshold`, `clear` at or below its mirror, `uncertain` between) and every per-question probability in the step log, the PR summary, and `info`/`no-op` findings
+- Reports the verdict (`flagged` at or above `jev.threshold`, `clear` at or below its mirror, `uncertain` between) and every per-question probability in the step log; flagged, uncertain, and unanswered questions also appear in the PR summary as `info`/`no-op` finding items (clear answers stay in the step-log line)
 - Refuses to run any Gemini model, whatever configured it
 - Resolves the gateway key by reference at call time - never stores, logs, or embeds it - from the `jev.gateway_key_env` variable, falling back to parsing `jev.secrets_file`
 
