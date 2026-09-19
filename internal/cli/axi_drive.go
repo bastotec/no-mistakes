@@ -867,12 +867,8 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 			if err != nil {
 				return nil, err
 			}
-			for i := range runs {
-				run := &runs[i]
-				if _, existed := priorRunIDs[run.ID]; !existed {
-					return run, nil
-				}
-				break
+			if run := selectTriggeredRunForHead(runs, priorRunIDs); run != nil {
+				return run, nil
 			}
 		}
 		select {
@@ -883,6 +879,30 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 		case <-poll.C:
 		}
 	}
+}
+
+// selectTriggeredRunForHead picks the run a fresh trigger should attach to
+// from the head-matching runs it observed. It never attaches to a TERMINAL
+// run: a fresh run must never inherit a dead run's step records, durations,
+// or crash-time error (defect 2, 2026-09-17 - `axi run` used to take runs[0]
+// with no terminal filter, so a dead run recorded for the same head answered
+// instead of the newly triggered one and replayed its stale state). Only a
+// pending or running run not present in priorRunIDs qualifies, and every run
+// for the head is scanned - a terminal run sorted ahead of the new one must
+// not hide it. nil means "keep waiting": the run this trigger created has
+// not been recorded (or observed) yet.
+func selectTriggeredRunForHead(runs []ipc.RunInfo, priorRunIDs map[string]struct{}) *ipc.RunInfo {
+	for i := range runs {
+		run := &runs[i]
+		if _, existed := priorRunIDs[run.ID]; existed {
+			continue
+		}
+		switch run.Status {
+		case types.RunPending, types.RunRunning:
+			return run
+		}
+	}
+	return nil
 }
 
 func shouldRerunAfterNoActiveRun(pushErr error) bool {

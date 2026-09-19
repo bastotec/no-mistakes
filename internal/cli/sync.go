@@ -17,7 +17,7 @@ import (
 var syncInteractive = terminalInteractive
 
 func newSyncCmd() *cobra.Command {
-	var check, yes, recover, keepLocal bool
+	var check, yes, recover, keepLocal, release bool
 	var bindArchiveRef string
 	cmd := &cobra.Command{
 		Use:   "sync",
@@ -37,6 +37,10 @@ func newSyncCmd() *cobra.Command {
 			"(user_owned) and makes --recover a no-op. --recover --keep-local keeps the\n" +
 			"current local head and never touches the worktree; available preserved commits\n" +
 			"stay anchored, while genuinely missing preserved commits are discarded.\n" +
+			"--release releases a TERMINAL run's stale pipeline push binding after the live\n" +
+			"remote stopped equaling it: anchors the pipeline heads, moves the local gate\n" +
+			"branch to the current head, and returns custody so a fresh run may start;\n" +
+			"mutually exclusive with recovery and archive binding; never force-pushes.\n" +
 			"--bind-archive-ref records one exact existing refs/heads/archive/* commit as\n" +
 			"evidence for the narrow keep-local recovery that stays at a required head while\n" +
 			"a divergent later head remains archived; it never creates or moves a Git ref.",
@@ -48,14 +52,20 @@ func newSyncCmd() *cobra.Command {
 			if check && recover {
 				return &exitError{code: 2, err: fmt.Errorf("--check and --recover cannot be used together")}
 			}
+			if release && (check || recover || keepLocal) {
+				return &exitError{code: 2, err: fmt.Errorf("--release cannot be combined with synchronization or recovery flags")}
+			}
 			if keepLocal && !recover {
 				return &exitError{code: 2, err: fmt.Errorf("--keep-local requires --recover")}
 			}
-			if bindArchiveRef != "" && (check || yes || recover || keepLocal) {
+			if bindArchiveRef != "" && (check || yes || recover || keepLocal || release) {
 				return &exitError{code: 2, err: fmt.Errorf("--bind-archive-ref cannot be combined with synchronization or recovery flags")}
 			}
 			if bindArchiveRef != "" {
 				return runHumanBindRecoveryArchive(cmd, bindArchiveRef)
+			}
+			if release {
+				return runHumanRelease(cmd, yes)
 			}
 			if recover {
 				return runHumanRecover(cmd, keepLocal, yes)
@@ -67,12 +77,13 @@ func newSyncCmd() *cobra.Command {
 	cmd.Flags().BoolVarP(&yes, "yes", "y", false, "apply an eligible guarded synchronization without prompting")
 	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch)")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; anchor available preserved commits, discard genuinely missing ones, and make the gate follow the kept head")
+	cmd.Flags().BoolVar(&release, "release", false, "release a terminal run's stale push binding whose live remote no longer matches: anchor the pipeline heads, move the local gate branch to the current head, and return custody")
 	cmd.Flags().StringVar(&bindArchiveRef, "bind-archive-ref", "", "bind one existing refs/heads/archive/* commit as exact keep-local recovery evidence without changing Git refs")
 	return cmd
 }
 
 func newAxiSyncCmd() *cobra.Command {
-	var check, recover, keepLocal bool
+	var check, recover, keepLocal, release bool
 	var bindArchiveRef string
 	cmd := &cobra.Command{
 		Use:   "sync",
@@ -86,6 +97,10 @@ func newAxiSyncCmd() *cobra.Command {
 			"--check performs the same fresh read-only plan. Blocked states change nothing.\n" +
 			"--recover performs the guarded custody return offered by\n" +
 			"next_action.code: recover_custody; --keep-local keeps the current local head.\n" +
+			"--release releases a terminal run's stale push binding (next_action.code:\n" +
+			"release_binding): anchors the pipeline heads, moves the local gate branch to\n" +
+			"the current head, and returns custody; mutually exclusive with recovery and\n" +
+			"archive binding; the changed remote is never force-pushed.\n" +
 			"--bind-archive-ref binds one exact existing refs/heads/archive/* commit to\n" +
 			"the selected terminal run; it never creates or moves a Git ref.",
 		Args:          cobra.NoArgs,
@@ -95,18 +110,22 @@ func newAxiSyncCmd() *cobra.Command {
 			if check && recover {
 				return emitError(cmd, 2, "--check and --recover cannot be used together")
 			}
+			if release && (check || recover || keepLocal) {
+				return emitError(cmd, 2, "--release cannot be combined with synchronization or recovery flags")
+			}
 			if keepLocal && !recover {
 				return emitError(cmd, 2, "--keep-local requires --recover")
 			}
-			if bindArchiveRef != "" && (check || recover || keepLocal) {
+			if bindArchiveRef != "" && (check || recover || keepLocal || release) {
 				return emitError(cmd, 2, "--bind-archive-ref cannot be combined with synchronization or recovery flags")
 			}
-			return runAxiSync(cmd, check, recover, keepLocal, bindArchiveRef)
+			return runAxiSync(cmd, check, recover, keepLocal, release, bindArchiveRef)
 		},
 	}
 	cmd.Flags().BoolVar(&check, "check", false, "freshly verify and return the plan without changing HEAD")
 	cmd.Flags().BoolVar(&recover, "recover", false, "return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch)")
 	cmd.Flags().BoolVar(&keepLocal, "keep-local", false, "with --recover: keep the current local head; anchor available preserved commits, discard genuinely missing ones, and make the gate follow the kept head")
+	cmd.Flags().BoolVar(&release, "release", false, "release a terminal run's stale push binding whose live remote no longer matches: anchor the pipeline heads, move the local gate branch to the current head, and return custody")
 	cmd.Flags().StringVar(&bindArchiveRef, "bind-archive-ref", "", "bind one existing refs/heads/archive/* commit as exact keep-local recovery evidence without changing Git refs")
 	return cmd
 }
@@ -332,8 +351,11 @@ func humanSyncSummary(state branchsync.State) string {
 	switch state.State {
 	case branchsync.StatePipelineOwned:
 		if state.Safety == "blocked_pipeline_owned_recoverable" {
-			if state.Recovery != nil && state.Recovery.KeepLocal {
+			if state.Recovery != nil && state.Recovery.Source == "bound_archive" && state.Recovery.KeepLocal {
 				return "later pipeline work is preserved by a verified archive; recover custody at the exact required head with `no-mistakes sync --recover --keep-local`"
+			}
+			if state.Recovery != nil && state.Recovery.Source == "gate_mirror" {
+				return "the unpublished pipeline commits are intact in the daemon's private mirror but cannot be adopted safely here; return custody at the current local head with `no-mistakes sync --recover --keep-local` (the preserved commits stay anchored)"
 			}
 			return "run ended without publishing its pipeline commits; recover custody with `no-mistakes sync --recover`. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits"
 		}
@@ -373,12 +395,50 @@ func humanSyncSummary(state branchsync.State) string {
 	}
 }
 
-func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveRef string) error {
+func runHumanRelease(cmd *cobra.Command, yes bool) error {
+	started := time.Now()
+	var observed branchsync.State
+	result := "error"
+	defer func() { trackSyncAttempt("sync", "human_cli", "release", observed, result, started) }()
+
+	service, closeFn, err := openSyncService()
+	if err != nil {
+		return err
+	}
+	defer closeFn()
+
+	if !yes {
+		if !syncInteractive() {
+			fmt.Fprintln(cmd.OutOrStdout(), "  Non-interactive input cannot confirm this release. Re-run with `no-mistakes sync --release --yes`.")
+			result = "refused"
+			return &exitError{code: 1}
+		}
+	}
+	state := service.Release(cmd.Context())
+	observed = state
+	printHumanSyncState(cmd, state)
+	if state.Released {
+		fmt.Fprintln(cmd.OutOrStdout(), "  Binding released; custody returned. The changed remote stays yours to reconcile;")
+		fmt.Fprintln(cmd.OutOrStdout(), "  start a fresh run when ready.")
+		result = "applied"
+		return nil
+	}
+	if state.Recovered {
+		result = "noop"
+		return nil
+	}
+	result = "refused"
+	return &exitError{code: 1}
+}
+
+func runAxiSync(cmd *cobra.Command, check, recover, keepLocal, release bool, bindArchiveRef string) error {
 	started := time.Now()
 	mode := "apply"
 	switch {
 	case bindArchiveRef != "":
 		mode = "bind_archive"
+	case release:
+		mode = "release"
 	case check:
 		mode = "check"
 	case recover && keepLocal:
@@ -399,6 +459,8 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveR
 	switch {
 	case bindArchiveRef != "":
 		state = service.BindRecoveryArchive(cmd.Context(), bindArchiveRef)
+	case release:
+		state = service.Release(cmd.Context())
 	case check:
 		state = service.Refresh(cmd.Context())
 	case recover:
@@ -424,6 +486,9 @@ func runAxiSync(cmd *cobra.Command, check, recover, keepLocal bool, bindArchiveR
 	successful := syncStateSuccessful(state, check)
 	if recover {
 		successful = state.Recovered
+	}
+	if release {
+		successful = state.Released || state.Recovered
 	}
 	if bindArchiveRef != "" {
 		successful = verifiedArchiveRecovery(state)
@@ -532,6 +597,9 @@ func branchSyncField(state branchsync.State) toON.Field {
 	}
 	if state.Recovered {
 		fields = append(fields, toON.Field{Key: "recovered", Value: true})
+	}
+	if state.Released {
+		fields = append(fields, toON.Field{Key: "released", Value: true})
 	}
 	fields = append(fields,
 		toON.Field{Key: "local", Value: toON.NewObject(local...)},
