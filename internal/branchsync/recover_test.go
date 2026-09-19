@@ -255,6 +255,24 @@ func assertManualReconciliationOffer(t *testing.T, state State) {
 	}
 }
 
+// assertMirrorPreservedKeepLocalOffer pins the mirror-consultation contract
+// (defect 3, 2026-09-17): when the invoking worktree cannot participate in the
+// adoption proof but the daemon's private mirror still holds the recorded
+// pipeline head, custody must offer the keep-local return instead of
+// declaring the commits unrecoverable.
+func assertMirrorPreservedKeepLocalOffer(t *testing.T, state State) {
+	t.Helper()
+	if state.Safety != "blocked_pipeline_owned_recoverable" {
+		t.Fatalf("want recoverable safety with mirror evidence, got %#v", state)
+	}
+	if state.Recovery == nil || state.Recovery.Source != "gate_mirror" || !state.Recovery.KeepLocal || state.Recovery.Proof != "mirror_preserved" {
+		t.Fatalf("want gate-mirror keep-local evidence, got %#v", state.Recovery)
+	}
+	if state.NextAction == nil || state.NextAction.Code != "recover_custody" || state.NextAction.Command != "no-mistakes axi sync --recover --keep-local" {
+		t.Fatalf("want keep-local custody guidance, got %#v", state.NextAction)
+	}
+}
+
 // TestTerminalPrePushRunSurfacesGuardedCustodyRecovery is the regression test
 // for the stranded state itself (dogfood run 01KXN8YJ6DWF8XPP582DWQC3HV): a
 // terminal run at the pre_push phase must not be a dead end. The state stays
@@ -491,7 +509,10 @@ func TestRecoverDirtyWorktreeRefusesWithoutMutation(t *testing.T) {
 	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
 	mustWrite(t, filepath.Join(f.local, "file.txt"), "dirty\n")
 	inspected := f.service.InspectCached(f.ctx)
-	assertManualReconciliationOffer(t, inspected)
+	// The dirty worktree cannot participate in the adoption proof, but the
+	// mirror holds the preserved head: custody must offer the keep-local
+	// return rather than declare the commits unrecoverable (defect 3).
+	assertMirrorPreservedKeepLocalOffer(t, inspected)
 	state := f.service.Recover(f.ctx, false)
 	if state.Recovered || state.Changed || state.Safety != "blocked_recover_dirty" {
 		t.Fatalf("recover dirty = %#v", state)
@@ -521,7 +542,10 @@ func TestRecoverDivergedRefusesButKeepLocalReturnsCustody(t *testing.T) {
 	mustRun(t, f.local, "commit", "-m", "diverging rescope")
 	divergedHead := mustRun(t, f.local, "rev-parse", "HEAD")
 	inspected := f.service.InspectCached(f.ctx)
-	assertManualReconciliationOffer(t, inspected)
+	// The diverging local head never reached the gate, so ordinary adoption is
+	// unprovable - but the mirror still holds the preserved head, so custody
+	// offers keep-local instead of manual reconciliation (defect 3).
+	assertMirrorPreservedKeepLocalOffer(t, inspected)
 
 	refused := f.service.Recover(f.ctx, false)
 	if refused.Recovered || refused.Safety != "blocked_recover_diverged" || refused.Relation != RelationDiverged {
@@ -552,6 +576,43 @@ func TestRecoverDivergedRefusesButKeepLocalReturnsCustody(t *testing.T) {
 	}
 	if !f.custodyReturned() {
 		t.Fatal("keep-local did not stamp custody")
+	}
+}
+
+// TestMirrorKeepLocalOfferRequiresVerifiedTerminalHead pins the offer/execution
+// contract of the mirror consultation: status may advertise the mirror-backed
+// keep-local custody return only for a run whose terminal head Recover will
+// accept. A run terminalized without head verification (a daemon crash between
+// the head update and the mirror refresh) is refused by Recover --keep-local,
+// so offering the action there would ping-pong an agent between `axi sync
+// --check` and a refusing recovery. Unverified heads keep the
+// manual-reconciliation offer Recover actually enforces.
+func TestMirrorKeepLocalOfferRequiresVerifiedTerminalHead(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	// The failed mirror refresh: the gate branch never followed the run's
+	// recorded head past the last integration, while the head object itself
+	// stays intact in the gate's shared object store.
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted)
+	// The invoking worktree diverges onto a head the gate has never seen.
+	mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
+	mustRun(t, f.local, "add", "rescope.txt")
+	mustRun(t, f.local, "commit", "-m", "diverging rescope")
+	// Crash-recovery terminalization without head verification.
+	if err := f.db.UpdateRunStatus(f.run.ID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+
+	inspected := f.service.InspectCached(f.ctx)
+	assertManualReconciliationOffer(t, inspected)
+
+	kept := f.service.Recover(f.ctx, true)
+	if kept.Recovered || kept.Safety != "blocked_recover_unverified_head" {
+		t.Fatalf("unverified keep-local recover = %#v, want the refusal the offer must match", kept)
+	}
+	if f.custodyReturned() {
+		t.Fatal("unverified keep-local stamped custody")
 	}
 }
 

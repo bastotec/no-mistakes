@@ -1192,3 +1192,40 @@ func TestSkillExitCodeGuidanceDistinguishesDecisionGates(t *testing.T) {
 		t.Fatal("skill should explicitly identify decision gates as normal exit 0 stops")
 	}
 }
+
+// TestSelectTriggeredRunForHeadNeverAttachesToTerminalRuns pins defect 2
+// (2026-09-17): after a daemon kill mid-run, a fresh gate push used to adopt
+// the dead terminal run's step records because the waiter looked at the head
+// run unconditionally. Only pending or running runs may be attached to;
+// terminal runs are skipped even when they sit first in the list.
+func TestSelectTriggeredRunForHeadNeverAttachesToTerminalRuns(t *testing.T) {
+	prior := map[string]struct{}{"run-prior": {}}
+	terminal := []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled}
+	for _, status := range terminal {
+		runs := []ipc.RunInfo{
+			{ID: "run-terminal", Status: status},
+			{ID: "run-live", Status: types.RunRunning},
+		}
+		got := selectTriggeredRunForHead(runs, prior)
+		if got == nil || got.ID != "run-live" {
+			t.Fatalf("status %s: selected %+v, want the running run behind the terminal one", status, got)
+		}
+	}
+
+	// A terminal run that is not prior history and has no live successor
+	// selects nothing: the push falls through to the no-triggered-run path.
+	if got := selectTriggeredRunForHead([]ipc.RunInfo{{ID: "run-terminal", Status: types.RunFailed}}, prior); got != nil {
+		t.Fatalf("terminal-only list selected %+v, want nil", got)
+	}
+
+	// Prior-history runs are skipped whatever their status, and a pending
+	// run counts as attachable.
+	pending := []ipc.RunInfo{
+		{ID: "run-prior", Status: types.RunRunning},
+		{ID: "run-new", Status: types.RunPending},
+	}
+	got := selectTriggeredRunForHead(pending, prior)
+	if got == nil || got.ID != "run-new" {
+		t.Fatalf("selected %+v, want the pending non-prior run", got)
+	}
+}

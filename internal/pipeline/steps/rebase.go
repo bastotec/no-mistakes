@@ -1005,6 +1005,13 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 			return nil, err
 		}
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
+		// The pipeline just rewrote its own lineage; refresh the gate mirror so
+		// the mirror reflects the rebased head instead of the pre-rebase one.
+		// Best-effort by design (see refreshGateMirrorAfterIntegration): a
+		// stale mirror must never fail an otherwise-complete integration.
+		if err := refreshGateMirrorAfterIntegration(ctx, sctx, headSHA, oldHead); err != nil {
+			sctx.LogFile(fmt.Sprintf("warning: gate mirror refresh after integration: %v", err))
+		}
 	}
 
 	// Check if the branch has any diff against the default branch.
@@ -1021,6 +1028,74 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	}
 
 	return &pipeline.StepOutcome{}, nil
+}
+
+// refreshGateMirrorAfterIntegration moves the gate's mirror of the run
+// branch forward to the head the rebase/merge step just created, so the
+// mirror tracks the pipeline's own rebased lineage instead of the pre-rebase
+// head it still holds (defect 4, 2026-09-17: an ordinary in-pipeline rebase
+// used to leave the mirror at the old lineage, and publication's private
+// mirror guard then read that staleness as content loss). It is deliberately
+// best-effort: on any failure the caller logs a warning and continues, and
+// publication's own reconciliation (PlanMirrorPublicationReconciliation,
+// including the run-owned exception) still settles a mirror left behind.
+// A rebased head does NOT descend from the head it replaces, so the one
+// rewrite this helper ever performs is the run's own: the mirror is moved
+// only when its current tip is exactly the pre-integration head the run
+// recorded before this step (or an ancestor of the new head, an ordinary
+// fast-forward); a mirror already at or beyond the new head is left
+// untouched; anything else is left for publication to reconcile - this
+// helper never archives, deletes, or moves a ref it cannot prove the run
+// owns, and every move is a compare-and-swap against the observed tip.
+func refreshGateMirrorAfterIntegration(ctx context.Context, sctx *pipeline.StepContext, newHead, preIntegrationHead string) error {
+	if sctx.Repo == nil || strings.TrimSpace(sctx.GateDir) == "" {
+		return nil
+	}
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	if branch == "" {
+		return nil
+	}
+	gateDir := strings.TrimSpace(sctx.GateDir)
+	if _, err := os.Stat(gateDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat gate mirror repository: %w", err)
+	}
+	if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+		return fmt.Errorf("validate repository: %w", err)
+	}
+	if err := git.FetchRemoteRef(ctx, gateDir, sctx.WorkDir, newHead, newHead); err != nil {
+		return fmt.Errorf("fetch integrated head: %w", err)
+	}
+	ref := "refs/heads/" + branch
+	gateTip, exists, err := git.DirectRefTarget(ctx, gateDir, ref)
+	if err != nil {
+		return fmt.Errorf("inspect ref %s: %w", ref, err)
+	}
+	if gateTip == newHead {
+		return nil
+	}
+	if exists {
+		if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", newHead, gateTip); err == nil {
+			// The mirror already carries the new head or a descendant of it.
+			return nil
+		}
+		rewriteOwnedByRun := gateTip == preIntegrationHead
+		if !rewriteOwnedByRun {
+			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", gateTip, newHead); err != nil {
+				// Diverged from both the pre-integration lineage and the new head:
+				// leave it for publication's reconciliation machinery.
+				return fmt.Errorf("ref %s at %s diverged from integrated head %s; leaving mirror for publication reconciliation", ref, gateTip, shortSHA(newHead))
+			}
+		}
+	} else {
+		gateTip = strings.Repeat("0", len(newHead))
+	}
+	if _, err := git.Run(ctx, gateDir, "update-ref", "--no-deref", ref, newHead, gateTip); err != nil {
+		return fmt.Errorf("advance ref %s to %s: %w", ref, shortSHA(newHead), err)
+	}
+	return nil
 }
 
 func shortSHA(sha string) string {

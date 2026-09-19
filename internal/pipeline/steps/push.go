@@ -237,13 +237,16 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		return err
 	}
 	sctx.Run.HeadSHA = headBeingPushed
+	sctx.Run.LastPushedSHA = &headBeingPushed
 	return nil
 }
 
 // planGateMirrorReconciliation inspects the gate mirror without mutating it.
-// Only the exact submitted head is eligible for the policy exception owned by
-// docs/src/content/docs/concepts/gate-model.md. Do not substitute an agent-created
-// or later recorded head: those still require preservation checks.
+// Only heads this run durably recorded - the exact submitted head plus its own
+// successful publications (Run.LastPushedSHA) - are eligible for the policy
+// exception owned by docs/src/content/docs/concepts/gate-model.md. Do not
+// substitute an agent-created or otherwise unrecorded head: those still
+// require preservation checks.
 func planGateMirrorReconciliation(ctx context.Context, sctx *pipeline.StepContext, ref, branch, headBeingPushed string) (gatepkg.StaleBranchPlan, error) {
 	var plan gatepkg.StaleBranchPlan
 	if sctx.Repo == nil || strings.TrimSpace(sctx.GateDir) == "" {
@@ -256,7 +259,7 @@ func planGateMirrorReconciliation(ctx context.Context, sctx *pipeline.StepContex
 		}
 		return plan, fmt.Errorf("update gate mirror ref %s before push: stat repository: %w", ref, err)
 	}
-	plan, err := gatepkg.PlanMirrorPublicationReconciliation(ctx, gateDir, sctx.WorkDir, branch, headBeingPushed, runOwnedSubmittedHead(sctx))
+	plan, err := gatepkg.PlanMirrorPublicationReconciliation(ctx, gateDir, sctx.WorkDir, branch, headBeingPushed, runOwnedPublicationHeads(sctx)...)
 	if err != nil {
 		return gatepkg.StaleBranchPlan{}, fmt.Errorf("update gate mirror ref %s before push: %w", ref, err)
 	}
@@ -268,6 +271,23 @@ func runOwnedSubmittedHead(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return strings.TrimSpace(*sctx.Run.SubmittedHeadSHA)
+}
+
+// runOwnedPublicationHeads lists every head the pipeline durably recorded as
+// this run's own: the submitted head, plus the last head it successfully
+// published (Run.LastPushedSHA). A rebase inside the same run leaves the gate
+// mirror at exactly that last published head while the new head carries the
+// same changes conflict-resolved, which no content-only proof can distinguish
+// from loss; the recording is the pipeline's own evidence the mirror head is
+// its superseded publication (defect 4, 2026-09-17).
+func runOwnedPublicationHeads(sctx *pipeline.StepContext) []string {
+	heads := []string{runOwnedSubmittedHead(sctx)}
+	if sctx.Run.LastPushedSHA != nil {
+		if head := strings.TrimSpace(*sctx.Run.LastPushedSHA); head != "" {
+			heads = append(heads, head)
+		}
+	}
+	return heads
 }
 
 func updateGateMirrorAfterPush(ctx context.Context, sctx *pipeline.StepContext, ref, headBeingPushed string, mirrorPlan gatepkg.StaleBranchPlan) (err error) {

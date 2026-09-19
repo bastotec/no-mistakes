@@ -471,6 +471,114 @@ func TestReconcileStaleBranchDecision41AExactSubmittedHeadOnly(t *testing.T) {
 	}
 }
 
+// TestReconcileStaleBranchAcceptsRebaseStaleMirror covers defect 4
+// (2026-09-17): a gate mirror still pointing at the pre-rebase lineage while
+// the live head is the pipeline's own rebased head used to be reported as
+// "at-risk commit(s) contain content absent from live head" on ordinary
+// rebases, in two shapes. (1) A replay that conflict-resolved hunks the live
+// side also moved: per-file patch identities differ (context and resolution
+// changed) and the whole-tree survival merge conflicts BY CONSTRUCTION, so no
+// content-only proof can distinguish a resolved rebase from a genuine loss;
+// the pipeline's own durable recording of the mirror head as one of this
+// run's publications is the evidence that reconciles. (2) A clean replay
+// whose patch identity merely drifted because the live side moved context
+// lines near a private hunk: the mechanical merge reproduces the live tree
+// exactly, which is whole-tree survival proof on its own and no longer also
+// demands patch identity. A foreign mirror with the same resolved-overlap
+// shape stays refused.
+func TestReconcileStaleBranchAcceptsRebaseStaleMirror(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		overlap  bool
+		runOwned bool
+		refused  bool
+	}{
+		{name: "run owned resolved overlap", overlap: true, runOwned: true},
+		{name: "foreign resolved overlap", overlap: true, refused: true},
+		{name: "foreign context drift clean replay", runOwned: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := initReconcileRepo(t)
+			// Six lines keep the private hunk (line 4) and the live hunk
+			// (line 1) textually disjoint for a clean replay, while still
+			// sharing the surrounding context so the replayed patch identity
+			// drifts.
+			writeReconcileFile(t, work, "feature.txt", "line one\nline two\nline three\nline four\nline five\nline six\n")
+			reconcileGit(t, work, "add", "-A")
+			reconcileGit(t, work, "commit", "-m", "shared file")
+			base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+			// Private lineage: the pre-rebase head the mirror still holds.
+			reconcileGit(t, work, "checkout", "-b", "private", base)
+			privateLine := "line four private\n"
+			if tc.overlap {
+				privateLine = "line one private\n"
+			}
+			content := "line one\nline two\nline three\n" + privateLine + "line five\nline six\n"
+			if tc.overlap {
+				content = "line one private\nline two\nline three\nline four\nline five\nline six\n"
+			}
+			writeReconcileFile(t, work, "feature.txt", content)
+			reconcileGit(t, work, "add", "-A")
+			reconcileGit(t, work, "commit", "-m", "private work")
+			privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+			// Live lineage: the default branch advanced nearby, so the replay
+			// either conflicts (overlap) or applies with drifted context.
+			reconcileGit(t, work, "checkout", "-b", "live", base)
+			writeReconcileFile(t, work, "feature.txt", "line one live\nline two\nline three\nline four\nline five\nline six\n")
+			reconcileGit(t, work, "add", "-A")
+			reconcileGit(t, work, "commit", "-m", "live-side work")
+			reconcileGit(t, work, "checkout", "-b", "replayed", "private")
+			if tc.overlap {
+				// A conflicting rebase exits non-zero by design; tolerate it
+				// and resolve below keeping both sides.
+				if out, err := exec.Command("git", "-C", work, "rebase", "live").CombinedOutput(); err == nil {
+					t.Fatalf("fixture expected a rebase conflict, got: %s", out)
+				}
+				writeReconcileFile(t, work, "feature.txt", "line one private live\nline two\nline three\nline four\nline five\nline six\n")
+				reconcileGit(t, work, "add", "-A")
+				reconcileGit(t, work, "-c", "core.editor=true", "rebase", "--continue")
+			} else {
+				reconcileGit(t, work, "rebase", "live")
+			}
+			liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+			gateDir := filepath.Join(t.TempDir(), "gate.git")
+			reconcileGit(t, "", "init", "--bare", gateDir)
+			reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature")
+
+			runOwnedHead := ""
+			if tc.runOwned {
+				runOwnedHead = privateHead
+			}
+			result, err := ReconcileStaleBranch(context.Background(), gateDir, work, "feature", liveHead, runOwnedHead)
+			if tc.refused {
+				if err == nil || result.Reconciled || !strings.Contains(err.Error(), privateHead) {
+					t.Fatalf("foreign resolved overlap accepted or not named: result=%+v err=%v", result, err)
+				}
+				if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature"); got != privateHead {
+					t.Fatalf("refusal moved private ref: %s", got)
+				}
+				if got := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); got != "" {
+					t.Fatalf("refusal archived content: %s", got)
+				}
+				return
+			}
+			if err != nil || !result.Reconciled {
+				t.Fatalf("rebase-stale mirror refused: result=%+v err=%v", result, err)
+			}
+			if got := reconcileGit(t, gateDir, "rev-parse", result.ArchivedTag+"^{commit}"); got != privateHead {
+				t.Fatalf("archive tag points at %s, want %s", got, privateHead)
+			}
+			reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature")
+			if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature"); got != liveHead {
+				t.Fatalf("ordinary push reached %s, want %s", got, liveHead)
+			}
+		})
+	}
+}
+
 func TestReconcileStaleBranchRefusesPatchesDiscardedByOursMerge(t *testing.T) {
 	for _, change := range []string{"add", "modify", "delete"} {
 		t.Run(change, func(t *testing.T) {

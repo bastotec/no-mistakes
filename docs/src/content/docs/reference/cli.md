@@ -313,6 +313,7 @@ no-mistakes axi sync --check
 no-mistakes axi sync
 no-mistakes axi sync --recover
 no-mistakes axi sync --recover --keep-local
+no-mistakes axi sync --release
 no-mistakes axi sync --bind-archive-ref refs/heads/archive/<name>
 ```
 
@@ -321,11 +322,12 @@ no-mistakes axi sync --bind-archive-ref refs/heads/archive/<name>
 | `--check`            | `bool`   | `false` | Verify the live target and exact plan without changing `HEAD`                |
 | `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
 | `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree   |
+| `--release`          | `bool`   | `false` | Release a terminal run's stale push binding whose live remote no longer matches it (`next_action.code: release_binding`); mutually exclusive with recovery and archive binding |
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact evidence for a keep-local recovery; never creates or moves a Git ref |
 
 The default command is an explicit non-interactive apply request and never prompts.
 All modes return the complete `branch_sync` object as TOON.
-Exit code `0` means an eligible check, applied synchronization or recovery, already-synchronized, custody-returned, or user-owned no-op, or expected merged-and-removed no-op; blocked operational states return `1`.
+Exit code `0` means an eligible check, applied synchronization, recovery, or binding release, already-synchronized, custody-returned, or user-owned no-op, or expected merged-and-removed no-op; blocked operational states return `1`.
 The ordinary worktree mutation is either a strict fast-forward of the invoking clean checked-out branch to the freshly verified pipeline-owned pushed SHA, or an equivalent-diverged advance.
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
 Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization.
@@ -335,11 +337,15 @@ Fork configurations verify the configured fork URL and exact feature ref rather 
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
 Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
 
+### Stale-binding release
+
+When someone rewrites or deletes the remote branch after a terminal run pushed it, the persisted push binding can never be satisfied again and the branch is stranded: status reports `safety: blocked_remote_rewritten` (or `blocked_remote_advanced` / `blocked_remote_missing`), always with `next_action.code: release_binding`. `--release` is the sanctioned exit: it requires a terminal, non-active run whose exact recorded binding matches the branch and target, a clean invoking worktree, and a live remote that no longer equals the binding; it anchors the run's recorded pipeline head - under the exact binding, the previously pushed head - at the run recovery ref whenever the local branch does not already keep it reachable, anchors any independently moved gate head at the gate recovery ref, re-points the local gate branch to the current local head with a compare-and-swap, and stamps custody. It never force-pushes or otherwise touches the changed remote - reconciling that history stays the operator's choice. Release is idempotent (a second run is a no-op) and mutually exclusive with recovery and archive binding. A run that went terminal with unpublished pipeline work after its push is served by ordinary `recover_custody` instead; release applies to the exact-binding shape only.
+
 ### Custody recovery
 
 A run that goes terminal (cancelled, failed, or completed without a push stage) after moving the pipeline head leaves the branch `pipeline_owned`. Status offers `next_action.code: recover_custody` only when recovery can establish the same eligibility it will enforce: an equal or ahead local head proves the source locally and can create the local anchor when the gate is unavailable, but any existing gate recovery ref must still match the recorded head; importing a missing preserved head requires an exact run-specific gate anchor (or legacy commit evidence that can be anchored), a clean worktree, and either local ancestry or the content-preservation proof described below. The archive-backed keep-local exception has its own stricter proof below. An eligible state reports `safety: blocked_pipeline_owned_recoverable`, the run's terminal `pipeline.status`, and the exact `submitted_head`/`current_head`/`relation` ownership facts.
 A run whose terminalization verifies that the managed worktree head never changed from the submitted head releases the branch instead: the terminal outcome, including cancellation, ends ownership; status reports `state: user_owned` with the same exact ownership facts and no `next_action`; the branch and head are immediately usable for any separately authorized delivery; and nothing blocks a direct push or PR.
-Without positive evidence that the submitted head stayed unchanged, custody is not guessed away. Conflicting evidence, import cases with a dirty worktree, and genuinely divergent history retain manual-reconciliation guidance instead of being labeled as a missing preserved head. When a verified recorded head is absent from both the invoking worktree and an accessible local gate, with compatible recovery refs, status reports `safety: blocked_recover_preserved_head_missing` with `next_action.code: recover_custody` and `no-mistakes axi sync --recover --keep-local`: that flag is the operator's explicit choice to keep the current local head and discard the missing preserved commits. An unavailable gate remains blocked because absence cannot be established there. The archive-backed keep-local exception has its own stricter proof below.
+Without positive evidence that the submitted head stayed unchanged, custody is not guessed away. Conflicting evidence, import cases with a dirty worktree, and genuinely divergent history retain manual-reconciliation guidance instead of being labeled as a missing preserved head, unless the daemon's private mirror still holds the verified head as described below. When a verified recorded head is absent from both the invoking worktree and an accessible local gate, with compatible recovery refs, status reports `safety: blocked_recover_preserved_head_missing` with `next_action.code: recover_custody` and `no-mistakes axi sync --recover --keep-local`: that flag is the operator's explicit choice to keep the current local head and discard the missing preserved commits. When such a verified recorded head is intact in the daemon's private gate mirror while the invoking worktree has never received it - including a dirty worktree, which can never adopt it - status keeps `safety: blocked_pipeline_owned_recoverable` but attaches recovery evidence with `source: gate_mirror` and `keep_local: true`, offering the same `--recover --keep-local` command: those commits are not unrecoverable, custody returns at the current local head, and the preserved head stays anchored. A worktree that already holds the preserved object keeps manual reconciliation, because it can inspect both divergent heads itself. An unavailable gate remains blocked because absence cannot be established there. The archive-backed keep-local exception has its own stricter proof below.
 While a run is still active, it reports `state: pipeline_owned`, the exact submitted/current heads and their relation, and `next_action.code: continue_active_run` with `no-mistakes axi status`, even when its head has not moved yet.
 `--recover` verifies the run is terminal, anchors the preserved head under `refs/no-mistakes/recover/<run>` in the invoking repository, and stamps custody returned so a fresh run can start.
 For equal or ahead worktrees where the preserved head is already locally reachable, recovery writes that anchor locally without requiring gate access. If the gate is available, an existing symbolic, non-commit, or mismatched recovery ref is conflicting evidence and recovery refuses without overwriting it.
@@ -490,19 +496,21 @@ no-mistakes sync --check
 no-mistakes sync --yes
 no-mistakes sync --recover
 no-mistakes sync --recover --keep-local
+no-mistakes sync --release
 no-mistakes sync --bind-archive-ref refs/heads/archive/<name>
 ```
 
 | Flag                 | Type     | Default | Description                                                     |
 | -------------------- | -------- | ------- | --------------------------------------------------------------- |
 | `--check`            | `bool`   | `false` | Verify and print the fresh plan without changing `HEAD`         |
-| `-y`, `--yes`        | `bool`   | `false` | Apply an eligible guarded synchronization without an interactive prompt |
+| `-y`, `--yes`        | `bool`   | `false` | Apply an eligible guarded synchronization, recovery, or release without an interactive prompt |
 | `--recover`          | `bool`   | `false` | Return custody of a branch stranded by a terminal run with unpublished pipeline commits (a no-op when cancellation already released the branch) |
 | `--keep-local`       | `bool`   | `false` | With `--recover`: keep the current local head; never touches the worktree |
+| `--release`          | `bool`   | `false` | Release a terminal run's stale push binding whose live remote no longer matches it; see `axi sync --release` |
 | `--bind-archive-ref` | `string` | (none)  | Bind one existing `refs/heads/archive/*` commit as exact keep-local recovery evidence without changing Git refs |
 
-Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` prompts the same way before returning custody. Archive binding is itself explicit, does not prompt, and cannot be combined with synchronization, recovery, or `--yes`.
-A non-TTY apply or recovery refuses with a direct `--yes` hint.
+Without `--yes`, apply prints the exact full-SHA plan and requires TTY confirmation; `--recover` and `--release` prompt the same way before returning custody or releasing the binding. Archive binding is itself explicit, does not prompt, and cannot be combined with synchronization, recovery, or `--yes`.
+A non-TTY apply, recovery, or release refuses with a direct `--yes` hint.
 The command uses the same service and safety contract as `no-mistakes axi sync`, including the guarded equivalent advance and custody recovery documented there; it never stashes, rebases, creates a merge commit, switches branches, deletes a branch, or updates an external remote.
 
 ## no-mistakes status

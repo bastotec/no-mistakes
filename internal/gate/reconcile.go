@@ -44,27 +44,34 @@ func ReconcileStaleBranch(ctx context.Context, gateDir, workDir, branch, liveHea
 
 // PlanStaleBranchReconciliation inspects a private gate branch and reports
 // whether it must be archived and removed before the live head can enter
-// through an ordinary push. It mutates no ref: outside the submitted-head
+// through an ordinary push. It mutates no ref: outside the run-owned
 // exception, an unproven private head is refused before publication.
 //
-// Rewritten histories require both stable per-file patch identities and final
-// tree survival. runOwnedHead is a policy exception, not containment evidence:
-// publication callers must supply only Run.SubmittedHeadSHA, and fresh
-// submissions must leave it empty. The contract and rationale are owned by
+// Rewritten histories require final tree survival (a mechanical 3-way of the
+// private head with the live head reproduces the live tree). runOwnedHead is
+// a policy exception, not containment evidence: callers must supply only
+// heads the pipeline durably recorded for this run, and fresh submissions
+// must leave it empty. The contract and rationale are owned by
 // docs/src/content/docs/concepts/gate-model.md (Private mirror reconciliation).
 func PlanStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead, runOwnedHead string) (StaleBranchPlan, error) {
-	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, runOwnedHead, false)
+	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, []string{runOwnedHead}, false)
 }
 
-func PlanMirrorPublicationReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead, runOwnedHead string) (StaleBranchPlan, error) {
-	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, runOwnedHead, true)
+// PlanMirrorPublicationReconciliation is the publication variant: in addition
+// to the submitted head, every head this run durably recorded as one of its
+// own successful publications (Run.LastPushedSHA) is run-owned. A rebase
+// inside the same run legitimately leaves the gate mirror at the run's own
+// previously published head while the new head carries the same changes
+// conflict-resolved (defect 4, 2026-09-17); the archive tag still preserves
+// the superseded head before the mirror moves.
+func PlanMirrorPublicationReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead string, runOwnedHeads ...string) (StaleBranchPlan, error) {
+	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, runOwnedHeads, true)
 }
 
-func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead, runOwnedHead string, preserveDescendants bool) (StaleBranchPlan, error) {
+func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead string, runOwnedHeads []string, preserveDescendants bool) (StaleBranchPlan, error) {
 	var plan StaleBranchPlan
 	branch = strings.TrimSpace(branch)
 	liveHead = strings.TrimSpace(liveHead)
-	runOwnedHead = strings.TrimSpace(runOwnedHead)
 	if branch == "" || liveHead == "" {
 		return plan, fmt.Errorf("reconcile stale gate branch: branch and live head are required")
 	}
@@ -119,7 +126,7 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 			return plan, nil
 		}
 	}
-	if gateHead != runOwnedHead {
+	if !isRunOwnedHead(gateHead, runOwnedHeads) {
 		atRiskCommits, err := privateCommitsAbsentFromLive(ctx, gateDir, liveHead, gateHead)
 		if err != nil {
 			return plan, fmt.Errorf("compare private mirror content for %s: %w", branchRef, err)
@@ -244,16 +251,44 @@ func ArchivedHeadRecorded(ctx context.Context, gateDir, branch, head string) boo
 	return err == nil && objectType == "commit"
 }
 
-// privateCommitsAbsentFromLive names private-only commits lacking matching
-// per-file patches, or the entire private-only range when final-tree survival
-// cannot be proven.
+// isRunOwnedHead reports whether the mirror head is one of the heads the
+// calling pipeline durably recorded for this run (submitted head, or one of
+// its own successful publications). An empty candidate never matches.
+func isRunOwnedHead(head string, owned []string) bool {
+	for _, candidate := range owned {
+		if candidate = strings.TrimSpace(candidate); candidate != "" && candidate == head {
+			return true
+		}
+	}
+	return false
+}
+
+// privateCommitsAbsentFromLive names private-only commits whose content is
+// absent from the live head, or the entire private-only range when survival
+// cannot be proven. The private-only range is computed once to bound the
+// at-risk listing; survival itself is settled by the single merge-tree
+// comparison of the two heads, so a rebased live head carrying the whole
+// default branch since the merge base never costs a per-commit scan of that
+// history.
 //
-// The private side is computed first so the live scan can be bounded to the
-// paths the private commits actually touch. Comparison stops at the first
-// unmatched patch within each commit, but visits every private-only commit.
-// A rebased live head otherwise carries every default-branch
-// commit since the merge base, and hashing each of those files would cost
-// thousands of git invocations to answer a question about a handful of paths.
+// One proof can clear the private side: final-tree survival - a mechanical
+// 3-way of liveHead with privateHead completes and reproduces the live tree
+// exactly (merging the private head back in would change nothing). Per-file
+// patch identity is not additionally required: patch ids drift across a
+// rebase whose base moved the context lines around a private hunk even when
+// the replay is clean and the final content identical.
+//
+// A mirror whose mechanical 3-way conflicts or differs from the live tree
+// fails closed with the whole private-only range named at risk. A rebase
+// that conflict-resolved the same hunks the live side moved genuinely
+// produces that conflict with no content missing - that staleness is not
+// provable from content, which is why the pipeline refreshes its own mirror
+// after every integration (refreshGateMirrorAfterIntegration) and why
+// publication extends the Decision 41-A exception to the head this run
+// durably recorded as its own last publication (PlanMirrorPublicationReconciliation).
+// A patch-equivalent commit whose content was then discarded (an `-s ours`
+// twin) still fails: its live file matches the merge base, so the change is
+// provably absent.
 func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privateHead string) ([]string, error) {
 	privateOnly, err := commitList(ctx, repoDir, "--right-only", liveHead+"..."+privateHead)
 	if err != nil {
@@ -262,108 +297,20 @@ func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privat
 	if len(privateOnly) == 0 {
 		return nil, nil
 	}
-
-	type privateCommit struct {
-		sha        string
-		patches    []string
-		comparable bool
-	}
-	privateCommits := make([]privateCommit, 0, len(privateOnly))
-	paths := make(map[string]bool)
-	for _, commit := range privateOnly {
-		patches, comparable, err := perFilePatchIDs(ctx, repoDir, commit)
-		if err != nil {
-			return nil, err
-		}
-		privateCommits = append(privateCommits, privateCommit{sha: commit, patches: patches, comparable: comparable})
-		if !comparable {
-			continue
-		}
-		for _, patch := range patches {
-			path, _, ok := strings.Cut(patch, "\x00")
-			if ok {
-				paths[path] = true
-			}
-		}
-	}
-
-	livePatches, err := liveSidePatchIDs(ctx, repoDir, liveHead, privateHead, paths)
-	if err != nil {
-		return nil, err
-	}
-
-	var atRisk []string
-	for _, commit := range privateCommits {
-		if !commit.comparable {
-			atRisk = append(atRisk, commit.sha)
-			continue
-		}
-		remaining := make(map[string]int, len(livePatches))
-		for patch, count := range livePatches {
-			remaining[patch] = count
-		}
-		represented := true
-		for _, patch := range commit.patches {
-			if remaining[patch] == 0 {
-				represented = false
-				break
-			}
-			remaining[patch]--
-		}
-		if !represented {
-			atRisk = append(atRisk, commit.sha)
-			continue
-		}
-		for patch, count := range remaining {
-			livePatches[patch] = count
-		}
-	}
 	mergedTree, mergeErr := git.Run(ctx, repoDir, "merge-tree", "--write-tree", liveHead, privateHead)
-	if mergeErr != nil {
-		return privateOnly, nil
-	}
-	liveTree, err := git.Run(ctx, repoDir, "rev-parse", "--verify", liveHead+"^{tree}")
-	if err != nil {
-		return nil, err
-	}
-	if mergedTree != liveTree {
-		return privateOnly, nil
-	}
-	return atRisk, nil
-}
-
-// liveSidePatchIDs collects per-file patch identities from the live-only
-// history, restricted to the paths the private side needs proven.
-func liveSidePatchIDs(ctx context.Context, repoDir, liveHead, privateHead string, paths map[string]bool) (map[string]int, error) {
-	livePatches := make(map[string]int)
-	if len(paths) == 0 {
-		return livePatches, nil
-	}
-	args := []string{"--full-history", "--left-only", liveHead + "..." + privateHead, "--"}
-	for path := range paths {
-		args = append(args, ":(literal)"+path)
-	}
-	liveOnly, err := commitList(ctx, repoDir, args...)
-	if err != nil {
-		return nil, err
-	}
-	for _, commit := range liveOnly {
-		patches, comparable, err := perFilePatchIDs(ctx, repoDir, commit)
+	if mergeErr == nil {
+		liveTree, err := git.Run(ctx, repoDir, "rev-parse", "--verify", liveHead+"^{tree}")
 		if err != nil {
 			return nil, err
 		}
-		if !comparable {
-			continue
-		}
-		for _, patch := range patches {
-			path, _, ok := strings.Cut(patch, "\x00")
-			if !ok || !paths[path] {
-				continue
-			}
-			livePatches[patch]++
+		if mergedTree == liveTree {
+			// Whole-tree survival: merging the private head back into the
+			// live head reproduces the live tree exactly, so no private
+			// content can be absent.
+			return nil, nil
 		}
 	}
-	return livePatches, nil
+	return privateOnly, nil
 }
 
 func commitList(ctx context.Context, repoDir string, args ...string) ([]string, error) {
@@ -372,39 +319,4 @@ func commitList(ctx context.Context, repoDir string, args ...string) ([]string, 
 		return nil, err
 	}
 	return strings.Fields(out), nil
-}
-
-func perFilePatchIDs(ctx context.Context, repoDir, commit string) ([]string, bool, error) {
-	parentLine, err := git.Run(ctx, repoDir, "rev-list", "--parents", "-n", "1", commit)
-	if err != nil {
-		return nil, false, err
-	}
-	parents := strings.Fields(parentLine)
-	if len(parents) > 2 {
-		// A merge's combined meaning is not safely represented by first-parent
-		// patches. It remains at risk unless direct ancestry proved containment.
-		return nil, false, nil
-	}
-	parent := git.EmptyTreeSHA
-	if len(parents) == 2 {
-		parent = parents[1]
-	}
-	rawPaths, err := git.RunRaw(ctx, repoDir, "diff-tree", "--root", "--no-commit-id", "--name-only", "--no-renames", "-r", "-z", commit)
-	if err != nil {
-		return nil, false, err
-	}
-	var patches []string
-	for _, rawPath := range strings.Split(strings.TrimSuffix(string(rawPaths), "\x00"), "\x00") {
-		if rawPath == "" {
-			continue
-		}
-		patchID, err := git.StablePatchID(ctx, repoDir, parent, commit, rawPath)
-		if err != nil {
-			return nil, false, err
-		}
-		if patchID != "" {
-			patches = append(patches, rawPath+"\x00"+patchID)
-		}
-	}
-	return patches, true, nil
 }

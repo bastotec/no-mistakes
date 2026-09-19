@@ -717,6 +717,93 @@ func TestPushStep_AllowsForcePushOnRerunOverPriorRunPushedGeneration(t *testing.
 	}
 }
 
+// TestPushStep_RepublishAfterSameProcessRebaseKeepsInMemoryPublicationBinding
+// reproduces the CI-repair revalidation path inside one executor process: the
+// first Push publishes a pipeline fix head through publishRunHead, the executor
+// then restarts from Review after the repair rebased onto an advanced base
+// (same in-memory run pointer; prepareRestart reloads nothing), and the second
+// Push must still recognize the mirror's head as this run's own prior
+// publication. The durable row records it; only the in-memory LastPushedSHA
+// could be stale, and a stale one refuses the routine rebase as at-risk
+// (defect 4, 2026-09-17).
+func TestPushStep_RepublishAfterSameProcessRebaseKeepsInMemoryPublicationBinding(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, submittedHead := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, submittedHead, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+
+	// Generation 1: a pipeline fix commit ahead of the submitted head becomes
+	// the run's first publication, so the gate mirror settles at it.
+	if err := os.WriteFile(filepath.Join(dir, "gen1_fix.txt"), []byte("gen1 fix\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "gen1 pipeline fix")
+	gen1Head := gitCmd(t, dir, "rev-parse", "HEAD")
+	sctx.Run.HeadSHA = gen1Head
+	recordReviewApproval(t, sctx, gen1Head)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("first push failed: %v", err)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != gen1Head {
+		t.Fatalf("remote head after first push = %s, want %s", got, gen1Head)
+	}
+
+	// Upstream main advances mid-run.
+	other := t.TempDir()
+	gitCmd(t, other, "clone", upstream, ".")
+	gitCmd(t, other, "config", "user.name", "o")
+	gitCmd(t, other, "config", "user.email", "o@test.com")
+	gitCmd(t, other, "checkout", "main")
+	if err := os.WriteFile(filepath.Join(other, "main_advance.txt"), []byte("advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, other, "add", "-A")
+	gitCmd(t, other, "commit", "-m", "main advance")
+	gitCmd(t, other, "push", "origin", "main")
+	newBaseSHA := gitCmd(t, other, "rev-parse", "HEAD")
+
+	// The repair rebases onto the advanced base: the new head supersedes
+	// gen1Head's hunks rather than descending from it, so content alone cannot
+	// prove the mirror head is this run's superseded publication.
+	gitCmd(t, dir, "fetch", "origin", "main")
+	gitCmd(t, dir, "reset", "--hard", newBaseSHA)
+	if err := os.WriteFile(filepath.Join(dir, "rebased_work.txt"), []byte("rebased work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-m", "rebased work")
+	rebasedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+
+	// The same in-memory run pointer, exactly as prepareRestart leaves it.
+	sctx.Run.HeadSHA = rebasedHead
+	sctx.Run.BaseSHA = newBaseSHA
+	recordReviewApproval(t, sctx, rebasedHead)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("push after same-process rebase failed: %v", err)
+	}
+
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != rebasedHead {
+		t.Fatalf("expected remote head = %s, got %s", rebasedHead, got)
+	}
+	if sctx.Run.LastPushedSHA == nil || *sctx.Run.LastPushedSHA != rebasedHead {
+		t.Fatalf("in-memory last pushed head = %v, want %s", sctx.Run.LastPushedSHA, rebasedHead)
+	}
+	mirrored := gitCmd(t, sctx.GateDir, "rev-parse", "refs/heads/feature")
+	if mirrored != rebasedHead {
+		t.Fatalf("gate mirror head = %s, want %s", mirrored, rebasedHead)
+	}
+}
+
 func TestLastKnownBranchTip_BranchRefNormalization(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
