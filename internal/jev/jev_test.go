@@ -229,7 +229,10 @@ func TestResolveKeyMissingFileIsEmptyNotError(t *testing.T) {
 
 func TestResolveKeyExpandsHomeTilde(t *testing.T) {
 	home := t.TempDir()
+	// os.UserHomeDir reads HOME on Unix and USERPROFILE on Windows; set
+	// both so the tilde resolves into this test's temp dir on every platform.
 	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
 	secrets := filepath.Join(home, ".secrets")
 	if err := os.WriteFile(secrets, []byte("K=v\n"), 0o600); err != nil {
 		t.Fatal(err)
