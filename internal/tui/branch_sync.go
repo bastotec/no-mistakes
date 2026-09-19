@@ -23,6 +23,8 @@ func renderLocalBranchStatus(state *branchsync.State, refreshing bool, width int
 			if recoverableBranchSync(state) {
 				if archiveKeepLocalRecovery(state) {
 					message = "Later pipeline work is preserved by a verified archive. Recover custody while keeping the exact required local head."
+				} else if mirrorKeepLocalRecovery(state) {
+					message = "The unpublished pipeline commits are intact in the daemon's private mirror but cannot be adopted here. Recover custody while keeping the current local head; the preserved commits stay anchored."
 				} else {
 					message = "Run ended without publishing its pipeline commits; they are preserved in the local gate. Recover custody to take the branch back, or rerun to resume validation."
 				}
@@ -116,6 +118,14 @@ func archiveKeepLocalRecovery(state *branchsync.State) bool {
 	return state != nil && state.Recovery != nil && state.Recovery.Source == "bound_archive" && state.Recovery.KeepLocal && state.Recovery.Proof == "verified"
 }
 
+// mirrorKeepLocalRecovery reports the mirror-consultation state (defect 3,
+// 2026-09-17): the preserved head is intact in the daemon's private mirror,
+// so the commits are NOT unrecoverable - only this worktree's adoption of
+// them is unavailable, and keep-local custody return still anchors them.
+func mirrorKeepLocalRecovery(state *branchsync.State) bool {
+	return state != nil && state.Recovery != nil && state.Recovery.Source == "gate_mirror" && state.Recovery.KeepLocal
+}
+
 func renderRecoverConfirmation(state branchsync.State, width int) string {
 	if width < 40 {
 		width = 80
@@ -126,6 +136,10 @@ func renderRecoverConfirmation(state branchsync.State, width int) string {
 		fmt.Fprintf(&b, "A verified archive preserves the divergent later head. Recovery keeps the\n")
 		fmt.Fprintf(&b, "working branch at the exact required head and returns custody through the\n")
 		fmt.Fprintf(&b, "guarded keep-local path. It never selects or replays the archive.\n\n")
+	} else if mirrorKeepLocalRecovery(&state) {
+		fmt.Fprintf(&b, "The unpublished commits are intact in the daemon's private mirror, but this\n")
+		fmt.Fprintf(&b, "worktree cannot adopt them. Recovery keeps the current local head, returns\n")
+		fmt.Fprintf(&b, "custody, and leaves the preserved commits anchored.\n\n")
 	} else {
 		fmt.Fprintf(&b, "Recovery returns custody by fast-forwarding a clean behind worktree, or by\n")
 		fmt.Fprintf(&b, "adopting a diverged preserved head only when it is proven to carry every\n")
@@ -138,6 +152,8 @@ func renderRecoverConfirmation(state branchsync.State, width int) string {
 		fmt.Fprintf(&b, "Archive ref:    %s\n", state.Recovery.ArchiveRef)
 		fmt.Fprintf(&b, "Required HEAD:  %s\n\n", state.Recovery.RequiredHead)
 		b.WriteString("Any changed archive, head, branch, run, repository, or gate evidence makes recovery refuse without selecting the divergent head.")
+	} else if mirrorKeepLocalRecovery(&state) {
+		b.WriteString("\nThe current local head stays checked out, the branch never moves, and the preserved mirror commits stay anchored.")
 	} else {
 		b.WriteString("\nDirty worktrees and divergence that cannot be proven contained refuse without changes; `no-mistakes sync --recover --keep-local` keeps the current head instead.")
 	}
