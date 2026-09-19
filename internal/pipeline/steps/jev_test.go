@@ -283,6 +283,54 @@ func TestJevStep_HalfThresholdFlaggedAnswerBecomesAnItem(t *testing.T) {
 	}
 }
 
+func TestJevStep_SkipReasonReachesTheStepLog(t *testing.T) {
+	t.Setenv("JEV_TEST_GATEWAY_KEY", "")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	configs := []config.Jev{
+		func() config.Jev { c := jevTestConfig(); c.Enabled = false; return c }(),
+		func() config.Jev { c := jevTestConfig(); c.Model = "google/gemini-2.5-pro"; return c }(),
+		jevTestConfig(), // enabled, but no key resolvable
+	}
+	for i := range configs {
+		dir, baseSHA, headSHA := newJevGitRepo(t)
+		sctx := newJevStepContext(t, dir, baseSHA, headSHA, configs[i])
+		var logged strings.Builder
+		sctx.Log = func(line string) { logged.WriteString(line + "\n") }
+
+		outcome, err := (&JevStep{}).Execute(sctx)
+		if err != nil {
+			t.Fatalf("config %d: Execute: %v", i, err)
+		}
+		if !outcome.Skipped {
+			t.Fatalf("config %d: expected a skipped outcome", i)
+		}
+		if !strings.Contains(logged.String(), outcome.SkipReason) {
+			t.Errorf("config %d: skip reason %q missing from the step log: %q", i, outcome.SkipReason, logged.String())
+		}
+	}
+
+	// A gateway failure mid-run must report the same way.
+	t.Setenv("JEV_TEST_GATEWAY_KEY", "k")
+	dir, baseSHA, headSHA := newJevGitRepo(t)
+	sctx := newJevStepContext(t, dir, baseSHA, headSHA, jevTestConfig())
+	var logged strings.Builder
+	sctx.Log = func(line string) { logged.WriteString(line + "\n") }
+	outcome, err := (&JevStep{endpointOverride: srv.URL}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if !outcome.Skipped {
+		t.Fatal("expected a skipped outcome on gateway failure")
+	}
+	if !strings.Contains(logged.String(), outcome.SkipReason) {
+		t.Errorf("skip reason %q missing from the step log: %q", outcome.SkipReason, logged.String())
+	}
+}
+
 func TestJevStep_GatewayFailureSkipsAndNeverFails(t *testing.T) {
 	t.Setenv("JEV_TEST_GATEWAY_KEY", "k")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

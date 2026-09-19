@@ -297,6 +297,27 @@ func TestBuildPipelineSummary_SkippedStep(t *testing.T) {
 	}
 }
 
+func TestBuildPipelineSummary_SkippedStepReason(t *testing.T) {
+	t.Parallel()
+	reason := "advisory Jev evaluation disabled (global config jev.enabled)"
+	steps := []*db.StepResult{
+		{ID: "jev", StepName: types.StepJev, Status: types.StepStatusSkipped, SkipReason: &reason},
+		{ID: "s2", StepName: types.StepTest, Status: types.StepStatusCompleted},
+	}
+	rounds := map[string][]*db.StepRound{
+		"jev": {},
+		"s2":  {{Round: 1, Trigger: "initial", DurationMS: 300}},
+	}
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+
+	if !strings.Contains(md, "⏭️ **Jev** - skipped: "+reason) {
+		t.Errorf("expected the skip reason on the Jev fold line, got:\n%s", md)
+	}
+	if !strings.Contains(md, "Step was skipped: "+reason) {
+		t.Errorf("expected the skip reason in the Jev fold detail, got:\n%s", md)
+	}
+}
+
 func TestBuildPipelineSummary_ExcludesPushPRCI(t *testing.T) {
 	t.Parallel()
 	steps := []*db.StepResult{

@@ -80,33 +80,33 @@ func (s *JevStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 	cfg := sctx.Config.Jev
 
 	if !cfg.Enabled {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: "advisory Jev evaluation disabled (global config jev.enabled)"}, nil
+		return jevSkip(sctx, "advisory Jev evaluation disabled (global config jev.enabled)")
 	}
 	if jev.IsGeminiModel(cfg.Model) {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: fmt.Sprintf("jev.model %q names a Gemini model; refusing to run Jev through Gemini", cfg.Model)}, nil
+		return jevSkip(sctx, fmt.Sprintf("jev.model %q names a Gemini model; refusing to run Jev through Gemini", cfg.Model))
 	}
 
 	key, err := jev.ResolveKey(cfg.GatewayKeyEnv, cfg.SecretsFile)
 	if err != nil {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev gateway key unreadable: %v", err))}, nil
+		return jevSkip(sctx, safeurl.RedactText(fmt.Sprintf("jev gateway key unreadable: %v", err)))
 	}
 	if key == "" {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: fmt.Sprintf("jev gateway key not found (variable %s in the environment or %s)", cfg.GatewayKeyEnv, cfg.SecretsFile)}, nil
+		return jevSkip(sctx, fmt.Sprintf("jev gateway key not found (variable %s in the environment or %s)", cfg.GatewayKeyEnv, cfg.SecretsFile))
 	}
 
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, runIntegrationBranch(sctx))
 	if err != nil {
 		// An unreadable base would fail review; for an advisory signal the
 		// honest report is a skip, never a run failure.
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev cannot resolve the diff base: %v", err))}, nil
+		return jevSkip(sctx, safeurl.RedactText(fmt.Sprintf("jev cannot resolve the diff base: %v", err)))
 	}
 
 	state, truncated, diffErr := jevDiffState(ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA, cfg.MaxDiffBytes)
 	if diffErr != nil {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev cannot read the diff: %v", diffErr))}, nil
+		return jevSkip(sctx, safeurl.RedactText(fmt.Sprintf("jev cannot read the diff: %v", diffErr)))
 	}
 	if strings.TrimSpace(state) == "" {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: "no changes to evaluate"}, nil
+		return jevSkip(sctx, "no changes to evaluate")
 	}
 	if truncated {
 		sctx.Log(fmt.Sprintf("diff truncated to %d bytes for the advisory Jev evaluation", cfg.MaxDiffBytes))
@@ -118,7 +118,7 @@ func (s *JevStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 	questions := jev.AdvisoryQuestions()
 	result, err := client.Evaluate(callCtx, state, questions)
 	if err != nil {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev unavailable: %v", err))}, nil
+		return jevSkip(sctx, safeurl.RedactText(fmt.Sprintf("jev unavailable: %v", err)))
 	}
 
 	summary, findings := jevFindings(questions, result, cfg.Threshold)
@@ -129,9 +129,17 @@ func (s *JevStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 	}
 	findingsRaw, err := json.Marshal(findings)
 	if err != nil {
-		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev cannot encode findings: %v", err))}, nil
+		return jevSkip(sctx, safeurl.RedactText(fmt.Sprintf("jev cannot encode findings: %v", err)))
 	}
 	return &pipeline.StepOutcome{ExitCode: 0, Findings: string(findingsRaw)}, nil
+}
+
+// jevSkip reports a fail-safe skip: the reason is written to the step log
+// and returned as the outcome's SkipReason, so every surface that renders
+// either one explains why the signal did not run. The step never fails.
+func jevSkip(sctx *pipeline.StepContext, reason string) (*pipeline.StepOutcome, error) {
+	sctx.Log(reason)
+	return &pipeline.StepOutcome{Skipped: true, SkipReason: reason}, nil
 }
 
 // jevDiffState builds the evaluation state: the unified diff between base and

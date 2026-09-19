@@ -1177,7 +1177,11 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	}
 
 	if sr.Status == types.StepStatusSkipped {
-		return buildDetail(fmt.Sprintf("⏭️ **%s** - skipped", name))
+		line := fmt.Sprintf("⏭️ **%s** - skipped", name)
+		if sr.SkipReason != nil && strings.TrimSpace(*sr.SkipReason) != "" {
+			line = fmt.Sprintf("%s: %s", line, escapePRText(strings.TrimSpace(*sr.SkipReason), flavor))
+		}
+		return buildDetail(line)
 	}
 
 	// Parse the final findings on the step result (last state).
@@ -1649,6 +1653,10 @@ func writeStepStatusDetail(b *strings.Builder, sr *db.StepResult, flavor prBodyF
 	case types.StepStatusFixReview:
 		b.WriteString("Waiting to review the latest fix.\n\n")
 	case types.StepStatusSkipped:
+		if sr.SkipReason != nil && strings.TrimSpace(*sr.SkipReason) != "" {
+			fmt.Fprintf(b, "Step was skipped: %s\n\n", escapePRText(strings.TrimSpace(*sr.SkipReason), flavor))
+			return
+		}
 		b.WriteString("Step was skipped.\n\n")
 	case types.StepStatusFailed:
 		if sr.Error != nil && strings.TrimSpace(*sr.Error) != "" {

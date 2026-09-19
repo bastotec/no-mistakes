@@ -161,7 +161,7 @@ func (w *existingPRWorld) commitAndPublish(t *testing.T, path, content, message 
 }
 
 // drive runs the binary in the working clone with room for a whole pipeline.
-// Harness.Run caps at a minute, which a full nine-step run exceeds here.
+// Harness.Run caps at a minute, which a full ten-step run exceeds here.
 func (w *existingPRWorld) drive(t *testing.T, args ...string) (string, error) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
