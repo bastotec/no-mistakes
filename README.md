@@ -53,12 +53,14 @@ Full documentation: <https://kunchenguid.github.io/no-mistakes/>
             ▼
    ┌────────────────────────────────────────────────┐
    │  disposable worktree — your work stays put     │
-   │  review → test → docs → lint → push → PR → CI  │
+   │  review → jev* → test → docs → lint → push → PR → CI  │
    └────────────────────────────────────────────────┘
             │  every check green
             ▼
         clean PR, opened for you
 ```
+
+`jev*` is an optional advisory evaluation of the diff - disabled by default, reported in the pipeline output, never gating.
 
 Each step either passes on its own or stops with a **finding** for you to act on.
 Safe, mechanical fixes are applied automatically; anything that touches your intent is escalated for you to **approve**, **fix**, or **skip**.

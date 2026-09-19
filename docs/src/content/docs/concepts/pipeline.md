@@ -1,17 +1,19 @@
 ---
 title: Pipeline
-description: The nine steps that run on every gated push.
+description: The ten steps that run on every gated push.
 ---
 
-The pipeline has a fixed, opinionated sequence of nine core steps. Their order is not configurable. What each core step runs is.
+The pipeline has a fixed, opinionated sequence of ten core steps. Their order is not configurable. What each core step runs is.
 
 ```
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → review → jev* → test → document → lint → push → pr → ci
 ```
+
+`jev*` is the advisory-only evaluation signal: disabled unless the operator enables it in global config, it never gates and skips (with a reason) whenever it is unconfigured or unavailable.
 
 ```mermaid
 flowchart LR
-  intent["Intent"] --> rebase["Rebase"] --> review["Review"] --> test["Test"] --> document["Document"] --> lint["Lint"] --> push["Push"] --> pr["PR"] --> ci["CI"]
+  intent["Intent"] --> rebase["Rebase"] --> review["Review"] --> jev["Jev*"] --> test["Test"] --> document["Document"] --> lint["Lint"] --> push["Push"] --> pr["PR"] --> ci["CI"]
   review -. findings .-> action["Approve / fix / skip / abort"]
   test -. findings .-> action
   document -. findings .-> action
@@ -34,19 +36,20 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
 - the final branch update was guarded against discarding unincorporated commits already on the push target
 - push, PR creation, and CI monitoring only happened after the local gate was satisfied
 
-## The nine steps
+## The ten steps
 
 | # | Step | What it does | Default auto-fix limit |
 |---|---|---|---|
 | 1 | **Intent** | Use supplied intent or infer it from recent local agent transcripts | n/a |
 | 2 | **Rebase** | Fetch fresh remote upstream and the configured branch target, then rebase your branch onto them | `3` |
 | 3 | **Review** | AI code review of your diff | `0` (requires approval) |
-| 4 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
-| 5 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
-| 6 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
-| 7 | **Push** | Safely push the validated branch to the configured target | n/a |
-| 8 | **PR** | Create or update the pull request | n/a |
-| 9 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
+| 4 | **Jev** | Advisory-only evaluation of the diff (disabled by default; never gates) | n/a |
+| 5 | **Test** | Targeted local validation of the change and intent (not a full CI suite), plus evidence when intent is available | `3` |
+| 6 | **Document** | Update docs when needed and report unresolved gaps | initial pass |
+| 7 | **Lint** | Run lint/static analysis; shares the document step's initial housekeeping pass when no lint command is configured | `3` |
+| 8 | **Push** | Safely push the validated branch to the configured target | n/a |
+| 9 | **PR** | Create or update the pull request | n/a |
+| 10 | **CI** | Watch CI + mergeability, auto-fix failures | `3` |
 
 ## Why these steps, in this order
 
@@ -56,6 +59,7 @@ The pipeline is opinionated so that "passed the gate" has a stable meaning:
   If there's no diff left after the rebase, the pipeline skips the rest.
 - **Review before test** so the agent reads fresh code, not code it may have touched during fixes.
   A later run's initial review also receives fix-round provenance for any uncertified pipeline-authored commits left on the branch when a previous run's re-review did not complete.
+- **Jev after review** so an independent evaluation model reads the same freshly-reviewed diff - but only as a reported hint: it is disabled by default, never gates, and never fixes.
 - **Document after test** so docs are updated against code that's known to work.
 - **Lint last among local checks** so it doesn't churn over code that may still change.
 - **Push → PR → CI** happens after all local checks pass.
@@ -93,7 +97,7 @@ See [Configuration](/no-mistakes/guides/configuration/).
 ## What you can't configure
 
 - The step order.
-- Skipping specific steps permanently - per-run skips are allowed, but the pipeline itself always has all nine.
+- Skipping specific steps permanently - per-run skips are allowed, but the pipeline itself always has all ten.
 - Removing or replacing a core step. A repository can add extra [`gates`](/no-mistakes/reference/repo-config/#gates) after one, which only ever adds to what a pass means.
 
 This is intentional. A pass has the same core guarantees across repositories, and repository gates can add guarantees without removing any of them.

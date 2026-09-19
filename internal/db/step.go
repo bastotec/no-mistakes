@@ -32,8 +32,10 @@ type StepResult struct {
 	// commands.test exited non-zero). See
 	// pipeline.ApprovalOverrideVerifier and Executor's two ActionApprove sites.
 	OverrideReason *string
-	// SkipReason records an automatic PR/CI skip, distinct from an explicit
-	// per-run skip. Legacy rows have no recorded reason.
+	// SkipReason records why a step was skipped automatically (e.g. a
+	// PR/CI provider being unavailable, or the advisory Jev signal being
+	// disabled or unreachable), distinct from an explicit per-run skip.
+	// Legacy rows have no recorded reason.
 	SkipReason *string
 }
 

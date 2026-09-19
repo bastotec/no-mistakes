@@ -6,8 +6,10 @@ description: Reference for each step in the validation pipeline.
 This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```text
-intent → rebase → review → test → document → lint → push → pr → ci
+intent → rebase → review → jev* → test → document → lint → push → pr → ci
 ```
+
+`jev*` is an advisory-only evaluation signal that is disabled unless the operator enables it in global config; it never gates, never auto-fixes, and skips (with a reason in the step log and PR summary) whenever it is unconfigured or unavailable. See [Jev](#jev).
 
 Each step can produce findings, request approval, trigger auto-fix, or apply safe fixes during its own pass. Steps that encounter fatal errors stop the pipeline. Steps can also be pre-skipped when starting a run, skipped by the user, or skipped automatically by the pipeline.
 Pipeline steps do not treat missing, malformed, or semantically incomplete structured analyzer output as a clean result. Such output never creates a gate that unattended AXI mode can accept.
@@ -139,7 +141,25 @@ Follow-up review passes use the history to avoid re-reporting user-ignored findi
 
 ### Pipeline HEAD continuity
 
-At entry to every repository gate and every core step from Test through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.
+At entry to every repository gate and every core step from Jev through CI, no-mistakes compares the live worktree `HEAD` with the pipeline-recorded head. An equal head or a pipeline-descendant commit continues. A backward reset, divergent sibling, or unverifiable relationship fails the run before that step performs work, including for steps that would not create a commit.
+
+## Jev
+
+Advisory evaluation signal on the diff, using the Jev evaluation model (typed boolean probabilities) through a Vercel AI Gateway endpoint. Disabled by default; enabling it is an operator decision in global config ([`jev`](/no-mistakes/reference/global-config/#jev)) because every evaluation spends the operator's gateway quota.
+
+**Behavior (when enabled):**
+
+- Diffs the integration base against head - the same diff base the Review step measures from - truncating it at `jev.max_diff_bytes` with a visible truncation marker in both the evaluated state and the reported summary
+- Asks one fixed set of typed boolean questions defined in code (`breaking`, `data_loss`, `security`, `bug`), so no repository can steer what is asked
+- Reports the verdict (`flagged` at or above `jev.threshold`, `clear` at or below its mirror, `uncertain` between) and every per-question probability in the step log; flagged, uncertain, and unanswered questions also appear in the PR summary as `info`/`no-op` finding items (clear answers stay in the step-log line)
+- Refuses to run any Gemini model, whatever configured it
+- Resolves the gateway key by reference at call time - never stores, logs, or embeds it - from the `jev.gateway_key_env` variable, falling back to parsing `jev.secrets_file`
+
+**Fail-safe contract:** any Jev-side failure - key missing, gateway unreachable or erroring, malformed response, empty diff - completes the step as *skipped with a reason* and the run proceeds untouched. The only error path is the shared [pipeline HEAD continuity](#pipeline-head-continuity) refusal, which is a repository-integrity failure, not a Jev verdict.
+
+**Approval:** never required; findings are always `info` severity with action `no-op`.
+
+**Auto-fix:** none, ever.
 
 ## Test
 
@@ -289,7 +309,7 @@ The `v1` payload is compact JSON with these required fields:
 - `head_sha`: the exact git commit SHA recorded for the run when no-mistakes writes the PR body
 - `steps`: the ordered pipeline step snapshot; every item has the required fields below and may carry the optional Test override field described afterward
 
-- `step`: the raw pipeline step name, such as `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, or `ci`; a repository-declared [gate](/no-mistakes/reference/repo-config/#gates) appears as `gate.<anchor>.<name>`
+- `step`: the raw pipeline step name, such as `intent`, `rebase`, `review`, `jev`, `test`, `document`, `lint`, `push`, `pr`, or `ci`; a repository-declared [gate](/no-mistakes/reference/repo-config/#gates) appears as `gate.<anchor>.<name>`
 - `status`: the raw [step status](#step-statuses) recorded for that step, such as `completed`, `skipped`, or `failed`
 
 When the Test step validated the same `head_sha`, the payload also includes `live_validation` with `verdict`, `live` (the number of scenarios driven live), and `total`. The field is omitted for pre-contract findings and whenever a later Document, Lint, Push, or repair commit changes the head without validating that new commit. Consumers therefore never receive a previous head's live-validation verdict as a claim about the current head.

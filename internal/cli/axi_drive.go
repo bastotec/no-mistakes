@@ -175,7 +175,7 @@ func newAxiRunCmd() *cobra.Command {
 				skipSteps, err := parseSkipSteps(skipValue)
 				if err != nil {
 					return emitError(cmd, 2, err.Error(),
-						"Valid steps: intent, rebase, review, test, document, lint, push, pr, ci")
+						"Valid steps: intent, rebase, review, jev, test, document, lint, push, pr, ci")
 				}
 				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")

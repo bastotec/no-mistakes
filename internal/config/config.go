@@ -18,6 +18,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/evidence"
+	jevpkg "github.com/kunchenguid/no-mistakes/internal/jev"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"github.com/kunchenguid/no-mistakes/internal/winproc"
 	"github.com/kunchenguid/no-mistakes/internal/worktrees"
@@ -65,6 +66,19 @@ const (
 	// reconciliation check (including host.Available / gh auth status).
 	// Global-config-only; a pushed branch cannot change it.
 	DefaultGateReconcileTimeout = 30 * time.Second
+	// DefaultJevMaxDiffBytes bounds how much of the run's diff the advisory
+	// Jev signal submits as evaluation state. It aliases jev.MaxStateBytes so
+	// the configured default, the unconfigured fallback, and the tally
+	// harness share one owner: 64 KiB is roughly 16K tokens - a fraction of a
+	// cent at Jev pricing - and covers the large majority of real review
+	// diffs whole; larger diffs are truncated and the truncation is reported,
+	// never hidden. Global-config-only.
+	DefaultJevMaxDiffBytes = jevpkg.MaxStateBytes
+	// DefaultJevThreshold is the probability at or above which an advisory
+	// Jev question counts as flagged. 0.6 keeps clear verdicts conservative
+	// (a coin flip is not a signal) without demanding the near-certainties a
+	// bug rarely gets. Global-config-only.
+	DefaultJevThreshold = 0.6
 	// CITimeoutUnlimited is the sentinel meaning "monitor until the PR is
 	// merged, closed, or the run is aborted - never self-terminate".
 	// Any non-positive ci_timeout, or the keywords "unlimited", "none",
@@ -202,7 +216,11 @@ type GlobalConfig struct {
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
 	// RepoConfig means no pushed branch can enable, disable, or resize it.
-	Eval      Eval
+	Eval Eval
+	// Jev is the advisory evaluation-signal config: global-only like Eval,
+	// because it spends this operator's gateway quota and holds a credential
+	// reference, so no repository policy may steer it.
+	Jev       Jev
 	Providers ProvidersRaw
 }
 
@@ -236,6 +254,7 @@ type globalConfigRaw struct {
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
 	Eval                    EvalRaw                    `yaml:"eval"`
+	Jev                     JevRaw                     `yaml:"jev"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
 	Providers               ProvidersRaw               `yaml:"providers"`
 }
@@ -663,6 +682,7 @@ type Config struct {
 	LogLevel              string
 	SessionReuse          bool
 	Eval                  Eval
+	Jev                   Jev
 	Commands              Commands
 	// Gates are the repository's extra checks, already trusted-only by the
 	// time they reach here (EffectiveRepoConfig sourced them from the trusted
@@ -879,6 +899,52 @@ type EvalRaw struct {
 	AutoCapture       *bool `yaml:"auto_capture"`
 	MaxCases          *int  `yaml:"max_cases"`
 	DiversifiedSize   *int  `yaml:"diversified_size"`
+}
+
+// JevRaw is the YAML representation of the advisory Jev signal's global
+// config. Pointer fields distinguish "not set" (nil) from explicit
+// zero/false values.
+type JevRaw struct {
+	Enabled       *bool    `yaml:"enabled"`
+	GatewayKeyEnv *string  `yaml:"gateway_key_env"`
+	SecretsFile   *string  `yaml:"secrets_file"`
+	Model         *string  `yaml:"model"`
+	Timeout       *string  `yaml:"timeout"`
+	MaxDiffBytes  *int     `yaml:"max_diff_bytes"`
+	Threshold     *float64 `yaml:"threshold"`
+}
+
+// Jev is the resolved advisory Jev signal config. It is GLOBAL-ONLY, like
+// eval: it spends this operator's gateway quota and describes this machine's
+// credentials, so no repository - and therefore no pushed branch - can enable,
+// disable, resize, or redirect it. There is deliberately no RepoConfig
+// surface for it.
+//
+// The gateway key is held BY REFERENCE: GatewayKeyEnv names an environment
+// variable and SecretsFile a parse-only file (never executed) consulted when
+// the environment lacks the variable. The key value is read at call time and
+// never logged. A Gemini model is refused by the step regardless of what
+// Model says - IsGeminiModel owns that check.
+type Jev struct {
+	Enabled bool
+	// GatewayKeyEnv names the environment variable holding the gateway key
+	// (default AI_GATEWAY_API_KEY).
+	GatewayKeyEnv string
+	// SecretsFile is parsed for GatewayKeyEnv when the environment does not
+	// carry it (default ~/.secrets). Parse-only, never executed.
+	SecretsFile string
+	// Model is the evaluation model id (default typesafe-ai/jev).
+	Model string
+	// Timeout bounds one evaluation call (default 30s).
+	Timeout time.Duration
+	// MaxDiffBytes bounds how much of the run's diff is submitted as
+	// evaluation state (default 64 KiB); a larger diff is truncated and the
+	// truncation is reported in the step's output, never hidden.
+	MaxDiffBytes int
+	// Threshold is the probability at or above which a question counts as
+	// flagged (default 0.6). Below 1-threshold counts as clear; between the
+	// two the signal reports uncertain rather than guessing.
+	Threshold float64
 }
 
 // Eval is the resolved local evaluation-corpus config. It is deliberately a
@@ -1891,6 +1957,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		LogLevel:                "info",
 		SessionReuse:            true,
 		Eval:                    evalDefaults(),
+		Jev:                     jevDefaults(),
 	}
 }
 
@@ -2196,6 +2263,9 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Test = raw.Test
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
+	if err := applyJevOverrides(&cfg.Jev, &raw.Jev); err != nil {
+		return nil, err
+	}
 
 	return cfg, nil
 }
@@ -2726,6 +2796,72 @@ func evalDefaults() Eval {
 	return Eval{CaptureProvenance: true, AutoCapture: true, MaxCases: DefaultEvalMaxCases, DiversifiedSize: DefaultEvalDiversifiedSize}
 }
 
+// jevDefaults mirrors internal/jev's protocol defaults so an unconfigured
+// global config and an explicitly-default jev block behave identically.
+func jevDefaults() Jev {
+	return Jev{
+		Enabled:       false,
+		GatewayKeyEnv: jevpkg.DefaultKeyEnv,
+		SecretsFile:   jevpkg.DefaultSecretsFile,
+		Model:         jevpkg.DefaultModel,
+		Timeout:       jevpkg.DefaultTimeout,
+		MaxDiffBytes:  DefaultJevMaxDiffBytes,
+		Threshold:     DefaultJevThreshold,
+	}
+}
+
+// applyJevOverrides applies non-nil raw values onto resolved defaults and
+// parses the duration. Values are shape-validated here; the model's
+// Gemini-refusal check lives in the consumer (internal/jev.IsGeminiModel) so
+// the refusal is enforced wherever the model string could reach a call,
+// including future callers that bypass config.
+func applyJevOverrides(dst *Jev, src *JevRaw) error {
+	if src.Enabled != nil {
+		dst.Enabled = *src.Enabled
+	}
+	if src.GatewayKeyEnv != nil {
+		name := strings.TrimSpace(*src.GatewayKeyEnv)
+		if name == "" {
+			return fmt.Errorf("jev.gateway_key_env must not be empty")
+		}
+		dst.GatewayKeyEnv = name
+	}
+	if src.SecretsFile != nil {
+		path := strings.TrimSpace(*src.SecretsFile)
+		if path == "" {
+			return fmt.Errorf("jev.secrets_file must not be empty")
+		}
+		dst.SecretsFile = path
+	}
+	if src.Model != nil {
+		model := strings.TrimSpace(*src.Model)
+		if model == "" {
+			return fmt.Errorf("jev.model must not be empty")
+		}
+		dst.Model = model
+	}
+	if src.Timeout != nil {
+		d, err := parsePositiveDuration("jev.timeout", *src.Timeout)
+		if err != nil {
+			return err
+		}
+		dst.Timeout = d
+	}
+	if src.MaxDiffBytes != nil {
+		if *src.MaxDiffBytes <= 0 {
+			return fmt.Errorf("jev.max_diff_bytes must be greater than 0, got %d", *src.MaxDiffBytes)
+		}
+		dst.MaxDiffBytes = *src.MaxDiffBytes
+	}
+	if src.Threshold != nil {
+		if *src.Threshold <= 0 || *src.Threshold >= 1 {
+			return fmt.Errorf("jev.threshold must be between 0 and 1 exclusive, got %v", *src.Threshold)
+		}
+		dst.Threshold = *src.Threshold
+	}
+	return nil
+}
+
 // applyEvalOverrides applies non-nil raw values onto resolved defaults. The
 // max_cases value is validated at config parse time (validateEvalRaw).
 func applyEvalOverrides(dst *Eval, src *EvalRaw) {
@@ -3015,7 +3151,11 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		SessionReuse:          global.SessionReuse,
 		// Eval is global-only by design (see GlobalConfig.Eval), so it is
 		// copied straight through with no repository override step.
-		Eval:           global.Eval,
+		Eval: global.Eval,
+		// Jev is global-only for the same reason as Eval, plus a stronger one:
+		// it spends this operator's gateway quota and holds a credential
+		// reference, so no repository policy may steer it.
+		Jev:            global.Jev,
 		Commands:       repo.Commands,
 		Gates:          copyGates(repo.Gates),
 		IgnorePatterns: repo.IgnorePatterns,

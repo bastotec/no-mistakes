@@ -19,7 +19,7 @@ no-mistakes --skip test,lint
 
 Unlike `no-mistakes attach`, bare `no-mistakes` only auto-attaches to an active run on the current branch.
 `--skip` only applies when bare `no-mistakes` starts a new pipeline run through the wizard; it does not skip a step on an already-active run.
-The only valid `--skip` step names are `intent`, `rebase`, `review`, `test`, `document`, `lint`, `push`, `pr`, and `ci`. Repository gate names are refused.
+The only valid `--skip` step names are `intent`, `rebase`, `review`, `jev`, `test`, `document`, `lint`, `push`, `pr`, and `ci`. Repository gate names are refused.
 
 ## no-mistakes init
 
@@ -387,7 +387,7 @@ An unknown explicit run ID exits nonzero with `error: run "<id>" not found` inst
 Without `--full`, long logs show the last 40 lines and a help hint for the full log; when `--run <id>` selected the log, that hint retains the same run ID.
 Step logs include native subprocess agent lifecycle lines such as `codex started pid=4242`, `codex exited pid=4242 status=success`, and transient retry messages when the selected agent supports lifecycle events.
 They also include fix-loop markers such as `auto-fix round 1/3 starting after round 1` and `user-fix round starting after round 2`.
-`--step` accepts the nine core step names and valid repository gate names such as `gate.test.mutation-budget`. Use the exact gate name shown by `axi status`.
+`--step` accepts the ten core step names and valid repository gate names such as `gate.test.mutation-budget`. Use the exact gate name shown by `axi status`.
 
 ## no-mistakes axi abort
 
