@@ -121,7 +121,7 @@ func (s *JevStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev unavailable: %v", err))}, nil
 	}
 
-	verdict, summary, findings := jevFindings(questions, result, cfg.Threshold)
+	summary, findings := jevFindings(questions, result, cfg.Threshold)
 	sctx.Log(fmt.Sprintf("Jev advisory verdict: %s", summary))
 	if truncated {
 		summary += " (diff truncated)"
@@ -131,7 +131,6 @@ func (s *JevStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 	if err != nil {
 		return &pipeline.StepOutcome{Skipped: true, SkipReason: safeurl.RedactText(fmt.Sprintf("jev cannot encode findings: %v", err))}, nil
 	}
-	_ = verdict // verdict is embedded in the summary; kept for readability above
 	return &pipeline.StepOutcome{ExitCode: 0, Findings: string(findingsRaw)}, nil
 }
 
@@ -140,7 +139,7 @@ func (s *JevStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, er
 // marker so the bound is reported, never hidden.
 func jevDiffState(ctx context.Context, workDir, baseSHA, headSHA string, maxBytes int) (state string, truncated bool, err error) {
 	if maxBytes <= 0 {
-		maxBytes = 64 * 1024
+		maxBytes = jev.MaxStateBytes
 	}
 	diff, err := git.Run(ctx, workDir, "diff", "--no-color", baseSHA+".."+headSHA)
 	if err != nil {
@@ -161,7 +160,7 @@ func jevDiffState(ctx context.Context, workDir, baseSHA, headSHA string, maxByte
 // stay in the summary so every probability remains visible without turning
 // the fold into a wall of no-ops. Every item is severity info, action no-op:
 // the signal never gates, parks, or fixes.
-func jevFindings(questions []jev.Question, result *jev.Result, threshold float64) (verdict, summary string, findings Findings) {
+func jevFindings(questions []jev.Question, result *jev.Result, threshold float64) (summary string, findings Findings) {
 	type answered struct {
 		name string
 		p    float64
@@ -182,7 +181,7 @@ func jevFindings(questions []jev.Question, result *jev.Result, threshold float64
 		}
 	}
 
-	verdict = jev.Verdict(result, questions, threshold)
+	verdict := jev.Verdict(result, questions, threshold)
 
 	var flaggedWords, clearWords []string
 	for _, a := range answers {
@@ -249,7 +248,7 @@ func jevFindings(questions []jev.Question, result *jev.Result, threshold float64
 	if len(missing) == len(questions) {
 		rationale = "advisory evaluation signal unanswered; informational only"
 	}
-	return verdict, summary, Findings{
+	return summary, Findings{
 		Items:         items,
 		Summary:       summary,
 		RiskLevel:     risk,

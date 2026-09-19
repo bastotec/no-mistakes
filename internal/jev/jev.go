@@ -56,10 +56,16 @@ const (
 	// maxResponseBody bounds how much of an error response is kept for the
 	// error message, so a hostile or broken endpoint cannot flood a step log.
 	maxResponseBody = 2048
+	// maxSuccessResponseBody bounds a successful (200) response body. A
+	// valid answer set is tiny; this generous ceiling exists only so a
+	// runaway endpoint cannot flood memory, never to truncate a response
+	// the signal could have used.
+	maxSuccessResponseBody = 1 << 20
 
 	// MaxStateBytes is the default cap on the state (diff) sent for one
-	// evaluation. Callers with configuration use their own bound; the tally
-	// harness and other unconfigured callers use this.
+	// evaluation. It owns the value: the configured default
+	// (config.DefaultJevMaxDiffBytes), the unconfigured fallback, and the
+	// tally harness all reference this constant.
 	MaxStateBytes = 64 * 1024
 )
 
@@ -249,7 +255,11 @@ func (c *Client) Evaluate(ctx context.Context, state string, questions []Questio
 		return nil, fmt.Errorf("jev: gateway unreachable: %w", errors.Unwrap(err))
 	}
 	defer resp.Body.Close()
-	body, _ := io.ReadAll(io.LimitReader(resp.Body, maxResponseBody))
+	readCap := int64(maxResponseBody)
+	if resp.StatusCode == http.StatusOK {
+		readCap = maxSuccessResponseBody
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, readCap))
 	if resp.StatusCode != http.StatusOK {
 		msg := strings.TrimSpace(string(body))
 		if len(msg) > 400 {

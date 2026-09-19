@@ -90,6 +90,24 @@ func TestEvaluateSendsWireProtocolAndParsesAnswers(t *testing.T) {
 	}
 }
 
+func TestEvaluateLargeSuccessBodyIsNotTruncated(t *testing.T) {
+	pad := strings.Repeat("x", 64*1024)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"answers":{"breaking":{"type":"boolean","probability":0.9}},"usage":{},"rounding":{},"warnings":["` + pad + `"]}`))
+	}))
+	defer srv.Close()
+
+	client := NewClient("test-key-123", WithEndpoint(srv.URL))
+	res, err := client.Evaluate(context.Background(), "a diff", AdvisoryQuestions())
+	if err != nil {
+		t.Fatalf("Evaluate on a >2 KiB success body: %v", err)
+	}
+	if p, ok := res.Probability("breaking"); !ok || p != 0.9 {
+		t.Errorf("breaking probability = %v ok=%v", p, ok)
+	}
+}
+
 func TestEvaluateErrorOmitsKey(t *testing.T) {
 	const key = "super-secret-key-value"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

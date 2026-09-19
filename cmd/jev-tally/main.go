@@ -60,7 +60,6 @@ type evalRecord struct {
 	Verdict     string             `json:"verdict"`
 	Answers     map[string]float64 `json:"answers"`
 	EvaluatedAt time.Time          `json:"evaluated_at"`
-	Error       string             `json:"error,omitempty"`
 }
 
 type stateFile struct {
@@ -183,7 +182,7 @@ func run(repo string, limit int, outPath, statePath, keyEnv, secretsFile, model 
 
 		var verdict string
 		var answers map[string]float64
-		if cached, ok := state.PRs[cacheKey]; ok && cached.DiffSHA == diffSHA && cached.Error == "" {
+		if cached, ok := state.PRs[cacheKey]; ok && cached.DiffSHA == diffSHA {
 			verdict, answers = cached.Verdict, cached.Answers
 		} else {
 			stateDiff := diff

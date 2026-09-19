@@ -67,11 +67,13 @@ const (
 	// Global-config-only; a pushed branch cannot change it.
 	DefaultGateReconcileTimeout = 30 * time.Second
 	// DefaultJevMaxDiffBytes bounds how much of the run's diff the advisory
-	// Jev signal submits as evaluation state. 64 KiB is roughly 16K tokens -
-	// a fraction of a cent at Jev pricing - and covers the large majority of
-	// real review diffs whole; larger diffs are truncated and the truncation
-	// is reported, never hidden. Global-config-only.
-	DefaultJevMaxDiffBytes = 64 * 1024
+	// Jev signal submits as evaluation state. It aliases jev.MaxStateBytes so
+	// the configured default, the unconfigured fallback, and the tally
+	// harness share one owner: 64 KiB is roughly 16K tokens - a fraction of a
+	// cent at Jev pricing - and covers the large majority of real review
+	// diffs whole; larger diffs are truncated and the truncation is reported,
+	// never hidden. Global-config-only.
+	DefaultJevMaxDiffBytes = jevpkg.MaxStateBytes
 	// DefaultJevThreshold is the probability at or above which an advisory
 	// Jev question counts as flagged. 0.6 keeps clear verdicts conservative
 	// (a coin flip is not a signal) without demanding the near-certainties a
