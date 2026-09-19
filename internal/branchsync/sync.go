@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"slices"
 	"strings"
 	"time"
 
@@ -925,8 +924,10 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 // persisted pushed head (rewritten, advanced out of band, or deleted outside
 // no-mistakes) and can never be re-matched, so ordinary synchronization is
 // permanently blocked and rerun keeps selecting the bound head. Release
-// anchors the run's unpublished pipeline head and the previously pushed head
-// so no pipeline content is lost, moves the local gate branch to the
+// anchors the run's recorded pipeline head at the run recovery ref so no
+// pipeline content is lost - under the exact binding it requires, that head
+// is the previously pushed head, and a head already reachable from the
+// operator's branch needs no anchor - and moves the local gate branch to the
 // operator's current head with an atomic compare-and-swap (keep-local
 // semantics; the invoking worktree is never touched), and stamps custody
 // returned so a fresh run may start. Preconditions, checked up front and
@@ -999,50 +1000,49 @@ func (s *Service) Release(ctx context.Context) State {
 		return blocked
 	}
 
-	// Anchor every distinct pipeline head first so the release is lossless:
-	// the run's unpublished head at the run recovery ref, and the previously
-	// pushed head at the sync anchor ref. Missing objects are reported, never
-	// fabricated.
+	// Anchor the pipeline head first so the release is lossless: under the
+	// exact push binding Release requires, the run's recorded head is the
+	// previously pushed head, and it is anchored at the run recovery ref -
+	// never the sync anchor ref, which an equivalent-advance sync owns for
+	// the operator's pre-sync head. A head already reachable from the local
+	// branch needs no anchor: the branch keeps it reachable and the gate
+	// branch is re-pointed at that same branch below. Missing objects are
+	// reported, never fabricated.
 	anchored := []string{}
 	local := state.Local.Head
-	for _, head := range []string{run.HeadSHA, bound} {
-		if head == "" || head == local || slices.Contains(anchored, head) {
-			continue
-		}
+	headReachableFromBranch := run.HeadSHA == local || isAncestor(ctx, s.workDir(), run.HeadSHA, local)
+	if !headReachableFromBranch {
+		head := run.HeadSHA
 		wdHas := objectExists(ctx, s.workDir(), head)
 		gateHas := objectExists(ctx, gateDir, head)
-		if !wdHas && !gateHas {
-			continue
-		}
-		anchorRef := custody.RecoveryRef(run.ID)
-		if head == bound {
-			anchorRef = syncAnchorRef(run.ID)
-		}
-		if wdHas {
-			if compatible, err := exactCommitRefCompatible(ctx, s.workDir(), anchorRef, head); err != nil || !compatible {
-				blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", fmt.Sprintf("the invoking worktree anchor ref %s conflicts with pipeline head %s; inspect both objects before releasing the binding; no files or refs were changed", anchorRef, head))
-				blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + head}
-				return blocked
+		if wdHas || gateHas {
+			anchorRef := custody.RecoveryRef(run.ID)
+			if wdHas {
+				if compatible, err := exactCommitRefCompatible(ctx, s.workDir(), anchorRef, head); err != nil || !compatible {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", fmt.Sprintf("the invoking worktree anchor ref %s conflicts with pipeline head %s; inspect both objects before releasing the binding; no files or refs were changed", anchorRef, head))
+					blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + head}
+					return blocked
+				}
+				if err := custody.PreserveRecoveryAnchor(ctx, s.workDir(), anchorRef, head); err != nil {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("pipeline head %s could not be anchored in the invoking worktree before the binding was released; no files or refs were changed", head))
+					blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+					return blocked
+				}
 			}
-			if err := custody.PreserveRecoveryAnchor(ctx, s.workDir(), anchorRef, head); err != nil {
-				blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("pipeline head %s could not be anchored in the invoking worktree before the binding was released; no files or refs were changed", head))
-				blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
-				return blocked
+			if gateHas {
+				if compatible, err := exactCommitRefCompatible(ctx, gateDir, anchorRef, head); err != nil || !compatible {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", fmt.Sprintf("the local gate anchor ref %s conflicts with pipeline head %s; inspect both objects before releasing the binding; no files or refs were changed", anchorRef, head))
+					blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+					return blocked
+				}
+				if err := custody.PreserveRecoveryAnchor(ctx, gateDir, anchorRef, head); err != nil {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("pipeline head %s could not be anchored in the local gate before the binding was released; no files or refs were changed", head))
+					blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+					return blocked
+				}
 			}
+			anchored = append(anchored, head)
 		}
-		if gateHas {
-			if compatible, err := exactCommitRefCompatible(ctx, gateDir, anchorRef, head); err != nil || !compatible {
-				blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", fmt.Sprintf("the local gate anchor ref %s conflicts with pipeline head %s; inspect both objects before releasing the binding; no files or refs were changed", anchorRef, head))
-				blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
-				return blocked
-			}
-			if err := custody.PreserveRecoveryAnchor(ctx, gateDir, anchorRef, head); err != nil {
-				blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("pipeline head %s could not be anchored in the local gate before the binding was released; no files or refs were changed", head))
-				blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
-				return blocked
-			}
-		}
-		anchored = append(anchored, head)
 	}
 
 	// Re-point the gate branch to the operator's head with a CAS, staging the
@@ -1055,7 +1055,7 @@ func (s *Service) Release(ctx context.Context) State {
 		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
 		return blocked
 	}
-	if gateHeadExists && gateHead != local && !slices.Contains(anchored, gateHead) && gateHead != run.HeadSHA && gateHead != bound {
+	if gateHeadExists && gateHead != local && gateHead != run.HeadSHA {
 		if !objectExists(ctx, gateDir, gateHead) {
 			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", "the independently moved gate head is unavailable and cannot be preserved; no files or refs were changed")
 			blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
@@ -1138,10 +1138,13 @@ func (s *Service) Release(ctx context.Context) State {
 	fresh.Changed = true
 	fresh.Safety = "binding_released"
 	fresh.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
-	if run.HeadSHA != local && !slices.Contains(anchored, run.HeadSHA) {
-		fresh.Error = "binding released and custody returned; the run's pipeline head is not available locally and could not be anchored; the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
-	} else {
+	switch {
+	case headReachableFromBranch:
+		fresh.Error = "binding released and custody returned; the pipeline head stays reachable from your branch and the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
+	case len(anchored) > 0:
 		fresh.Error = "binding released and custody returned; the pipeline heads stay anchored at the recovery refs and the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
+	default:
+		fresh.Error = "binding released and custody returned; the run's pipeline head is not available locally and could not be anchored; the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
 	}
 	return fresh
 }

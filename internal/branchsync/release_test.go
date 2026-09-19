@@ -281,3 +281,73 @@ func TestReleaseMissingRemoteBranchAlsoOffered(t *testing.T) {
 		t.Fatal("missing-remote release did not stamp custody")
 	}
 }
+
+// TestReleaseAfterEquivalentAdvanceSyncAnchorDoesNotBlock pins the anchor-ref
+// ownership the release must respect: an equivalent-advance sync anchors the
+// operator's pre-sync head under refs/no-mistakes/sync-anchor/<run> in the
+// invoking worktree, and that ref legitimately points at a different commit
+// than the pushed binding. A later release of the stale binding must not
+// inspect or collide with it - the pushed head is reachable from the
+// operator's branch, which preserves it by itself - so the release completes
+// without touching the sync anchor.
+func TestReleaseAfterEquivalentAdvanceSyncAnchorDoesNotBlock(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	bindTerminalRun(t, f)
+	// The earlier equivalent-advance sync: the operator's pre-sync head was
+	// anchored at the sync anchor ref, the branch then moved to the pushed
+	// binding, and follow-up work landed on top of it.
+	mustWrite(t, filepath.Join(f.local, "pre-sync.txt"), "pre-sync local work\n")
+	mustRun(t, f.local, "add", "pre-sync.txt")
+	mustRun(t, f.local, "commit", "-m", "pre-sync local head")
+	preSync := mustRun(t, f.local, "rev-parse", "HEAD")
+	mustRun(t, f.local, "reset", "--hard", f.submitted)
+	mustRun(t, f.local, "update-ref", syncAnchorRef(f.run.ID), preSync)
+	mustWrite(t, filepath.Join(f.local, "followup.txt"), "follow-up\n")
+	mustRun(t, f.local, "add", "followup.txt")
+	mustRun(t, f.local, "commit", "-m", "follow-up on the pushed head")
+	rewriteRemoteForRelease(t, f)
+
+	state := f.service.Release(f.ctx)
+	if !state.Released || !state.Changed {
+		t.Fatalf("release collided with the sync anchor = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", syncAnchorRef(f.run.ID)); got != preSync {
+		t.Fatalf("sync anchor = %s, want the operator's pre-sync head %s untouched", got, preSync)
+	}
+	if !f.custodyReturned() {
+		t.Fatal("release did not stamp custody")
+	}
+}
+
+// TestReleaseAnchorsPipelineHeadAtRunRecoveryRef pins the documented ref
+// contract: when the pushed binding head is not reachable from the
+// operator's branch, the release anchors it under the run recovery ref -
+// never the sync anchor ref, which the equivalent-advance sync owns - in
+// both the invoking worktree and the local gate.
+func TestReleaseAnchorsPipelineHeadAtRunRecoveryRef(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	bindTerminalRun(t, f)
+	// The operator moved the branch back before the pushed head, so the
+	// binding head is no longer reachable from the branch and must be
+	// anchored before the gate branch is re-pointed.
+	mustRun(t, f.local, "reset", "--hard", f.base)
+	rewriteRemoteForRelease(t, f)
+
+	state := f.service.Release(f.ctx)
+	if !state.Released || !state.Changed {
+		t.Fatalf("release = %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", custody.RecoveryRef(f.run.ID)+"^{commit}"); got != f.submitted {
+		t.Fatalf("worktree recovery anchor = %s, want the pushed head %s", got, f.submitted)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", custody.RecoveryRef(f.run.ID)+"^{commit}"); got != f.submitted {
+		t.Fatalf("gate recovery anchor = %s, want the pushed head %s", got, f.submitted)
+	}
+	if !f.custodyReturned() {
+		t.Fatal("release did not stamp custody")
+	}
+}

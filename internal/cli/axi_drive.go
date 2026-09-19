@@ -841,9 +841,12 @@ func runsForHead(client *ipc.Client, repoID, branch, headSHA string) ([]ipc.RunI
 }
 
 // waitForTriggeredRunForHead waits for the run created by this trigger. The
-// active-run lookup handles normal execution; the head lookup catches a run
-// that fails before it can be observed as active. priorRunIDs prevents an
-// up-to-date push from attaching to a terminal run created by an earlier one.
+// active-run lookup handles normal execution; the head lookup catches only a
+// not-yet-terminal (pending or running) run this trigger created, so a run
+// that fails before it can be observed as active is deliberately skipped
+// here and falls through to the caller's rerun path - a triggered run must
+// never attach to a terminal run. priorRunIDs prevents an up-to-date push
+// from attaching to a run created by an earlier trigger.
 func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID, branch, headSHA string, priorRunIDs map[string]struct{}, timeout time.Duration) (*ipc.RunInfo, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
