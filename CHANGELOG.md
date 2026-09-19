@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.77.0](https://github.com/bastotec/no-mistakes/compare/v1.76.0...v1.77.0) (2026-09-19)
+
+
+### Features
+
+* **cli:** add --existing-pr to bind a branch to an existing upstream PR ([#1](https://github.com/bastotec/no-mistakes/issues/1)) ([4c73c3e](https://github.com/bastotec/no-mistakes/commit/4c73c3edd690a35b38941726d218d6d8b0751078))
+* **pipeline:** add --preserve-history runs that pin the integration and refuse rebase or force pushes ([#2](https://github.com/bastotec/no-mistakes/issues/2)) ([34d5856](https://github.com/bastotec/no-mistakes/commit/34d5856f063fd12afaa27cc42792df071cf37042))
+* **pipeline:** add advisory Jev evaluation step after review ([#5](https://github.com/bastotec/no-mistakes/issues/5)) ([60ad4af](https://github.com/bastotec/no-mistakes/commit/60ad4af245a4bef80d752c5efa7fa02616c4acf9))
+* **pipeline:** integrate a moved base by merging behind rebase.strategy ([#1081](https://github.com/bastotec/no-mistakes/issues/1081)) ([ae2e99a](https://github.com/bastotec/no-mistakes/commit/ae2e99a8b250eb90e66211ae98508f1b21442293))
+
+
+### Bug Fixes
+
+* **pipeline:** park approval-held CI checks and name the real PR base in bundled-commit findings ([#3](https://github.com/bastotec/no-mistakes/issues/3)) ([7e84d0d](https://github.com/bastotec/no-mistakes/commit/7e84d0d1d6b30a41e2ce12e68457c312c7339b0f))
+* stamp a comparable version into every build and refuse labels without one ([a9e4271](https://github.com/bastotec/no-mistakes/commit/a9e4271e9373605077416892bd513466f6371a93))
+
 ## [1.76.0](https://github.com/kunchenguid/no-mistakes/compare/v1.75.3...v1.76.0) (2026-09-15)
 
 
