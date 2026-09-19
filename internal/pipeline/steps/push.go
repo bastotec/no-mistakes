@@ -237,6 +237,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 		return err
 	}
 	sctx.Run.HeadSHA = headBeingPushed
+	sctx.Run.LastPushedSHA = &headBeingPushed
 	return nil
 }
 
