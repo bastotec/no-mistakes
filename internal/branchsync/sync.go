@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -394,13 +395,13 @@ func (s *Service) Refresh(ctx context.Context) State {
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
-		state.NextAction = staleBindingNextAction(run)
+		state.NextAction = retiredBranchNextAction(run, true)
 		return state
 	}
 	if state.PRState == "closed" {
 		state.State = StateClosed
 		state.Safety = "blocked_closed"
-		state.NextAction = staleBindingNextAction(run)
+		state.NextAction = retiredBranchNextAction(run, true)
 		return state
 	}
 
@@ -1005,7 +1006,7 @@ func (s *Service) Release(ctx context.Context) State {
 	anchored := []string{}
 	local := state.Local.Head
 	for _, head := range []string{run.HeadSHA, bound} {
-		if head == "" || head == local || containsString(anchored, head) {
+		if head == "" || head == local || slices.Contains(anchored, head) {
 			continue
 		}
 		wdHas := objectExists(ctx, s.workDir(), head)
@@ -1054,7 +1055,7 @@ func (s *Service) Release(ctx context.Context) State {
 		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
 		return blocked
 	}
-	if gateHeadExists && gateHead != local && !containsString(anchored, gateHead) && gateHead != run.HeadSHA && gateHead != bound {
+	if gateHeadExists && gateHead != local && !slices.Contains(anchored, gateHead) && gateHead != run.HeadSHA && gateHead != bound {
 		if !objectExists(ctx, gateDir, gateHead) {
 			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", "the independently moved gate head is unavailable and cannot be preserved; no files or refs were changed")
 			blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
@@ -1068,7 +1069,11 @@ func (s *Service) Release(ctx context.Context) State {
 			return blocked
 		}
 		if _, exists, refErr := git.ExactRefTarget(ctx, gateDir, gateAnchor); refErr == nil && !exists {
-			_ = custody.PreserveRecoveryAnchor(ctx, gateDir, gateAnchor, gateHead)
+			if err := custody.PreserveRecoveryAnchor(ctx, gateDir, gateAnchor, gateHead); err != nil {
+				blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("the independently moved gate head %s could not be anchored before the binding was released; no files or refs were changed", gateHead))
+				blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+				return blocked
+			}
 		}
 	}
 	if head, headErr := git.HeadSHA(ctx, s.workDir()); headErr != nil || head != local {
@@ -1131,21 +1136,12 @@ func (s *Service) Release(ctx context.Context) State {
 	fresh.Changed = true
 	fresh.Safety = "binding_released"
 	fresh.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
-	if run.HeadSHA != bound && !containsString(anchored, run.HeadSHA) {
+	if run.HeadSHA != bound && !slices.Contains(anchored, run.HeadSHA) {
 		fresh.Error = "binding released and custody returned; the run's unpublished pipeline head is not available locally and could not be anchored; the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
 	} else {
 		fresh.Error = "binding released and custody returned; the pipeline heads stay anchored at the recovery refs and the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
 	}
 	return fresh
-}
-
-func containsString(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
 }
 
 // recoverKeepLocal performs the explicit keep-local custody return: the
@@ -1775,13 +1771,13 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
-		state.NextAction = staleBindingNextAction(run)
+		state.NextAction = retiredBranchNextAction(run, false)
 		return state, run, true
 	}
 	if state.PRState == "closed" {
 		state.State = StateClosed
 		state.Safety = "blocked_closed"
-		state.NextAction = staleBindingNextAction(run)
+		state.NextAction = retiredBranchNextAction(run, false)
 		return state, run, true
 	}
 	if ptr(run.PushRef) != "refs/heads/"+branch || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
@@ -2065,6 +2061,27 @@ func staleBindingNextAction(run *db.Run) *NextAction {
 		return &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
 	}
 	return &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+}
+
+// retiredBranchNextAction names the exit for a branch retired by its PR
+// lifecycle. Release is defined for a binding the observed remote no longer
+// matches, so a merged or closed PR whose remote still equals the binding -
+// or has not been checked against it yet - must not advertise it: release
+// refuses an intact binding and points back at a re-check, which loops.
+// While the run is active it owns the branch. Otherwise an unchecked remote
+// gets the live retirement check, which observes the staleness release
+// needs; once the check confirms the intact binding the branch is simply
+// retired - the operator keeps working through a fresh run on a new PR, or
+// deletes the remote branch so the retirement resolves (a closed branch's
+// binding then turns stale and release applies).
+func retiredBranchNextAction(run *db.Run, liveVerifiedIntact bool) *NextAction {
+	if run != nil && !terminalRunStatus(run.Status) {
+		return &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+	}
+	if !liveVerifiedIntact {
+		return &NextAction{Code: "sync", Command: "no-mistakes axi sync --check"}
+	}
+	return &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
 }
 
 // classifyPipelineOwned reports a run that still holds branch custody without

@@ -413,6 +413,24 @@ func runHumanRelease(cmd *cobra.Command, yes bool) error {
 			result = "refused"
 			return &exitError{code: 1}
 		}
+		plan := service.InspectCached(cmd.Context())
+		observed = plan
+		printHumanSyncState(cmd, plan)
+		fmt.Fprintln(cmd.OutOrStdout(), "  Release returns custody of this branch by dropping its terminal run's stale")
+		fmt.Fprintln(cmd.OutOrStdout(), "  push binding. The pipeline heads are anchored first, then the local gate")
+		fmt.Fprintln(cmd.OutOrStdout(), "  branch moves to your current head; the worktree is never touched and the")
+		fmt.Fprintln(cmd.OutOrStdout(), "  changed remote stays yours to reconcile.")
+		fmt.Fprint(cmd.OutOrStdout(), "  Release this stale push binding? [y/N] ")
+		line, readErr := bufio.NewReader(cmd.InOrStdin()).ReadString('\n')
+		if readErr != nil && strings.TrimSpace(line) == "" {
+			return readErr
+		}
+		answer := strings.ToLower(strings.TrimSpace(line))
+		if answer != "y" && answer != "yes" {
+			fmt.Fprintln(cmd.OutOrStdout(), "  Cancelled; no files or refs were changed.")
+			result = "cancelled"
+			return nil
+		}
 	}
 	state := service.Release(cmd.Context())
 	observed = state

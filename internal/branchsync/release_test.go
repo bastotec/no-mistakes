@@ -1,6 +1,7 @@
 package branchsync
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -145,6 +146,112 @@ func TestReleaseNotApplicableWhenRemoteMatchesBinding(t *testing.T) {
 	}
 	if f.custodyReturned() {
 		t.Fatal("not-applicable release stamped custody")
+	}
+}
+
+// TestReleaseNotAdvertisedWhenClosedPRRemoteStillMatchesBinding pins that a
+// merged or closed PR whose remote branch still equals the binding never
+// offers the release: that binding is not stale, release refuses it and
+// points back at a re-check, so advertising it there would loop an agent
+// between two refusing commands. The cached view sends the operator to the
+// live retirement check; the live view confirms the intact binding and
+// leaves the retired branch to a fresh run on a new PR.
+func TestReleaseNotAdvertisedWhenClosedPRRemoteStillMatchesBinding(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	bindTerminalRun(t, f)
+	if err := f.db.UpdateRunPRState(f.run.ID, "closed"); err != nil {
+		t.Fatal(err)
+	}
+
+	cached := f.service.InspectCached(f.ctx)
+	if cached.State != StateClosed || cached.Safety != "blocked_closed" {
+		t.Fatalf("cached classification = %#v", cached)
+	}
+	if cached.NextAction == nil || cached.NextAction.Code != "sync" {
+		t.Fatalf("cached closed next action = %#v, want the live retirement check", cached.NextAction)
+	}
+
+	state := f.service.Refresh(f.ctx)
+	if state.State != StateClosed || state.Safety != "blocked_closed" {
+		t.Fatalf("live classification = %#v", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code == "release_binding" {
+		t.Fatalf("intact-binding closed next action = %#v, must not advertise the release", state.NextAction)
+	}
+	if state.NextAction.Code != "run_pipeline" {
+		t.Fatalf("intact-binding closed next action = %#v", state.NextAction)
+	}
+	if f.custodyReturned() {
+		t.Fatal("no release was requested, but custody changed")
+	}
+}
+
+// TestReleaseNotAdvertisedWhenMergedPRRemoteStillMatchesBinding is the
+// merged twin: a retained remote that still equals the binding is not a
+// stale binding, so neither view may send the operator into the release.
+func TestReleaseNotAdvertisedWhenMergedPRRemoteStillMatchesBinding(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	bindTerminalRun(t, f)
+	if err := f.db.UpdateRunPRState(f.run.ID, "merged"); err != nil {
+		t.Fatal(err)
+	}
+
+	cached := f.service.InspectCached(f.ctx)
+	if cached.State != StateMergedRemoteRetained || cached.Safety != "blocked_merged" {
+		t.Fatalf("cached classification = %#v", cached)
+	}
+	if cached.NextAction == nil || cached.NextAction.Code != "sync" {
+		t.Fatalf("cached merged next action = %#v, want the live retirement check", cached.NextAction)
+	}
+
+	state := f.service.Refresh(f.ctx)
+	if state.State != StateMergedRemoteRetained || state.Safety != "blocked_merged" {
+		t.Fatalf("live classification = %#v", state)
+	}
+	if state.NextAction == nil || state.NextAction.Code == "release_binding" {
+		t.Fatalf("intact-binding merged next action = %#v, must not advertise the release", state.NextAction)
+	}
+	if state.NextAction.Code != "run_pipeline" {
+		t.Fatalf("intact-binding merged next action = %#v", state.NextAction)
+	}
+}
+
+// TestReleaseFailsClosedWhenGateHeadCannotBeAnchored pins the lossless
+// contract: when the independently moved gate head cannot be anchored at the
+// gate recovery ref (here a stale ref lock blocks the write), the release
+// must refuse before re-pointing the gate branch instead of silently
+// dropping the old gate head.
+func TestReleaseFailsClosedWhenGateHeadCannotBeAnchored(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	bindTerminalRun(t, f)
+	rewriteRemoteForRelease(t, f)
+	gateAnchor := custody.RecoveryGateRef(f.run.ID)
+	lockPath := filepath.Join(f.gate, gateAnchor) + ".lock"
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(lockPath, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	state := f.service.Release(f.ctx)
+	if state.Released || state.Changed {
+		t.Fatalf("anchor-blocked release = %#v, want a refusal", state)
+	}
+	if state.Safety != "blocked_release_anchor_failed" {
+		t.Fatalf("anchor-blocked safety = %s", state.Safety)
+	}
+	if f.custodyReturned() {
+		t.Fatal("anchor-blocked release stamped custody")
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("gate branch after refusal = %s, want the independently moved head %s untouched", got, f.preserved)
 	}
 }
 

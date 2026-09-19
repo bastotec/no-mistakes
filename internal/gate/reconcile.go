@@ -271,14 +271,12 @@ func isRunOwnedHead(head string, owned []string) bool {
 // default branch since the merge base never costs a per-commit scan of that
 // history.
 //
-// Two distinct proofs can clear the private side, in order:
-//
-//  1. Final-tree survival: a mechanical 3-way of liveHead with privateHead
-//     completes and reproduces the live tree exactly (merging the private
-//     head back in would change nothing). Per-file patch identity is not
-//     additionally required: patch ids drift across a rebase whose base
-//     moved the context lines around a private hunk even when the replay is
-//     clean and the final content identical.
+// One proof can clear the private side: final-tree survival - a mechanical
+// 3-way of liveHead with privateHead completes and reproduces the live tree
+// exactly (merging the private head back in would change nothing). Per-file
+// patch identity is not additionally required: patch ids drift across a
+// rebase whose base moved the context lines around a private hunk even when
+// the replay is clean and the final content identical.
 //
 // A mirror whose mechanical 3-way conflicts or differs from the live tree
 // fails closed with the whole private-only range named at risk. A rebase
