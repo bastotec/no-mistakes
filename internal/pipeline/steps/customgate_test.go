@@ -32,7 +32,7 @@ func TestWithCustomGates_InsertsAfterAnchorAndPreservesCore(t *testing.T) {
 		{Name: "arch-fitness", After: types.StepReview, Command: "make arch-fitness"},
 	}))
 	want := []string{
-		"intent", "rebase", "review", "gate.review.arch-fitness",
+		"intent", "rebase", "review", "gate.review.arch-fitness", "jev",
 		"test", "gate.test.mutation-budget", "document", "lint", "push", "pr", "ci",
 	}
 	if strings.Join(got, ",") != strings.Join(want, ",") {

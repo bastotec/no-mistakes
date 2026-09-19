@@ -852,6 +852,28 @@ Local review-evaluation corpus settings for [`no-mistakes eval`](/no-mistakes/re
 
 These are operator settings for this machine's local disk, so they are global-only: an `eval` block in a repository's `.no-mistakes.yaml` is ignored. Corpus storage stays under `<NM_HOME>/eval` and no-mistakes never uploads it; replay still sends code to the selected agent's configured model provider as described in the [Evaluation toolkit](/no-mistakes/reference/eval/).
 
+### jev
+
+Advisory evaluation signal settings. The [`jev` pipeline step](/no-mistakes/reference/pipeline-steps/#jev) sends the run's diff to the Jev evaluation model and reports probabilities as informational findings; it never gates a run.
+
+|      |          |
+| ---- | -------- |
+| Type | `object` |
+
+| Field                | Type     | Default               | Description                                                              |
+| -------------------- | -------- | --------------------- | ------------------------------------------------------------------------ |
+| `jev.enabled`        | `bool`   | `false`               | Enable the advisory step; off by default because evaluations spend quota |
+| `jev.gateway_key_env`| `string` | `AI_GATEWAY_API_KEY`  | Environment variable holding the Vercel AI Gateway key                    |
+| `jev.secrets_file`   | `string` | `~/.secrets`          | Parsed (never executed) fallback file for the key                        |
+| `jev.model`          | `string` | `typesafe-ai/jev`     | Evaluation model id; a Gemini id is refused and the step skips            |
+| `jev.timeout`        | `duration`| `30s`                | Per-evaluation wall-clock limit                                           |
+| `jev.max_diff_bytes` | `int`    | `65536`               | Diff bytes sent for evaluation; longer diffs truncate with a marker       |
+| `jev.threshold`      | `float`  | `0.6`                 | Probability at or above which a question reads `flagged`                  |
+
+The key is resolved by reference at call time and is never written to logs, findings, or errors: no-mistakes reads the `gateway_key_env` variable first, then falls back to parsing `secrets_file` for `export VAR=` or `VAR=` lines (quotes stripped, file never executed). A missing key skips the step with a reason instead of failing anything.
+
+Evaluations spend your Vercel AI Gateway quota, so this block is global-only: a `jev` block in a repository's `.no-mistakes.yaml` is ignored, and a pushed branch can neither spend your quota nor steer the signal. Gemini model ids are refused outright wherever they are configured.
+
 ### providers.github.draft_pull_requests
 
 Open pull requests created on GitHub as drafts (`gh pr create --draft`).
