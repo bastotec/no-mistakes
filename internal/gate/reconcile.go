@@ -265,9 +265,9 @@ func isRunOwnedHead(head string, owned []string) bool {
 
 // privateCommitsAbsentFromLive names private-only commits whose content is
 // absent from the live head, or the entire private-only range when survival
-// cannot be proven. The private-only range is computed once; every later
-// question is answered from whole-tree and per-path evidence over exactly
-// the paths that range touches, so a rebased live head carrying the whole
+// cannot be proven. The private-only range is computed once to bound the
+// at-risk listing; survival itself is settled by the single merge-tree
+// comparison of the two heads, so a rebased live head carrying the whole
 // default branch since the merge base never costs a per-commit scan of that
 // history.
 //

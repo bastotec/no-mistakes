@@ -1068,12 +1068,14 @@ func (s *Service) Release(ctx context.Context) State {
 			blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
 			return blocked
 		}
-		if _, exists, refErr := git.ExactRefTarget(ctx, gateDir, gateAnchor); refErr == nil && !exists {
-			if err := custody.PreserveRecoveryAnchor(ctx, gateDir, gateAnchor, gateHead); err != nil {
-				blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("the independently moved gate head %s could not be anchored before the binding was released; no files or refs were changed", gateHead))
-				blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
-				return blocked
-			}
+		_, anchorExists, anchorErr := git.ExactRefTarget(ctx, gateDir, gateAnchor)
+		if anchorErr == nil && !anchorExists {
+			anchorErr = custody.PreserveRecoveryAnchor(ctx, gateDir, gateAnchor, gateHead)
+		}
+		if anchorErr != nil {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("the independently moved gate head %s could not be anchored before the binding was released; no files or refs were changed", gateHead))
+			blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+			return blocked
 		}
 	}
 	if head, headErr := git.HeadSHA(ctx, s.workDir()); headErr != nil || head != local {
@@ -1136,8 +1138,8 @@ func (s *Service) Release(ctx context.Context) State {
 	fresh.Changed = true
 	fresh.Safety = "binding_released"
 	fresh.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
-	if run.HeadSHA != bound && !slices.Contains(anchored, run.HeadSHA) {
-		fresh.Error = "binding released and custody returned; the run's unpublished pipeline head is not available locally and could not be anchored; the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
+	if run.HeadSHA != local && !slices.Contains(anchored, run.HeadSHA) {
+		fresh.Error = "binding released and custody returned; the run's pipeline head is not available locally and could not be anchored; the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
 	} else {
 		fresh.Error = "binding released and custody returned; the pipeline heads stay anchored at the recovery refs and the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
 	}
@@ -2328,12 +2330,14 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	// return works entirely from the mirror (it anchors the preserved head and
 	// moves the gate branch to the operator's head without touching the
 	// worktree). Report that sanctioned action instead of declaring the
-	// evidence unusable. It applies only while the preserved head is absent
-	// from the invoking worktree - the operator cannot see those commits at
-	// all without the mirror. A worktree that already holds the preserved
-	// object can inspect both divergent heads itself, so choosing between
-	// them stays manual reconciliation (or the explicit archive binding).
-	if gateAvailable && objectExists(ctx, gateDir, preserved) && !objectExists(ctx, s.workDir(), preserved) &&
+	// evidence unusable. It applies only to a run whose terminal head was
+	// verified - the same eligibility Recover enforces - and only while the
+	// preserved head is absent from the invoking worktree, where the operator
+	// cannot see those commits at all without the mirror. A worktree that
+	// already holds the preserved object can inspect both divergent heads
+	// itself, so choosing between them stays manual reconciliation (or the
+	// explicit archive binding).
+	if run.TerminalHeadVerifiedAt != nil && gateAvailable && objectExists(ctx, gateDir, preserved) && !objectExists(ctx, s.workDir(), preserved) &&
 		(!objectExists(ctx, gateDir, local) || !state.Local.Clean) {
 		return recoverySourceProof{
 			available: true,

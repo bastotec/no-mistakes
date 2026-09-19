@@ -579,6 +579,43 @@ func TestRecoverDivergedRefusesButKeepLocalReturnsCustody(t *testing.T) {
 	}
 }
 
+// TestMirrorKeepLocalOfferRequiresVerifiedTerminalHead pins the offer/execution
+// contract of the mirror consultation: status may advertise the mirror-backed
+// keep-local custody return only for a run whose terminal head Recover will
+// accept. A run terminalized without head verification (a daemon crash between
+// the head update and the mirror refresh) is refused by Recover --keep-local,
+// so offering the action there would ping-pong an agent between `axi sync
+// --check` and a refusing recovery. Unverified heads keep the
+// manual-reconciliation offer Recover actually enforces.
+func TestMirrorKeepLocalOfferRequiresVerifiedTerminalHead(t *testing.T) {
+	t.Parallel()
+
+	f := newRecoverFixture(t, types.RunCancelled)
+	// The failed mirror refresh: the gate branch never followed the run's
+	// recorded head past the last integration, while the head object itself
+	// stays intact in the gate's shared object store.
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted)
+	// The invoking worktree diverges onto a head the gate has never seen.
+	mustWrite(t, filepath.Join(f.local, "rescope.txt"), "rescope\n")
+	mustRun(t, f.local, "add", "rescope.txt")
+	mustRun(t, f.local, "commit", "-m", "diverging rescope")
+	// Crash-recovery terminalization without head verification.
+	if err := f.db.UpdateRunStatus(f.run.ID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+
+	inspected := f.service.InspectCached(f.ctx)
+	assertManualReconciliationOffer(t, inspected)
+
+	kept := f.service.Recover(f.ctx, true)
+	if kept.Recovered || kept.Safety != "blocked_recover_unverified_head" {
+		t.Fatalf("unverified keep-local recover = %#v, want the refusal the offer must match", kept)
+	}
+	if f.custodyReturned() {
+		t.Fatal("unverified keep-local stamped custody")
+	}
+}
+
 func TestBoundArchiveOffersOnlyKeepLocalRecoveryForDivergentLaterHead(t *testing.T) {
 	t.Parallel()
 
