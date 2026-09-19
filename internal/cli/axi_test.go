@@ -1192,3 +1192,56 @@ func TestSkillExitCodeGuidanceDistinguishesDecisionGates(t *testing.T) {
 		t.Fatal("skill should explicitly identify decision gates as normal exit 0 stops")
 	}
 }
+
+// TestSelectTriggeredRunForHeadNeverAttachesToRunsPredatingTheTrigger pins
+// defect 2 (2026-09-17): after a daemon kill mid-run, a fresh gate push used
+// to adopt the dead terminal run's step records because the waiter looked at
+// the head run unconditionally. priorRunIDs, the pre-push snapshot, is the
+// boundary: a run that predates the trigger is skipped whatever its status,
+// while a run the trigger itself created is attached even once terminal - an
+// immediately failed trigger must report its failure instead of being rerun
+// (TestAxiRunReportsImmediateAgentlessFailureWithoutRerun).
+func TestSelectTriggeredRunForHeadNeverAttachesToRunsPredatingTheTrigger(t *testing.T) {
+	prior := map[string]struct{}{"run-prior": {}}
+	terminal := []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled}
+	for _, status := range terminal {
+		runs := []ipc.RunInfo{
+			{ID: "run-terminal", Status: status},
+			{ID: "run-live", Status: types.RunRunning},
+		}
+		got := selectTriggeredRunForHead(runs, prior)
+		if got == nil || got.ID != "run-live" {
+			t.Fatalf("status %s: selected %+v, want the running run behind the terminal one", status, got)
+		}
+	}
+
+	// A prior-history terminal run is never adopted even when it is the only
+	// run recorded for the head: the push falls through to the
+	// no-triggered-run path and reruns.
+	for _, status := range terminal {
+		if got := selectTriggeredRunForHead([]ipc.RunInfo{{ID: "run-prior", Status: status}}, prior); got != nil {
+			t.Fatalf("prior %s run selected %+v, want nil", status, got)
+		}
+	}
+
+	// A terminal run this trigger created (absent from the snapshot) is
+	// attached, so its immediate failure is reported rather than rerun.
+	for _, status := range terminal {
+		runs := []ipc.RunInfo{{ID: "run-new", Status: status}}
+		got := selectTriggeredRunForHead(runs, prior)
+		if got == nil || got.ID != "run-new" {
+			t.Fatalf("status %s: selected %+v, want the run this trigger created", status, got)
+		}
+	}
+
+	// Prior-history runs are skipped whatever their status, and a pending
+	// run counts as attachable.
+	pending := []ipc.RunInfo{
+		{ID: "run-prior", Status: types.RunRunning},
+		{ID: "run-new", Status: types.RunPending},
+	}
+	got := selectTriggeredRunForHead(pending, prior)
+	if got == nil || got.ID != "run-new" {
+		t.Fatalf("selected %+v, want the pending non-prior run", got)
+	}
+}

@@ -1005,6 +1005,13 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 			return nil, err
 		}
 		sctx.Log(fmt.Sprintf("updated head SHA to %s", shortSHA(headSHA)))
+		// The pipeline just rewrote its own lineage; refresh the gate mirror so
+		// the mirror reflects the rebased head instead of the pre-rebase one.
+		// Best-effort by design (see refreshGateMirrorAfterIntegration): a
+		// stale mirror must never fail an otherwise-complete integration.
+		if err := refreshGateMirrorAfterIntegration(ctx, sctx, headSHA); err != nil {
+			sctx.LogFile(fmt.Sprintf("warning: gate mirror refresh after integration: %v", err))
+		}
 	}
 
 	// Check if the branch has any diff against the default branch.
@@ -1021,6 +1028,83 @@ func updateHeadSHA(ctx context.Context, sctx *pipeline.StepContext) (*pipeline.S
 	}
 
 	return &pipeline.StepOutcome{}, nil
+}
+
+// refreshGateMirrorAfterIntegration moves the gate's mirror of the run
+// branch forward to the head the rebase/merge step just created, so the
+// mirror tracks the pipeline's own rebased lineage instead of the pre-rebase
+// head it still holds (defect 4, 2026-09-17: an ordinary in-pipeline rebase
+// used to leave the mirror at the old lineage, and publication's private
+// mirror guard then read that staleness as content loss). It is deliberately
+// best-effort: on any failure the caller logs a warning and continues, and
+// publication's own reconciliation (PlanMirrorPublicationReconciliation,
+// including the run-owned exception) still settles a mirror left behind.
+//
+// The only mirror this helper ever moves is one sitting at a head the run
+// durably recorded as its own last successful publication (Run.LastPushedSHA):
+// that lineage is already public, so advancing its mirror to the pipeline's
+// next integration head changes no operator-visible state. A mirror still at
+// the run's submitted head belongs to an UNPUBLISHED run: until publication
+// the gate branch is the operator's own branch mirror, custody (axi sync
+// --recover) adopts the pipeline head from the run recovery ref instead, and
+// publication's Decision 41-A exception already excuses the submitted head -
+// so it stays exactly where the operator pushed it. A mirror already at or
+// beyond the new head is left untouched; a missing, diverged, or otherwise
+// unrecorded mirror is left for publication to reconcile - this helper never
+// archives, deletes, or moves a ref it cannot prove the run owns, and every
+// move is a compare-and-swap against the observed tip.
+func refreshGateMirrorAfterIntegration(ctx context.Context, sctx *pipeline.StepContext, newHead string) error {
+	if sctx.Repo == nil || strings.TrimSpace(sctx.GateDir) == "" {
+		return nil
+	}
+	branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+	if branch == "" {
+		return nil
+	}
+	published := ""
+	if sctx.Run.LastPushedSHA != nil {
+		published = strings.TrimSpace(*sctx.Run.LastPushedSHA)
+	}
+	if published == "" {
+		// Unpublished run: the gate branch mirrors the operator's branch, and
+		// publication's run-owned exception (the exact submitted head) already
+		// covers a mirror left there. See the doc comment above.
+		return nil
+	}
+	gateDir := strings.TrimSpace(sctx.GateDir)
+	if _, err := os.Stat(gateDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return fmt.Errorf("stat gate mirror repository: %w", err)
+	}
+	if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
+		return fmt.Errorf("validate repository: %w", err)
+	}
+	if err := git.FetchRemoteRef(ctx, gateDir, sctx.WorkDir, newHead, newHead); err != nil {
+		return fmt.Errorf("fetch integrated head: %w", err)
+	}
+	ref := "refs/heads/" + branch
+	gateTip, exists, err := git.DirectRefTarget(ctx, gateDir, ref)
+	if err != nil {
+		return fmt.Errorf("inspect ref %s: %w", ref, err)
+	}
+	if !exists || gateTip == newHead {
+		// A mirror without a branch ref is publication's to settle; one
+		// already at the integrated head needs no move.
+		return nil
+	}
+	if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", newHead, gateTip); err == nil {
+		// The mirror already carries the new head or a descendant of it.
+		return nil
+	}
+	if gateTip != published {
+		return fmt.Errorf("ref %s at %s is not this run's recorded publication %s; leaving mirror for publication reconciliation", ref, gateTip, shortSHA(published))
+	}
+	if _, err := git.Run(ctx, gateDir, "update-ref", "--no-deref", ref, newHead, gateTip); err != nil {
+		return fmt.Errorf("advance ref %s to %s: %w", ref, shortSHA(newHead), err)
+	}
+	return nil
 }
 
 func shortSHA(sha string) string {

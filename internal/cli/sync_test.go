@@ -1504,6 +1504,188 @@ func TestHumanSyncRecoverRequiresConfirmationOutsideTTY(t *testing.T) {
 	}
 }
 
+type cliReleaseFixture struct {
+	t                                           *testing.T
+	db                                          *db.DB
+	local, gate, remote, base, submitted, runID string
+}
+
+// newCLIReleaseFixture reproduces the stranded stale-binding state end to
+// end for the human CLI surface: a terminal run pushed its head, someone else
+// then rewrote the remote branch, so the persisted push binding can never be
+// satisfied again and `sync --release` is the sanctioned exit.
+func newCLIReleaseFixture(t *testing.T) cliReleaseFixture {
+	t.Helper()
+	nmHome := filepath.Join(t.TempDir(), "nm-home")
+	t.Setenv("NM_HOME", nmHome)
+	root := t.TempDir()
+	remote := filepath.Join(root, "remote.git")
+	cliGit(t, root, "init", "--bare", remote)
+	local := filepath.Join(root, "operator")
+	cliGit(t, root, "init", "-b", "main", local)
+	cliGit(t, local, "config", "user.name", "Test")
+	cliGit(t, local, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(local, "file.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, local, "add", "file.txt")
+	cliGit(t, local, "commit", "-m", "base")
+	base := cliGit(t, local, "rev-parse", "HEAD")
+	cliGit(t, local, "checkout", "-b", "feature/release")
+	if err := os.WriteFile(filepath.Join(local, "file.txt"), []byte("feature\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, local, "commit", "-am", "feature")
+	submitted := cliGit(t, local, "rev-parse", "HEAD")
+
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	registeredRoot, err := git.FindGitRoot(local)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := database.InsertRepo(registeredRoot, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := p.RepoDir(repo.ID)
+	cliGit(t, filepath.Dir(gate), "init", "--bare", gate)
+	cliGit(t, local, "push", gate, "refs/heads/feature/release:refs/heads/feature/release")
+	cliGit(t, local, "push", remote, "refs/heads/feature/release:refs/heads/feature/release")
+
+	run, err := database.InsertRun(repo.ID, "feature/release", submitted, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunHeadSHA(run.ID, submitted); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunCancelled); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{
+		HeadSHA: submitted, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(remote), Ref: "refs/heads/feature/release",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	writer := filepath.Join(root, "writer")
+	cliGit(t, root, "-c", "core.autocrlf=false", "clone", "-b", "feature/release", remote, writer)
+	cliGit(t, writer, "config", "user.name", "Writer")
+	cliGit(t, writer, "config", "user.email", "writer@example.com")
+	cliGit(t, writer, "reset", "--hard", "HEAD~1")
+	if err := os.WriteFile(filepath.Join(writer, "file.txt"), []byte("rewritten by someone else\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cliGit(t, writer, "commit", "-am", "external rewrite")
+	cliGit(t, writer, "push", "--force", remote, "HEAD:refs/heads/feature/release")
+
+	chdir(t, local)
+	return cliReleaseFixture{
+		t: t, db: database, local: local, gate: gate, remote: remote,
+		base: base, submitted: submitted, runID: run.ID,
+	}
+}
+
+func (f cliReleaseFixture) custodyReturned() bool {
+	f.t.Helper()
+	run, err := f.db.GetRun(f.runID)
+	if err != nil || run == nil {
+		f.t.Fatalf("reload run: %#v, %v", run, err)
+	}
+	return run.CustodyReturnedAt != nil
+}
+
+func TestHumanSyncReleaseRequiresConfirmationOutsideTTY(t *testing.T) {
+	f := newCLIReleaseFixture(t)
+	previous := syncInteractive
+	syncInteractive = func() bool { return false }
+	t.Cleanup(func() { syncInteractive = previous })
+	out, err := executeCmd("sync", "--release")
+	if err == nil {
+		t.Fatalf("expected refusal:\n%s", out)
+	}
+	if !strings.Contains(out, "Re-run with `no-mistakes sync --release --yes`") {
+		t.Fatalf("output:\n%s", out)
+	}
+	if f.custodyReturned() {
+		t.Fatal("refused release stamped custody")
+	}
+
+	out, err = executeCmd("sync", "--release", "--yes")
+	if err != nil {
+		t.Fatalf("--release --yes: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "Binding released") {
+		t.Fatalf("human release output:\n%s", out)
+	}
+	if !f.custodyReturned() {
+		t.Fatal("confirmed release did not stamp custody")
+	}
+}
+
+// TestHumanSyncReleasePromptsBeforeReleasing pins the documented behavior
+// that `--release` prompts the same way as `--recover`: an interactive
+// terminal must confirm before the mutating release runs, and a declined
+// confirmation changes no files or refs.
+func TestHumanSyncReleasePromptsBeforeReleasing(t *testing.T) {
+	f := newCLIReleaseFixture(t)
+	previous := syncInteractive
+	syncInteractive = func() bool { return true }
+	t.Cleanup(func() { syncInteractive = previous })
+
+	cmd := newRootCmd()
+	buf := new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetIn(strings.NewReader("n\n"))
+	cmd.SetArgs([]string{"sync", "--release"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("declined release: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Release this stale push binding? [y/N]") {
+		t.Fatalf("confirmation prompt was not shown:\n%s", buf.String())
+	}
+	if !strings.Contains(buf.String(), "Cancelled; no files or refs were changed.") {
+		t.Fatalf("declined release output:\n%s", buf.String())
+	}
+	if strings.Contains(buf.String(), "Binding released") {
+		t.Fatalf("declined release executed anyway:\n%s", buf.String())
+	}
+	if f.custodyReturned() {
+		t.Fatal("declined release stamped custody")
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatal("declined release moved the worktree head")
+	}
+
+	cmd = newRootCmd()
+	buf = new(bytes.Buffer)
+	cmd.SetOut(buf)
+	cmd.SetErr(buf)
+	cmd.SetIn(strings.NewReader("y\n"))
+	cmd.SetArgs([]string{"sync", "--release"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("confirmed release: %v\n%s", err, buf.String())
+	}
+	if !strings.Contains(buf.String(), "Binding released") {
+		t.Fatalf("confirmed release output:\n%s", buf.String())
+	}
+	if !f.custodyReturned() {
+		t.Fatal("confirmed release did not stamp custody")
+	}
+}
+
 func cliGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	out, err := git.Run(context.Background(), dir, args...)

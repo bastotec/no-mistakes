@@ -841,9 +841,12 @@ func runsForHead(client *ipc.Client, repoID, branch, headSHA string) ([]ipc.RunI
 }
 
 // waitForTriggeredRunForHead waits for the run created by this trigger. The
-// active-run lookup handles normal execution; the head lookup catches a run
-// that fails before it can be observed as active. priorRunIDs prevents an
-// up-to-date push from attaching to a terminal run created by an earlier one.
+// active-run lookup handles normal execution; the head lookup catches only a
+// not-yet-terminal (pending or running) run this trigger created, so a run
+// that fails before it can be observed as active is deliberately skipped
+// here and falls through to the caller's rerun path - a triggered run must
+// never attach to a terminal run. priorRunIDs prevents an up-to-date push
+// from attaching to a run created by an earlier trigger.
 func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID, branch, headSHA string, priorRunIDs map[string]struct{}, timeout time.Duration) (*ipc.RunInfo, error) {
 	deadline := time.NewTimer(timeout)
 	defer deadline.Stop()
@@ -867,12 +870,8 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 			if err != nil {
 				return nil, err
 			}
-			for i := range runs {
-				run := &runs[i]
-				if _, existed := priorRunIDs[run.ID]; !existed {
-					return run, nil
-				}
-				break
+			if run := selectTriggeredRunForHead(runs, priorRunIDs); run != nil {
+				return run, nil
 			}
 		}
 		select {
@@ -883,6 +882,39 @@ func waitForTriggeredRunForHead(ctx context.Context, client *ipc.Client, repoID,
 		case <-poll.C:
 		}
 	}
+}
+
+// selectTriggeredRunForHead picks the run a fresh trigger should attach to
+// from the head-matching runs it observed. The boundary is priorRunIDs, the
+// snapshot of run IDs taken before the push: a run that predates the trigger
+// is never attached to, whatever its status - a fresh run must never inherit
+// a dead run's step records, durations, or crash-time error (defect 2,
+// 2026-09-17 - `axi run` used to take runs[0] with no such filter, so a dead
+// run recorded for the same head answered instead of the newly triggered one
+// and replayed its stale state). A run absent from that snapshot was created
+// by this trigger, so it is attachable even once terminal: an immediately
+// failed trigger must report its failure rather than be rerun behind the
+// caller's back. When runs this trigger created exist in both states, a
+// not-yet-terminal (pending or running) run is preferred, and every run for
+// the head is scanned - a prior-history run sorted ahead must not hide the
+// new one. nil means "keep waiting": the run this trigger created has not
+// been recorded (or observed) yet.
+func selectTriggeredRunForHead(runs []ipc.RunInfo, priorRunIDs map[string]struct{}) *ipc.RunInfo {
+	var triggered *ipc.RunInfo
+	for i := range runs {
+		run := &runs[i]
+		if _, existed := priorRunIDs[run.ID]; existed {
+			continue
+		}
+		switch run.Status {
+		case types.RunPending, types.RunRunning:
+			return run
+		}
+		if triggered == nil {
+			triggered = run
+		}
+	}
+	return triggered
 }
 
 func shouldRerunAfterNoActiveRun(pushErr error) bool {

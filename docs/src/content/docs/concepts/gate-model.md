@@ -96,21 +96,41 @@ work unchanged.
 ### Private mirror reconciliation
 
 A rebase can leave the gate branch on an older history that rejects the next
-ordinary push. Reconciliation compares exact commit heads and per-file
-`git patch-id --stable` identities; commit messages are not evidence. Historical
-patch matches also require a clean three-way merge of the private head into the
-live head whose resulting tree equals the live tree. This prevents changes
-discarded by a merge or revert from being counted as surviving content. If that
-survival check cannot prove preservation, the private-only range is reported
+ordinary push. Reconciliation compares exact commit heads and whole-tree
+survival; commit messages are not evidence. Survival means a clean
+three-way merge of the private head into the live head whose resulting tree
+equals the live tree, so changes discarded by a merge or revert are not
+counted as surviving content. Per-file `git patch-id --stable` identity is
+no longer additionally required: patch ids drift across a rebase whose base
+moved the context lines around a private hunk even when the replay is clean
+and the final content identical, which used to refuse such rebases as
+at-risk. If survival cannot be proven, the private-only range is reported
 as at risk.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to `Run.SubmittedHeadSHA`** without
-patch-ID or tree-survival proof. This narrow policy exception permits reviewed
+survival proof. This narrow policy exception permits reviewed
 rebases and conflict resolutions to change the submitted patch. Ownership is
-not containment evidence. The exception does not extend to another recorded
-head, an abbreviated SHA, or an external, newer, or divergent private head.
-Fresh AXI submissions do not receive this exception.
+not containment evidence. Fresh AXI submissions do not receive this
+exception.
+
+**Accepted Decision 41-A extension (2026-09-17, defect 4):** publication may
+also replace a private mirror head **exactly equal to this run's durably
+recorded last successful publication (`Run.LastPushedSHA`)**. A rebase
+inside the same run legitimately leaves the gate mirror at the run's own
+previously published head while the new head carries the same changes
+conflict-resolved with live-side work - a shape no content-only proof can
+distinguish from genuine loss, because the mechanical three-way conflicts by
+construction. The recording is the pipeline's own evidence that the mirror
+head is its superseded publication, and the archive tag still preserves that
+head before the mirror moves. The extension does not reach heads recorded by
+other runs, external heads, or any head this run did not publish; the
+rebase step also refreshes the mirror after every integration
+(`refreshGateMirrorAfterIntegration`) - moving only a mirror that sits at
+this run's recorded publication, never an unpublished run's submitted head,
+which Decision 41-A itself already excuses - so the window where the mirror
+lags the run's own rebase stays closed. Outside the exception, unproven
+private content refuses before publication.
 
 Reconciliation requires direct private branch and archive refs; symbolic refs,
 including dangling symbolic refs, are refused before containment checks. Ref

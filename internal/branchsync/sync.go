@@ -81,6 +81,11 @@ type State struct {
 	Recovery   *RecoveryEvidence
 	NextAction *NextAction
 	Error      string
+	// Released is set only by Release and reports that a terminal run's stale
+	// pipeline push binding was released (by this call or an earlier,
+	// idempotent custody return): the pipeline heads stay anchored, the gate
+	// branch follows the operator's head, and a fresh run may start.
+	Released bool
 }
 
 type LocalState struct {
@@ -295,7 +300,9 @@ func (s *Service) Refresh(ctx context.Context) State {
 		if state.PRState == "merged" || state.PRState == "closed" {
 			return state
 		}
-		return blockedPlan(state, StateTargetChanged, "blocked_binding_changed", "the push binding or configured target changed before refresh; no files or refs were changed")
+		blocked := blockedPlan(state, StateTargetChanged, "blocked_binding_changed", "the push binding or configured target changed before refresh; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+		return blocked
 	}
 	pushURL := freshRepo.PushURL()
 
@@ -331,11 +338,16 @@ func (s *Service) Refresh(ctx context.Context) State {
 		if state.PRState == "closed" {
 			state.State = StateClosed
 			state.Safety = "blocked_closed"
+			state.NextAction = staleBindingNextAction(run)
 			return state
 		}
 		state.State = StateRemoteMissing
 		state.Safety = "blocked_remote_missing"
 		state.Error = "the pipeline-bound remote branch no longer exists; no files or refs were changed"
+		state.NextAction = staleBindingNextAction(run)
+		if releaseEligible(run) {
+			state.Error = "the pipeline-bound remote branch no longer exists; this terminal run's stale binding can be released with `no-mistakes axi sync --release`, which anchors unpublished pipeline commits, moves the local gate branch to the current head, and returns custody; no files or refs were changed"
+		}
 		return state
 	}
 
@@ -347,6 +359,7 @@ func (s *Service) Refresh(ctx context.Context) State {
 		state.State = StateOffline
 		state.Safety = "blocked_offline"
 		state.Error = "could not fetch the configured push target; no files or worktree refs were changed"
+		state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 		return state
 	}
 	fetched, err := git.Run(ctx, s.workDir(), "rev-parse", privateRef)
@@ -354,12 +367,13 @@ func (s *Service) Refresh(ctx context.Context) State {
 		state.State = StateRemoteRewritten
 		state.Safety = "blocked_remote_changed_during_refresh"
 		state.Error = "the remote branch changed while it was being refreshed; no files or worktree refs were changed"
+		state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 		return state
 	}
 
 	bound := ptr(run.LastPushedSHA)
 	if live != bound {
-		state.NextAction = nil
+		state.NextAction = staleBindingNextAction(run)
 		if isAncestor(ctx, s.workDir(), bound, live) {
 			state.State = StateRemoteAdvanced
 			state.Safety = "blocked_remote_advanced"
@@ -371,19 +385,22 @@ func (s *Service) Refresh(ctx context.Context) State {
 			state.Relation = RelationUnknown
 			state.Error = "the live remote no longer equals the persisted pipeline push binding; no files or refs were changed"
 		}
+		if releaseEligible(run) {
+			state.Error += "; release this terminal run's stale binding with `no-mistakes axi sync --release` - it anchors unpublished pipeline commits, moves the local gate branch to the current head, and returns custody, while the changed remote itself stays yours to reconcile (never force-pushed); ordinary recovery and archive binding are mutually exclusive with release"
+		}
 		return state
 	}
 
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
-		state.NextAction = nil
+		state.NextAction = retiredBranchNextAction(run, true)
 		return state
 	}
 	if state.PRState == "closed" {
 		state.State = StateClosed
 		state.Safety = "blocked_closed"
-		state.NextAction = nil
+		state.NextAction = retiredBranchNextAction(run, true)
 		return state
 	}
 
@@ -404,7 +421,7 @@ func (s *Service) gateContextRefusal(ctx context.Context) (State, bool) {
 	}
 	result, err := (gatecontext.Inspector{DB: s.DB, Paths: p}).Inspect(ctx, gatecontext.Request{CWD: s.workDir(), MarkerPresent: gatecontext.MarkerPresent()})
 	if err != nil {
-		return State{State: StateAmbiguousContext, Safety: "blocked_gate_context_unknown", Error: "could not verify gate execution context; no files or refs were changed"}, true
+		return State{State: StateAmbiguousContext, Safety: "blocked_gate_context_unknown", Error: "could not verify gate execution context; no files or refs were changed", NextAction: &NextAction{Code: "inspect", Command: "no-mistakes axi status"}}, true
 	}
 	if !result.Nested {
 		return State{}, false
@@ -521,7 +538,9 @@ func (s *Service) BindRecoveryArchive(ctx context.Context, archiveRef string) St
 	}
 	state, run, _ := s.inspect(ctx)
 	if run == nil || state.State != StatePipelineOwned || !terminalRunStatus(run.Status) || !unpublishedPipelineHead(run) || run.CustodyReturnedAt != nil {
-		return blockedPlan(state, state.State, "blocked_recover_archive_not_applicable", "an archive can be bound only to the selected terminal run that still owns an unpublished pipeline head; no files or refs were changed")
+		blocked := blockedPlan(state, state.State, "blocked_recover_archive_not_applicable", "an archive can be bound only to the selected terminal run that still owns an unpublished pipeline head; recovery, archive binding, and `no-mistakes axi sync --release` are mutually exclusive remedies - releasing the run's stale push binding returns custody and ends archive-bind eligibility; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+		return blocked
 	}
 	if run.TerminalHeadVerifiedAt == nil {
 		return blockedPlan(state, StatePipelineOwned, "blocked_recover_archive_unverified_head", "the terminal run has no verified final-head evidence, so an archive cannot be bound; no files or refs were changed")
@@ -894,10 +913,240 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 			return s.recoverAdoptPreserved(ctx, run, state, preserved, trustedEqualTreeRewrite)
 		}
 		state.Relation = RelationDiverged
-		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("the local branch and the preserved pipeline head have diverged; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", anchorRef))
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_diverged", fmt.Sprintf("the local branch and the preserved pipeline head have diverged; the preserved commits are anchored at %s - reconcile manually and re-run the recovery, or use --keep-local to keep the current head. `no-mistakes rerun` resumes validating the selected preserved head, but refuses a known clean caller HEAD mismatch. If the live remote no longer equals this terminal run's push binding, `no-mistakes axi sync --release` additionally releases the stale binding (anchoring the pipeline heads, moving the local gate branch to the current head, and returning custody); recovery, archive binding, and release are mutually exclusive remedies. If heads differ, inspect `no-mistakes axi status` and follow its exact `branch_sync.next_action.command` for custody or synchronization, then submit intended local commits with a fresh `no-mistakes axi run` once custody permits; no files or refs were changed", anchorRef))
 		blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + anchorRef}
 		return blocked
 	}
+}
+
+// Release returns custody by releasing a TERMINAL run's stale pipeline push
+// binding. The binding goes stale when the live remote stops equaling the
+// persisted pushed head (rewritten, advanced out of band, or deleted outside
+// no-mistakes) and can never be re-matched, so ordinary synchronization is
+// permanently blocked and rerun keeps selecting the bound head. Release
+// anchors the run's recorded pipeline head at the run recovery ref so no
+// pipeline content is lost - under the exact binding it requires, that head
+// is the previously pushed head, and a head already reachable from the
+// operator's branch needs no anchor - and moves the local gate branch to the
+// operator's current head with an atomic compare-and-swap (keep-local
+// semantics; the invoking worktree is never touched), and stamps custody
+// returned so a fresh run may start. Preconditions, checked up front and
+// fail-closed with no mutation: the run must be terminal, must still hold an
+// exact push binding, must not already have custody returned, no other run
+// may be active on the branch, the worktree must be clean, and the live
+// remote must actually differ from the binding. Recovery, archive binding,
+// and release are mutually exclusive remedies; release ends archive-bind
+// eligibility. The changed remote itself stays the operator's to reconcile -
+// no-mistakes never force-pushes it.
+func (s *Service) Release(ctx context.Context) State {
+	if refusal, blocked := s.gateContextRefusal(ctx); blocked {
+		return refusal
+	}
+	state, run, _ := s.inspect(ctx)
+	if run != nil && run.CustodyReturnedAt != nil {
+		// Idempotent no-op: custody was already returned, so the binding no
+		// longer claims the branch.
+		state.Recovered = true
+		state.Changed = false
+		return state
+	}
+	if run == nil || run.LastPushedSHA == nil || ptr(run.LastPushedSHA) == "" || !exactPushedBinding(s.Repo, run, state.Local.Branch) {
+		blocked := blockedPlan(state, state.State, "blocked_release_not_applicable", "nothing to release: the branch has no exact terminal pipeline push binding; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+		return blocked
+	}
+	if !terminalRunStatus(run.Status) || run.PushActive || pushStepRunning(s.DB, run.ID) {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_run_active", "the run that owns this binding is still active; drive it to completion or abort it first; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+		return blocked
+	}
+	if active, err := s.DB.GetActiveRun(s.Repo.ID, state.Local.Branch); err != nil || active != nil {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_run_active", "another run is active on this branch; drive it to completion first; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+		return blocked
+	}
+	if !state.Local.Clean {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_dirty", fmt.Sprintf("the invoking worktree is not clean (%s); commit or stash first so the released gate binding lands on an exact head; no files or refs were changed", state.Local.Reason))
+		blocked.NextAction = &NextAction{Code: "inspect_worktree", Command: "git status"}
+		return blocked
+	}
+	gateDir := strings.TrimSpace(s.GateDir)
+	if gateDir == "" {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_gate_unavailable", "no local gate is configured for this repository, so the gate branch cannot be re-pointed; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+		return blocked
+	}
+	if _, err := os.Stat(gateDir); err != nil {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_gate_unavailable", "the local gate is unavailable, so the gate branch cannot be re-pointed; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+		return blocked
+	}
+
+	// The binding must actually be stale: if the live remote still equals it,
+	// ordinary synchronization applies and release would discard a valid
+	// binding for nothing.
+	bound := ptr(run.LastPushedSHA)
+	lsRemoteCtx, lsRemoteCancel := context.WithTimeout(ctx, s.remoteTimeout())
+	defer lsRemoteCancel()
+	live, err := s.runLsRemote(lsRemoteCtx, s.workDir(), s.Repo.PushURL(), ptr(run.PushRef))
+	if err != nil {
+		blocked := blockedPlan(state, state.State, "blocked_offline", "could not verify the live push target before releasing the binding; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	if live == bound {
+		blocked := blockedPlan(state, state.State, "blocked_release_not_applicable", "the live remote still equals the persisted pipeline push binding; ordinary synchronization applies and nothing needs releasing; no files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "sync", Command: "no-mistakes axi sync --check"}
+		return blocked
+	}
+
+	// Anchor the pipeline head first so the release is lossless: under the
+	// exact push binding Release requires, the run's recorded head is the
+	// previously pushed head, and it is anchored at the run recovery ref -
+	// never the sync anchor ref, which an equivalent-advance sync owns for
+	// the operator's pre-sync head. A head already reachable from the local
+	// branch needs no anchor: the branch keeps it reachable and the gate
+	// branch is re-pointed at that same branch below. Missing objects are
+	// reported, never fabricated.
+	anchored := []string{}
+	local := state.Local.Head
+	headReachableFromBranch := run.HeadSHA == local || isAncestor(ctx, s.workDir(), run.HeadSHA, local)
+	if !headReachableFromBranch {
+		head := run.HeadSHA
+		wdHas := objectExists(ctx, s.workDir(), head)
+		gateHas := objectExists(ctx, gateDir, head)
+		if wdHas || gateHas {
+			anchorRef := custody.RecoveryRef(run.ID)
+			if wdHas {
+				if compatible, err := exactCommitRefCompatible(ctx, s.workDir(), anchorRef, head); err != nil || !compatible {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", fmt.Sprintf("the invoking worktree anchor ref %s conflicts with pipeline head %s; inspect both objects before releasing the binding; no files or refs were changed", anchorRef, head))
+					blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "git log --oneline --left-right HEAD..." + head}
+					return blocked
+				}
+				if err := custody.PreserveRecoveryAnchor(ctx, s.workDir(), anchorRef, head); err != nil {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("pipeline head %s could not be anchored in the invoking worktree before the binding was released; no files or refs were changed", head))
+					blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+					return blocked
+				}
+			}
+			if gateHas {
+				if compatible, err := exactCommitRefCompatible(ctx, gateDir, anchorRef, head); err != nil || !compatible {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", fmt.Sprintf("the local gate anchor ref %s conflicts with pipeline head %s; inspect both objects before releasing the binding; no files or refs were changed", anchorRef, head))
+					blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+					return blocked
+				}
+				if err := custody.PreserveRecoveryAnchor(ctx, gateDir, anchorRef, head); err != nil {
+					blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("pipeline head %s could not be anchored in the local gate before the binding was released; no files or refs were changed", head))
+					blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+					return blocked
+				}
+			}
+			anchored = append(anchored, head)
+		}
+	}
+
+	// Re-point the gate branch to the operator's head with a CAS, staging the
+	// head into the gate through a fetch (never a push, which would fire the
+	// gate's receive hooks). An independently moved gate head is anchored at
+	// the run's gate recovery ref first so it is not lost either.
+	gateHead, gateHeadExists, err := git.ExactRefTarget(ctx, gateDir, "refs/heads/"+state.Local.Branch)
+	if err != nil {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_gate_unavailable", fmt.Sprintf("the local gate branch %s could not be inspected; no files or refs were changed", state.Local.Branch))
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	if gateHeadExists && gateHead != local && gateHead != run.HeadSHA {
+		if !objectExists(ctx, gateDir, gateHead) {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", "the independently moved gate head is unavailable and cannot be preserved; no files or refs were changed")
+			blocked.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+			return blocked
+		}
+		gateAnchor := custody.RecoveryGateRef(run.ID)
+		compatible, compatErr := recoveryGateAnchorCompatible(ctx, gateDir, run.ID, gateHead)
+		if compatErr != nil || !compatible {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_mismatch", "the independently moved gate head conflicts with the existing run recovery anchor; inspect both refs before releasing the binding; no files or refs were changed")
+			blocked.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+			return blocked
+		}
+		_, anchorExists, anchorErr := git.ExactRefTarget(ctx, gateDir, gateAnchor)
+		if anchorErr == nil && !anchorExists {
+			anchorErr = custody.PreserveRecoveryAnchor(ctx, gateDir, gateAnchor, gateHead)
+		}
+		if anchorErr != nil {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_anchor_failed", fmt.Sprintf("the independently moved gate head %s could not be anchored before the binding was released; no files or refs were changed", gateHead))
+			blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+			return blocked
+		}
+	}
+	if head, headErr := git.HeadSHA(ctx, s.workDir()); headErr != nil || head != local {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_assumptions_changed", "the local branch head changed while the binding was being released; no files or branch refs were changed")
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	stagingRef := "refs/no-mistakes/custody-return/" + run.ID
+	if !objectExists(ctx, gateDir, local) {
+		source, absErr := filepath.Abs(s.workDir())
+		if absErr != nil {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_assumptions_changed", "the invoking worktree path could not be resolved; no files or refs were changed")
+			blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+			return blocked
+		}
+		if _, fetchErr := git.Run(ctx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", source, "+refs/heads/"+state.Local.Branch+":"+stagingRef); fetchErr != nil {
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_assumptions_changed", "the kept local head could not be staged into the gate; no files or refs were changed")
+			blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+			return blocked
+		}
+		staged, revErr := git.Run(ctx, gateDir, "rev-parse", stagingRef+"^{commit}")
+		if revErr != nil || staged != local {
+			_, _ = git.Run(ctx, gateDir, "update-ref", "-d", stagingRef)
+			blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_assumptions_changed", "the local branch head changed while the binding was being released; no files or refs were changed")
+			blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+			return blocked
+		}
+	}
+	oldValue := gateHead
+	if !gateHeadExists {
+		oldValue = strings.Repeat("0", len(local))
+	}
+	_, casErr := git.Run(ctx, gateDir, "update-ref", "refs/heads/"+state.Local.Branch, local, oldValue)
+	_, _ = git.Run(ctx, gateDir, "update-ref", "-d", stagingRef)
+	if casErr != nil {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_gate_race", "the gate branch changed while the binding was being released; re-run the release; no local files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	// Re-read the truth before stamping custody: every mutation above must
+	// have landed exactly as planned.
+	liveGateHead, exists, refErr := git.ExactRefTarget(ctx, gateDir, "refs/heads/"+state.Local.Branch)
+	if refErr != nil || !exists || liveGateHead != local {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_gate_race", "the gate branch changed while the binding was being released; re-run the release; no local files or refs were changed")
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	if branch, branchErr := git.CurrentBranch(ctx, s.workDir()); branchErr != nil || branch != state.Local.Branch {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_release_assumptions_changed", "the local branch changed while the binding was being released; custody was not recorded")
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	if stampErr := s.DB.SetRunCustodyReturned(run.ID); stampErr != nil {
+		blocked := blockedPlan(state, StatePipelineOwned, "blocked_recover_stamp_failed", "the custody return could not be recorded; re-run the release")
+		blocked.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --release"}
+		return blocked
+	}
+	fresh, _, _ := s.inspect(ctx)
+	fresh.Released = true
+	fresh.Changed = true
+	fresh.Safety = "binding_released"
+	fresh.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
+	switch {
+	case headReachableFromBranch:
+		fresh.Error = "binding released and custody returned; the pipeline head stays reachable from your branch and the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
+	case len(anchored) > 0:
+		fresh.Error = "binding released and custody returned; the pipeline heads stay anchored at the recovery refs and the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
+	default:
+		fresh.Error = "binding released and custody returned; the run's pipeline head is not available locally and could not be anchored; the changed remote remains yours to reconcile (no-mistakes never force-pushes it)"
+	}
+	return fresh
 }
 
 // recoverKeepLocal performs the explicit keep-local custody return: the
@@ -1316,7 +1565,7 @@ func (s *Service) finishRecover(ctx context.Context, run *db.Run, changed bool) 
 		state.Changed = changed
 		state.Safety = "blocked_recover_stamp_failed"
 		state.Error = "the custody return could not be recorded; re-run the recovery"
-		state.NextAction = nil
+		state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --recover"}
 		return state
 	}
 	state, _, _ := s.inspect(ctx)
@@ -1361,7 +1610,7 @@ func (s *Service) finishKeepLocalRecover(ctx context.Context, state State, runID
 		fresh.Changed = false
 		fresh.Safety = "blocked_recover_stamp_failed"
 		fresh.Error = "the custody return could not be recorded; re-run the recovery"
-		fresh.NextAction = nil
+		fresh.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --recover --keep-local"}
 		return fresh
 	}
 	fresh, _, _ := s.inspect(ctx)
@@ -1453,10 +1702,12 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 			state.State = StateAmbiguousContext
 			state.Safety = "blocked_wrong_branch"
 			state.Error = "the checked-out branch does not match any pipeline push binding"
+			state.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
 		} else {
 			state.State = StateLegacyUnbound
 			state.Safety = "blocked_legacy_unbound"
 			state.Error = "no exact successful pipeline push binding exists for the checked-out branch"
+			state.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
 		}
 		return state, nil, false
 	}
@@ -1512,6 +1763,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		state.State = StateLegacyUnbound
 		state.Safety = "blocked_legacy_unbound"
 		state.Error = "this run has no exact successful push provenance and cannot be synchronized safely"
+		state.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
 		return state, run, false
 	}
 	if run.HeadSHA != ptr(run.LastPushedSHA) && run.CustodyReturnedAt == nil {
@@ -1524,23 +1776,27 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
+		state.NextAction = retiredBranchNextAction(run, false)
 		return state, run, true
 	}
 	if state.PRState == "closed" {
 		state.State = StateClosed
 		state.Safety = "blocked_closed"
+		state.NextAction = retiredBranchNextAction(run, false)
 		return state, run, true
 	}
 	if ptr(run.PushRef) != "refs/heads/"+branch || ptr(run.PushTargetFingerprint) != TargetFingerprint(s.Repo.PushURL()) || ptr(run.PushTargetKind) != targetKind(s.Repo) {
 		state.State = StateTargetChanged
 		state.Safety = "blocked_target_changed"
 		state.Error = "the configured push target or branch ref changed after the pipeline push"
+		state.NextAction = &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
 		return state, run, false
 	}
 	if duplicateBranchCheckout(ctx, root, branch) {
 		state.State = StateAmbiguousContext
 		state.Safety = "blocked_branch_ambiguous"
 		state.Error = "the checked-out branch is attached to more than one worktree"
+		state.NextAction = &NextAction{Code: "inspect_worktree", Command: "git worktree list"}
 		return state, run, false
 	}
 	if !clean {
@@ -1787,6 +2043,52 @@ func terminalRunStatus(status types.RunStatus) bool {
 	return status.Terminal()
 }
 
+// releaseEligible reports whether a run qualifies for `axi sync --release`:
+// a terminal run whose persisted pipeline push binding still claims the
+// branch and whose custody has not yet been returned. Such a binding can
+// never be re-matched once the live remote stops equaling it, so releasing it
+// (anchoring its unpublished commits, moving the local gate branch to the
+// operator's head, stamping custody returned) is the sanctioned exit.
+func releaseEligible(run *db.Run) bool {
+	return run != nil && terminalRunStatus(run.Status) && run.LastPushedSHA != nil &&
+		ptr(run.LastPushedSHA) != "" && run.CustodyReturnedAt == nil && !run.PushActive
+}
+
+// staleBindingNextAction names the sanctioned exit from a blocked state whose
+// persisted pipeline push binding no longer matches the observed remote: a
+// terminal run's stale binding can be released, while an active run still
+// owns the branch and must be driven to completion instead.
+func staleBindingNextAction(run *db.Run) *NextAction {
+	if releaseEligible(run) {
+		return &NextAction{Code: "release_binding", Command: "no-mistakes axi sync --release"}
+	}
+	if run != nil && run.CustodyReturnedAt != nil {
+		return &NextAction{Code: "inspect", Command: "no-mistakes axi status"}
+	}
+	return &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+}
+
+// retiredBranchNextAction names the exit for a branch retired by its PR
+// lifecycle. Release is defined for a binding the observed remote no longer
+// matches, so a merged or closed PR whose remote still equals the binding -
+// or has not been checked against it yet - must not advertise it: release
+// refuses an intact binding and points back at a re-check, which loops.
+// While the run is active it owns the branch. Otherwise an unchecked remote
+// gets the live retirement check, which observes the staleness release
+// needs; once the check confirms the intact binding the branch is simply
+// retired - the operator keeps working through a fresh run on a new PR, or
+// deletes the remote branch so the retirement resolves (a closed branch's
+// binding then turns stale and release applies).
+func retiredBranchNextAction(run *db.Run, liveVerifiedIntact bool) *NextAction {
+	if run != nil && !terminalRunStatus(run.Status) {
+		return &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
+	}
+	if !liveVerifiedIntact {
+		return &NextAction{Code: "sync", Command: "no-mistakes axi sync --check"}
+	}
+	return &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
+}
+
 // classifyPipelineOwned reports a run that still holds branch custody without
 // a successful push binding. While the run is active the block is absolute:
 // the pipeline will publish or keep moving the head, so the worktree must
@@ -1835,6 +2137,8 @@ func (s *Service) classifyPipelineOwned(ctx context.Context, state *State, run *
 		state.Recovery = source.evidence
 		if source.archive != nil {
 			state.Error = fmt.Sprintf("the run finished %s with divergent later work preserved at verified archive %s; recover custody at exact required head %s before any local follow-up commit", run.Status, source.archive.ArchiveRef, source.archive.RequiredHeadSHA)
+		} else if source.evidence != nil && source.evidence.Source == "gate_mirror" {
+			state.Error = "the run finished " + string(run.Status) + " with unpublished pipeline commits intact in the daemon's private mirror; the invoking worktree cannot safely adopt them - return custody at the current local head with `no-mistakes axi sync --recover --keep-local` (the preserved commits stay anchored), or reconcile the recorded and live heads manually"
 		} else {
 			state.Error = "the run finished " + string(run.Status) + " with unpublished pipeline commits preserved in the local gate; recover custody before any local follow-up commit"
 		}
@@ -2020,6 +2324,34 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	}
 	if archiveProof.available {
 		return archiveProof
+	}
+	// Mirror consultation (defect 3, 2026-09-17): the ordinary path refuses
+	// when the invoking worktree cannot participate in the safety proof - its
+	// head is not even present as an object in the gate, or the worktree is
+	// dirty - but the daemon's own mirror still holds the recorded pipeline
+	// head intact. Those commits are NOT unrecoverable: keep-local custody
+	// return works entirely from the mirror (it anchors the preserved head and
+	// moves the gate branch to the operator's head without touching the
+	// worktree). Report that sanctioned action instead of declaring the
+	// evidence unusable. It applies only to a run whose terminal head was
+	// verified - the same eligibility Recover enforces - and only while the
+	// preserved head is absent from the invoking worktree, where the operator
+	// cannot see those commits at all without the mirror. A worktree that
+	// already holds the preserved object can inspect both divergent heads
+	// itself, so choosing between them stays manual reconciliation (or the
+	// explicit archive binding).
+	if run.TerminalHeadVerifiedAt != nil && gateAvailable && objectExists(ctx, gateDir, preserved) && !objectExists(ctx, s.workDir(), preserved) &&
+		(!objectExists(ctx, gateDir, local) || !state.Local.Clean) {
+		return recoverySourceProof{
+			available: true,
+			action:    NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover --keep-local"},
+			evidence: &RecoveryEvidence{
+				Source: "gate_mirror", RepositoryID: s.Repo.ID, RunID: run.ID, Branch: state.Local.Branch,
+				RequiredHead: local, PreservedHead: preserved, KeepLocal: true, Proof: "mirror_preserved",
+			},
+			safety: "blocked_recover_mirror_preserved",
+			err:    "the run finished " + string(run.Status) + " with unpublished pipeline commits intact in the daemon's private mirror (head " + preserved + "); the invoking worktree cannot safely adopt them, but custody can be returned at the current local head while the preserved commits stay anchored",
+		}
 	}
 	return unavailableRecoverySource(
 		"blocked_recover_manual_reconciliation",
@@ -2346,7 +2678,12 @@ func blockedPlan(state State, resultState, safety, message string) State {
 	state.State = resultState
 	state.Safety = safety
 	state.Changed = false
-	state.NextAction = nil
+	// Defect 1 (2026-09-17): every blocked state carries a next_action. A
+	// fresh read-only plan is the universal safe suggestion for a state the
+	// caller does not know a better exit for - re-checking re-derives the
+	// classification-level action (sync, recover_custody, release_binding,
+	// ...) from current evidence. Callers that know more override this.
+	state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
 	state.Error = message
 	return state
 }
