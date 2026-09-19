@@ -250,6 +250,39 @@ func TestJevStep_CompletesAdvisoryAndNeverGates(t *testing.T) {
 	}
 }
 
+func TestJevStep_HalfThresholdFlaggedAnswerBecomesAnItem(t *testing.T) {
+	t.Setenv("JEV_TEST_GATEWAY_KEY", "k")
+	stub := &jevGatewayStub{fixed: map[string]float64{"breaking": 0.50, "bug": 0.11, "data_loss": 0.03, "security": 0.05}}
+	srv := httptest.NewServer(http.HandlerFunc(stub.handler))
+	defer srv.Close()
+
+	dir, baseSHA, headSHA := newJevGitRepo(t)
+	cfg := jevTestConfig()
+	cfg.Threshold = 0.5
+	sctx := newJevStepContext(t, dir, baseSHA, headSHA, cfg)
+
+	outcome, err := (&JevStep{endpointOverride: srv.URL}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if outcome.Skipped {
+		t.Fatalf("expected a completed evaluation, got skip: %q", outcome.SkipReason)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil {
+		t.Fatalf("parse findings: %v", err)
+	}
+	if !strings.Contains(findings.Summary, "flagged") {
+		t.Fatalf("summary should carry the flagged verdict: %q", findings.Summary)
+	}
+	if len(findings.Items) != 1 {
+		t.Fatalf("a flagged verdict must list its flagged question as an item, got %d: %#v", len(findings.Items), findings.Items)
+	}
+	if !strings.Contains(findings.Items[0].Description, "flags a breaking change") {
+		t.Errorf("item should flag the breaking question: %q", findings.Items[0].Description)
+	}
+}
+
 func TestJevStep_GatewayFailureSkipsAndNeverFails(t *testing.T) {
 	t.Setenv("JEV_TEST_GATEWAY_KEY", "k")
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

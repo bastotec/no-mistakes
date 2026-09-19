@@ -226,7 +226,7 @@ func jevFindings(questions []jev.Question, result *jev.Result, threshold float64
 			})
 			continue
 		}
-		if p <= 1-threshold {
+		if p < threshold && p <= 1-threshold {
 			// A clear answer stays in the summary; only flagged and uncertain
 			// questions become items worth a reader's attention.
 			continue

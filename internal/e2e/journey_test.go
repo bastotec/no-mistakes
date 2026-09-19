@@ -28,8 +28,8 @@ import (
 //     hook installation)
 //   - `git push no-mistakes <branch>` (real git transport, hook fires,
 //     daemon receives push notification)
-//   - the eight pipeline steps in sequence (rebase, review, test,
-//     document, lint, push, pr, ci)
+//   - the nine pipeline steps in sequence (rebase, review, jev, test,
+//     document, lint, push, pr, ci; jev skips, disabled by default)
 //   - real subprocess invocations of the agent binary, parsed by
 //     no-mistakes' real agent package
 //   - SQLite persistence and IPC retrieval of run state
