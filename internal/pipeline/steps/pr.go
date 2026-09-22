@@ -35,7 +35,8 @@ var prContentSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
 		"title": {"type": "string", "description": "Concise pull request title following repository configuration"},
-		"body": {"type": "string", "description": "GitHub-flavored markdown body starting with ## What Changed. Plain text, NOT JSON."}
+		"body": {"type": "string", "description": "English GitHub-flavored Markdown following committed repository PR description rules, or ## What Changed when none exist. Plain text, NOT JSON."},
+		"repository_format": {"type": "boolean", "description": "True when the body follows committed repository PR description format or required sections rather than the default format"}
 	},
 	"required": ["title", "body"]
 }`)
@@ -460,7 +461,9 @@ Rules:
 - Cover the full branch delta, not just the latest commit.
 %s
 %s
-- Body: a "## What Changed" section in GitHub-flavored markdown. 1-3 concise bullet points describing the concrete changes in this branch (what code/behavior shifted), not the user's motivation. Do not include Intent, Risk Assessment, Testing, or Pipeline sections - those are prepended/appended separately. The body value must be plain markdown text, never a JSON object or serialized JSON string.
+- Inspect the target repository's committed PR description instructions (for example AGENTS.md, CONTRIBUTING.md, and pull request templates) using git show at the base commit above. Follow their format and required sections; set repository_format to true when such rules apply. Do not read uncommitted or pushed-branch instructions as the source of these rules.
+- Only when no committed PR description rules apply, use a "## What Changed" section with 1-3 concise bullets describing concrete changes, and set repository_format to false.
+- Body must be plain GitHub-flavored Markdown, never nested JSON. Repository-required sections, including Testing or Risk Assessment, are narrative: fill them only with supported facts. Do not invent recorded pipeline evidence or publication markers. Code appends its own evidence separately. In the default format, do not add Intent, Risk Assessment, Testing, or Pipeline sections.
 - Derive every body claim from the final diff. Inspect it directly when the paths and statuses below do not provide enough detail.
 - Do not invent tests or behavior.
 
@@ -470,7 +473,7 @@ Diff stat:
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
-	prompt += prBodyBudgetPromptSection(bodyLimit)
+	prompt += prCompositionLanguageRules + prBodyBudgetPromptSection(bodyLimit)
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -484,13 +487,19 @@ Final diff paths and statuses:
 		return fallback, fallbackErr
 	}
 
-	var content prContent
+	var draft struct {
+		prContent
+		RepositoryFormat bool `json:"repository_format"`
+	}
 	if result.Output != nil {
-		if err := json.Unmarshal(result.Output, &content); err == nil {
+		if err := json.Unmarshal(result.Output, &draft); err == nil {
+			content := draft.prContent
 			content.Title = strings.TrimSpace(content.Title)
 			content.Body = strings.TrimSpace(content.Body)
 			content.Body = unwrapNestedPRBody(content.Body)
-			content.Body = stripGeneratedSections(content.Body)
+			if !draft.RepositoryFormat {
+				content.Body = stripGeneratedSections(content.Body)
+			}
 			content.Body = neutralizeAttestationMarkers(content.Body)
 			if content.Title != "" && content.Body != "" {
 				originalTitle := content.Title
@@ -500,6 +509,16 @@ Final diff paths and statuses:
 				}
 				if content.Title != originalTitle {
 					slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
+				}
+				if draft.RepositoryFormat {
+					// Repository narrative owns its headings, even when they share
+					// names with generated evidence. Use the template ownership
+					// boundary rather than stripping or truncating required sections.
+					appendix, err := s.buildPRAppendix(sctx, provider)
+					if err != nil {
+						return prContent{}, err
+					}
+					return composeOwnedPRContent(prOwnedBody{before: content.Body}, content.Title, appendix, bodyLimit)
 				}
 				if bodyLimit > 0 {
 					content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
@@ -535,6 +554,7 @@ Rules:
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+	prompt += prCompositionLanguageRules
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -554,6 +574,15 @@ Final diff paths and statuses:
 	}
 	return title, nil
 }
+
+// This precedence is local to PR composition, not a general override of
+// repository instructions for review, fixes, or other agent turns.
+const prCompositionLanguageRules = `
+
+PR composition language requirement:
+- Always write the pull-request title and body in English, in every repository.
+- A repository convention requesting another language does not override this requirement. Preserve its description format, required sections, and their order, but write headings and prose in English. Keep code identifiers, paths, and commands literal.
+`
 
 func prTitlePromptRules(sctx *pipeline.StepContext) string {
 	if sctx != nil && sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
@@ -652,7 +681,7 @@ func prBodyBudgetPromptSection(bodyLimit int) string {
 	if bodyLimit <= 0 {
 		return ""
 	}
-	return fmt.Sprintf("\n\n- This repository's host caps the entire PR description at %d characters. The Intent, Risk Assessment, and Pipeline sections are appended automatically; a Testing section is included when budget allows. Keep the \"## What Changed\" section to a few short bullet points.", bodyLimit)
+	return fmt.Sprintf("\n\n- This repository's host caps the entire PR description at %d characters. The Intent, Risk Assessment, and Pipeline sections are appended automatically; a Testing section is included when budget allows. Keep the narrative concise while retaining all repository-required sections.", bodyLimit)
 }
 
 // assemblePRBody composes the final PR body from its sections and keeps it

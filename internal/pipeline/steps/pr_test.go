@@ -1108,7 +1108,7 @@ func TestPRBodyBudgetPromptSection(t *testing.T) {
 		t.Fatalf("prBodyBudgetPromptSection(0) = %q, want empty", got)
 	}
 	got := prBodyBudgetPromptSection(4000)
-	if !strings.Contains(got, "4000 characters") || !strings.Contains(got, "What Changed") {
+	if !strings.Contains(got, "4000 characters") || !strings.Contains(got, "retaining all repository-required sections") {
 		t.Fatalf("prBodyBudgetPromptSection(4000) missing budget guidance: %q", got)
 	}
 }
@@ -1968,6 +1968,60 @@ func TestPRStep_StripsAgentEmittedIntentBeforePrepend(t *testing.T) {
 	}
 	if !strings.Contains(ghLog, "real user intent string") {
 		t.Fatalf("expected deterministic intent text, got:\n%s", ghLog)
+	}
+}
+
+// The agent double checks the composition contract; the real assembly path
+// must preserve the returned repository narrative, including reserved headings.
+func TestPRStep_RepositorySectionsWithConflictingLanguage(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := setupGitRepo(t)
+	rule := "Pull request descriptions must contain ## Summary, ## Testing, and ## Rollback in that order. Write pull request titles and bodies in Portuguese.\n"
+	if err := os.WriteFile(filepath.Join(dir, "CONTRIBUTING.md"), []byte(rule), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "CONTRIBUTING.md")
+	gitCmd(t, dir, "commit", "-m", "define PR description rules")
+	baseSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "branch", "-f", "main", baseSHA)
+	gitCmd(t, dir, "commit", "--allow-empty", "-m", "exercise PR composition")
+	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	env, logFile := fakeGH(t, "")
+	const narrative = "## Summary\n\nPreserve repository PR sections.\n\n## Testing\n\nTargeted composition checks cover section preservation.\n\n## Rollback\n\nRevert the composition change."
+	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		for _, required := range []string{"committed PR description instructions", "git show at the base commit", baseSHA, "Follow their format and required sections", "Always write the pull-request title and body in English", "another language does not override", "repository_format"} {
+			if !strings.Contains(opts.Prompt, required) {
+				t.Fatalf("composition prompt missing %q", required)
+			}
+		}
+		if got := gitCmd(t, opts.CWD, "show", baseSHA+":CONTRIBUTING.md"); got != strings.TrimSpace(rule) {
+			t.Fatalf("committed rule unavailable: %q", got)
+		}
+		payload, err := json.Marshal(map[string]any{"title": "fix: follow repository PR sections", "body": narrative, "repository_format": true})
+		return &agent.Result{Output: payload}, err
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	published := string(data)
+	if !strings.Contains(published, narrative) || !strings.Contains(published, "fix: follow repository PR sections") {
+		t.Fatalf("English repository narrative not preserved at publication:\n%s", published)
+	}
+	if strings.Contains(published, "## What Changed") {
+		t.Fatalf("default format displaced repository format:\n%s", published)
 	}
 }
 
