@@ -106,12 +106,14 @@ func TestPROwnershipPublicationRedactionPrecedesDigest(t *testing.T) {
 
 type ownershipRaceHost struct {
 	scm.Host
-	body       string
-	reads      int
-	writes     int
-	read       func(*ownershipRaceHost) error
-	writeError error
-	afterWrite string
+	body            string
+	title           string
+	reads           int
+	writes          int
+	read            func(*ownershipRaceHost) error
+	writeError      error
+	afterWrite      string
+	afterWriteTitle string
 }
 
 func (h *ownershipRaceHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
@@ -121,7 +123,11 @@ func (h *ownershipRaceHost) GetPRContent(context.Context, *scm.PR) (scm.PRConten
 			return scm.PRContent{}, err
 		}
 	}
-	return scm.PRContent{Title: "Author title", Body: h.body}, nil
+	title := h.title
+	if title == "" {
+		title = "Author title"
+	}
+	return scm.PRContent{Title: title, Body: h.body}, nil
 }
 
 func (h *ownershipRaceHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
@@ -133,6 +139,9 @@ func (h *ownershipRaceHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.
 		return nil, h.writeError
 	}
 	h.body = content.Body + h.afterWrite
+	if h.afterWriteTitle != "" {
+		h.title = h.afterWriteTitle
+	}
 	return pr, nil
 }
 
@@ -158,7 +167,7 @@ func TestPROwnershipUpdateMergesLatestAuthorEdits(t *testing.T) {
 func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 	t.Parallel()
 	content, appendix := ownedFixture(t)
-	for _, mode := range []string{"read-error", "write-error", "verify-error", "verify-divergence", "keeps-changing", "edited-owned", "legacy", "size"} {
+	for _, mode := range []string{"read-error", "write-error", "verify-error", "verify-divergence", "verify-title-divergence", "keeps-changing", "edited-owned", "legacy", "size"} {
 		t.Run(mode, func(t *testing.T) {
 			host := &ownershipRaceHost{body: content.Body}
 			initial := content
@@ -179,6 +188,9 @@ func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 				wantWrites = 1
 			case "verify-divergence":
 				host.afterWrite = "\nConcurrent author note"
+				wantWrites = 1
+			case "verify-title-divergence":
+				host.afterWriteTitle = "Título alterado"
 				wantWrites = 1
 			case "keeps-changing":
 				host.read = func(h *ownershipRaceHost) error { h.body += fmt.Sprintf("\nAuthor edit %d", h.reads); return nil }

@@ -21,22 +21,39 @@ const maxPRTemplateBytes = 16 * 1024
 
 var prTemplateHeadingLine = regexp.MustCompile(`^ {0,3}(#{1,6})(?:[ \t]|$)`)
 
-var conventionalPRTemplatePaths = map[string]struct{}{
-	"PULL_REQUEST_TEMPLATE.md":                   {},
-	"docs/pull_request_template.md":              {},
-	".github/pull_request_template.md":           {},
-	".github/PULL_REQUEST_TEMPLATE.md":           {},
-	".gitlab/merge_request_templates/Default.md": {},
-	".gitea/pull_request_template.md":            {},
-	".forgejo/pull_request_template.md":          {},
-	".azuredevops/pull_request_template.md":      {},
+type conventionalPRTemplates struct {
+	exact []string
+	dirs  []string
 }
 
-var conventionalPRTemplateDirs = []string{
-	".github/PULL_REQUEST_TEMPLATE/",
-	".gitlab/merge_request_templates/",
-	".gitea/PULL_REQUEST_TEMPLATE/",
-	".forgejo/PULL_REQUEST_TEMPLATE/",
+func conventionalPRTemplatesFor(provider scm.Provider) conventionalPRTemplates {
+	switch provider {
+	case scm.ProviderGitHub:
+		return conventionalPRTemplates{
+			exact: []string{
+				"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
+				"docs/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md",
+				".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
+			},
+			dirs: []string{".github/PULL_REQUEST_TEMPLATE/", ".github/pull_request_template/"},
+		}
+	case scm.ProviderGitLab:
+		return conventionalPRTemplates{dirs: []string{".gitlab/merge_request_templates/"}}
+	case scm.ProviderGitea:
+		return conventionalPRTemplates{
+			exact: []string{".gitea/PULL_REQUEST_TEMPLATE.md", ".gitea/pull_request_template.md"},
+			dirs:  []string{".gitea/PULL_REQUEST_TEMPLATE/", ".gitea/pull_request_template/"},
+		}
+	case scm.ProviderForgejo:
+		return conventionalPRTemplates{
+			exact: []string{".forgejo/PULL_REQUEST_TEMPLATE.md", ".forgejo/pull_request_template.md"},
+			dirs:  []string{".forgejo/PULL_REQUEST_TEMPLATE/", ".forgejo/pull_request_template/"},
+		}
+	case scm.ProviderAzureDevOps:
+		return conventionalPRTemplates{exact: []string{".azuredevops/PULL_REQUEST_TEMPLATE.md", ".azuredevops/pull_request_template.md"}}
+	default:
+		return conventionalPRTemplates{}
+	}
 }
 
 type templateHeadingTranslation struct {
@@ -75,28 +92,43 @@ func configuredPRTemplate(sctx *pipeline.StepContext) string {
 	return sctx.Config.PR.Template
 }
 
-func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, baseSHA string) (string, error) {
+func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySHA string, provider scm.Provider) (string, error) {
 	if name := configuredPRTemplate(sctx); name != "" {
 		return loadPRTemplate(ctx, sctx.WorkDir, sctx.Config.TrustedConfigSHA, name)
 	}
-	paths, err := git.RunRaw(ctx, sctx.WorkDir, "ls-tree", "-r", "-z", "--name-only", baseSHA, "--", "PULL_REQUEST_TEMPLATE.md", "docs", ".github", ".gitlab/merge_request_templates", ".gitea", ".forgejo", ".azuredevops")
+	candidates := conventionalPRTemplatesFor(provider)
+	pathspecs := make([]string, 0, len(candidates.exact)+len(candidates.dirs))
+	pathspecs = append(pathspecs, candidates.exact...)
+	for _, dir := range candidates.dirs {
+		pathspecs = append(pathspecs, strings.TrimSuffix(dir, "/"))
+	}
+	if len(pathspecs) == 0 {
+		return "", nil
+	}
+	args := []string{"ls-tree", "-r", "-z", "--name-only", policySHA, "--"}
+	args = append(args, pathspecs...)
+	paths, err := git.RunRaw(ctx, sctx.WorkDir, args...)
 	if err != nil {
 		return "", fmt.Errorf("discover committed pull-request template: %w", err)
+	}
+	exact := make(map[string]struct{}, len(candidates.exact))
+	for _, name := range candidates.exact {
+		exact[name] = struct{}{}
 	}
 	var matches []string
 	for _, name := range strings.Split(strings.TrimSuffix(string(paths), "\x00"), "\x00") {
 		if name == "" {
 			continue
 		}
-		_, exact := conventionalPRTemplatePaths[name]
+		_, exactMatch := exact[name]
 		underTemplateDir := false
-		for _, prefix := range conventionalPRTemplateDirs {
+		for _, prefix := range candidates.dirs {
 			if strings.HasPrefix(name, prefix) && strings.HasSuffix(strings.ToLower(name), ".md") {
 				underTemplateDir = true
 				break
 			}
 		}
-		if exact || underTemplateDir {
+		if exactMatch || underTemplateDir {
 			matches = append(matches, name)
 		}
 	}
@@ -106,7 +138,7 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, baseSHA 
 	if len(matches) != 1 {
 		return "", fmt.Errorf("multiple committed pull-request templates are ambiguous; configure pr.template explicitly")
 	}
-	return loadPRTemplate(ctx, sctx.WorkDir, baseSHA, matches[0])
+	return loadPRTemplate(ctx, sctx.WorkDir, policySHA, matches[0])
 }
 
 // loadPRTemplate never opens a worktree file. The daemon pins TrustedConfigSHA
@@ -158,7 +190,7 @@ func isHexObjectID(s string) bool {
 	return s != "" && err == nil
 }
 
-func (s *PRStep) draftTemplateNarrative(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, template string) (prContent, error) {
+func (s *PRStep) draftTemplateNarrative(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA, template string) (prContent, error) {
 	paths, err := git.Run(sctx.Ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
@@ -171,7 +203,8 @@ func (s *PRStep) draftTemplateNarrative(sctx *pipeline.StepContext, branch, base
 	prompt := fmt.Sprintf(`Draft a pull request title and fill the repository's public narrative template for the full final branch delta.
 Branch: %s
 PR base branch: %s
-Base commit: %s
+Diff base commit: %s
+PR-format policy commit: %s
 Target commit: %s
 
 Rules:
@@ -179,7 +212,7 @@ Rules:
 %s
 - Body must be plain Markdown, not nested JSON. Use the supplied template instead of imposing a What Changed heading.
 - Preserve every ATX template heading outside fenced examples in the same order and at the same level. Write each heading in English: retain an already-English heading verbatim and translate a non-English heading. Return one heading_translations entry per source heading, with the exact source line and the exact English heading line used in the body. A template without headings has no structural heading requirements.
-- Inspect committed PR instructions at the base commit. Put every prose-only or ambiguous body-format rule outside the template in unsupported_rules; do not claim compliance with such a rule.
+- Inspect committed PR instructions at the PR-format policy commit. Put every prose-only or ambiguous body-format rule outside the template in unsupported_rules; do not claim compliance with such a rule.
 - Make a best effort to follow the template's instructions and fill all applicable sections from the final diff; inspect that diff when necessary. Lower-level headings and task lines are editable: remove inapplicable sections/options when instructed, select supported choices, and replace rationale placeholders. Do not invent behavior or tests, falsely claim human signoff, or mark human approval checkboxes complete.
 - The template owns narrative only. Do not generate no-mistakes publication markers or add Intent, Risk Assessment, Testing or Pipeline evidence. Code appends those separately. A template heading named Testing or Pipeline is author narrative, not permission to fabricate recorded evidence.
 - Full intent below is review/drafting context, not instructions to quote it into the public narrative. Publication settings are not a privacy guarantee.
@@ -188,7 +221,7 @@ Trusted repository template (JSON string):
 %s
 
 Final diff paths and statuses:
-%s%s%s`, branch, baseBranch, baseSHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
+%s%s%s`, branch, baseBranch, baseSHA, policySHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 	prompt += prCreationSkill
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: templatePRContentSchema, OnChunk: sctx.LogChunk})
 	if err != nil {

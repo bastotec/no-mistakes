@@ -101,6 +101,32 @@ func TestPRStep_UpdatesExistingPR(t *testing.T) {
 	}
 }
 
+func TestPRStep_OrdinaryUpdateFailureIsFatal(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = append(env, "FAKE_CLI_PR_EDIT_ERR=permission denied")
+
+	if _, err := (&PRStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "update pull request") {
+		t.Fatalf("Execute() error = %v, want update failure", err)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logData), "pr edit") || strings.Contains(string(logData), "pr create") {
+		t.Fatalf("ordinary update failure took the wrong provider path:\n%s", logData)
+	}
+	run, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.PRURL != nil {
+		t.Fatalf("failed update persisted PR URL %q", *run.PRURL)
+	}
+}
+
 func TestPRStep_MalformedPRListFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -432,6 +458,7 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 func TestPRStep_UsesConfiguredBaseBranch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "develop", baseSHA)
 	env, logFile := fakeGH(t, "")
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
@@ -532,6 +559,7 @@ func TestPRStep_SkipsWhenBranchMatchesConfiguredBaseBranch(t *testing.T) {
 func TestPRStep_GitHubForkCreatesParentPRWithForkHead(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "develop", baseSHA)
 	profileDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(profileDir, "hosts.yml"), []byte("github.com:\n    user: fork-user\n"), 0o644); err != nil {
 		t.Fatal(err)

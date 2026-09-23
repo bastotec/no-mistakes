@@ -175,11 +175,13 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			current = latest
 			continue
 		}
+		expectedTitle := content.Title
+		if expectedTitle == "" {
+			expectedTitle = current.Title
+		}
 		if validate != nil {
 			candidate := content
-			if candidate.Title == "" {
-				candidate.Title = current.Title
-			}
+			candidate.Title = expectedTitle
 			if err := validate(candidate); err != nil {
 				return err
 			}
@@ -193,8 +195,8 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return fmt.Errorf("verify templated PR update: %w", err)
 		}
-		if verified.Body != content.Body {
-			return fmt.Errorf("PR body changed or update did not settle; refusing to report successful publication")
+		if verified.Body != content.Body || verified.Title != expectedTitle {
+			return fmt.Errorf("PR title or body changed or update did not settle; refusing to report successful publication")
 		}
 		return nil
 	}

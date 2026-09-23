@@ -14,7 +14,7 @@ const prContentValidationPurpose = "pr-content-validation"
 
 const prCreationSkill = `
 Shared pull-request creation skill:
-- Inspect only the committed base revision for repository pull-request rules.
+- Inspect only the pinned PR-format policy revision named in the task for repository pull-request rules.
 - A committed Markdown pull-request template is the only mechanically enforceable custom body format. Preserve every ATX heading level and order, translating heading text to English when necessary.
 - Report prose-only or ambiguous body-format rules as unsupported instead of claiming compliance. Never replace them with the default format.
 - Write all natural-language title and body text in English. Paths, URLs, commands, code, identifiers, product names, and repository issue keys remain literal.
@@ -82,7 +82,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content prCo
 	prompt := fmt.Sprintf(`Validate the exact final pull-request title and body below before publication.
 %s
 The SHA-256 binds your verdict to the exact title and body. Return it unchanged.
-- committed_base_sha: %s
+- pr_format_policy_sha: %s
 - mechanical_default_format: %t
 - content_sha256: %s
 - english is true only when every natural-language passage is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, and machine metadata.
