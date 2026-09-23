@@ -2069,7 +2069,7 @@ func TestPRStep_ProseOnlyRepositoryFormatFailsClosed(t *testing.T) {
 	headSHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	env, logFile := fakeGH(t, "")
 	ag := &mockAgent{name: "test", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		for _, required := range []string{"committed base revision", "prose-only or ambiguous", "unsupported_rules", baseSHA} {
+		for _, required := range []string{"PR-format policy revision", "prose-only or ambiguous", "unsupported_rules", baseSHA} {
 			if !strings.Contains(opts.Prompt, required) {
 				t.Fatalf("composition prompt missing %q", required)
 			}

@@ -21,43 +21,32 @@ const maxPRTemplateBytes = 16 * 1024
 
 var prTemplateHeadingLine = regexp.MustCompile(`^ {0,3}(#{1,6})(?:[ \t]|$)`)
 
-type conventionalPRTemplates struct {
-	exact []string
-	dirs  []string
-}
-
-func conventionalPRTemplatesFor(provider scm.Provider) conventionalPRTemplates {
+func conventionalPRTemplatesFor(provider scm.Provider) []string {
 	switch provider {
 	case scm.ProviderGitHub:
-		return conventionalPRTemplates{
-			exact: []string{
-				"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
-				"docs/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md",
-				".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
-			},
-			dirs: []string{".github/PULL_REQUEST_TEMPLATE/", ".github/pull_request_template/"},
+		return []string{
+			"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
+			"docs/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md",
+			".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
 		}
 	case scm.ProviderGitLab:
-		return conventionalPRTemplates{dirs: []string{".gitlab/merge_request_templates/"}}
+		return []string{".gitlab/merge_request_templates/Default.md"}
 	case scm.ProviderGitea:
-		return conventionalPRTemplates{
-			exact: []string{".gitea/PULL_REQUEST_TEMPLATE.md", ".gitea/pull_request_template.md"},
-			dirs:  []string{".gitea/PULL_REQUEST_TEMPLATE/", ".gitea/pull_request_template/"},
+		return []string{
+			"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
+			".gitea/PULL_REQUEST_TEMPLATE.md", ".gitea/pull_request_template.md",
 		}
 	case scm.ProviderForgejo:
-		return conventionalPRTemplates{
-			exact: []string{".forgejo/PULL_REQUEST_TEMPLATE.md", ".forgejo/pull_request_template.md"},
-			dirs:  []string{".forgejo/PULL_REQUEST_TEMPLATE/", ".forgejo/pull_request_template/"},
-		}
+		return []string{".forgejo/PULL_REQUEST_TEMPLATE.md", ".forgejo/pull_request_template.md"}
 	case scm.ProviderAzureDevOps:
-		return conventionalPRTemplates{exact: []string{
+		return []string{
 			"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
 			"docs/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md",
 			".azuredevops/PULL_REQUEST_TEMPLATE.md", ".azuredevops/pull_request_template.md",
 			".vsts/PULL_REQUEST_TEMPLATE.md", ".vsts/pull_request_template.md",
-		}}
+		}
 	default:
-		return conventionalPRTemplates{}
+		return nil
 	}
 }
 
@@ -102,22 +91,17 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySH
 		return loadPRTemplate(ctx, sctx.WorkDir, sctx.Config.TrustedConfigSHA, name)
 	}
 	candidates := conventionalPRTemplatesFor(provider)
-	pathspecs := make([]string, 0, len(candidates.exact)+len(candidates.dirs))
-	pathspecs = append(pathspecs, candidates.exact...)
-	for _, dir := range candidates.dirs {
-		pathspecs = append(pathspecs, strings.TrimSuffix(dir, "/"))
-	}
-	if len(pathspecs) == 0 {
+	if len(candidates) == 0 {
 		return "", nil
 	}
 	args := []string{"ls-tree", "-r", "-z", "--name-only", policySHA, "--"}
-	args = append(args, pathspecs...)
+	args = append(args, candidates...)
 	paths, err := git.RunRaw(ctx, sctx.WorkDir, args...)
 	if err != nil {
 		return "", fmt.Errorf("discover committed pull-request template: %w", err)
 	}
-	exact := make(map[string]struct{}, len(candidates.exact))
-	for _, name := range candidates.exact {
+	exact := make(map[string]struct{}, len(candidates))
+	for _, name := range candidates {
 		exact[name] = struct{}{}
 	}
 	var matches []string
@@ -125,15 +109,7 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySH
 		if name == "" {
 			continue
 		}
-		_, exactMatch := exact[name]
-		underTemplateDir := false
-		for _, prefix := range candidates.dirs {
-			if strings.HasPrefix(name, prefix) && strings.HasSuffix(strings.ToLower(name), ".md") {
-				underTemplateDir = true
-				break
-			}
-		}
-		if exactMatch || underTemplateDir {
+		if _, ok := exact[name]; ok {
 			matches = append(matches, name)
 		}
 	}
