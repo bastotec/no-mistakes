@@ -482,55 +482,51 @@ Final diff paths and statuses:
 		OnChunk:    sctx.LogChunk,
 	})
 	if err != nil {
-		slog.Warn("agent failed for PR content, using fallback", "error", err)
-		fallback, fallbackErr := fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
-		return fallback, fallbackErr
+		return prContent{}, fmt.Errorf("draft PR content without a generic fallback: %w", err)
+	}
+	if result == nil || result.Output == nil {
+		return prContent{}, fmt.Errorf("agent returned no PR content; refusing generic fallback")
 	}
 
 	var draft struct {
 		prContent
 		RepositoryFormat bool `json:"repository_format"`
 	}
-	if result.Output != nil {
-		if err := json.Unmarshal(result.Output, &draft); err == nil {
-			content := draft.prContent
-			content.Title = strings.TrimSpace(content.Title)
-			content.Body = strings.TrimSpace(content.Body)
-			content.Body = unwrapNestedPRBody(content.Body)
-			if !draft.RepositoryFormat {
-				content.Body = stripGeneratedSections(content.Body)
-			}
-			content.Body = neutralizeAttestationMarkers(content.Body)
-			if content.Title != "" && content.Body != "" {
-				originalTitle := content.Title
-				content.Title, err = renderPRTitle(sctx, content.Title)
-				if err != nil {
-					return prContent{}, err
-				}
-				if content.Title != originalTitle {
-					slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
-				}
-				if draft.RepositoryFormat {
-					// Repository narrative owns its headings, even when they share
-					// names with generated evidence. Use the template ownership
-					// boundary rather than stripping or truncating required sections.
-					appendix, err := s.buildPRAppendix(sctx, provider)
-					if err != nil {
-						return prContent{}, err
-					}
-					return composeOwnedPRContent(prOwnedBody{before: content.Body}, content.Title, appendix, bodyLimit)
-				}
-				if bodyLimit > 0 {
-					content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
-				} else {
-					content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
-				}
-				return content, nil
-			}
-		}
+	if err := json.Unmarshal(result.Output, &draft); err != nil {
+		return prContent{}, fmt.Errorf("decode PR content: %w", err)
 	}
-
-	return fallbackPRContent(sctx, finalDiff, riskLine, testingMD, pipelineMD, bodyLimit)
+	content := draft.prContent
+	content.Title = strings.TrimSpace(content.Title)
+	content.Body = strings.TrimSpace(content.Body)
+	content.Body = unwrapNestedPRBody(content.Body)
+	if !draft.RepositoryFormat {
+		content.Body = stripGeneratedSections(content.Body)
+	}
+	content.Body = neutralizeAttestationMarkers(content.Body)
+	if content.Title == "" || content.Body == "" {
+		return prContent{}, fmt.Errorf("agent returned incomplete PR content; refusing generic fallback")
+	}
+	originalTitle := content.Title
+	content.Title, err = renderPRTitle(sctx, content.Title)
+	if err != nil {
+		return prContent{}, err
+	}
+	if content.Title != originalTitle {
+		slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
+	}
+	if draft.RepositoryFormat {
+		appendix, err := s.buildPRAppendix(sctx, provider)
+		if err != nil {
+			return prContent{}, err
+		}
+		return composeOwnedPRContent(prOwnedBody{before: content.Body}, content.Title, appendix, bodyLimit)
+	}
+	if bodyLimit > 0 {
+		content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
+	} else {
+		content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
+	}
+	return content, nil
 }
 
 func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string) (string, error) {
@@ -601,6 +597,9 @@ func prTitleScopeRules(sctx *pipeline.StepContext) string {
 func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
 	if sctx == nil || sctx.Config == nil || sctx.Config.PR.TitleFormat == "" {
 		return conventional.TightenTitle(title), nil
+	}
+	if err := sctx.Config.PR.ValidateEnglishTitleFormat(); err != nil {
+		return "", err
 	}
 	branch := strings.TrimSpace(strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"))
 	if sctx.Config.PR.RequiresBranch() {
@@ -1530,26 +1529,4 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 		return section
 	}
 	return section + "\n\n" + body
-}
-
-func fallbackPRContent(sctx *pipeline.StepContext, finalDiff, riskLine, testingMD, pipelineMD string, bodyLimit int) (prContent, error) {
-	title, err := renderPRTitle(sctx, "update pull request")
-	if err != nil {
-		return prContent{}, err
-	}
-	diffSummary := strings.TrimSpace(finalDiff)
-	body := "## What Changed\n\nFinal changed paths and statuses:\n\n```text\n" + escapeMarkdownFence(diffSummary) + "\n```"
-	if diffSummary == "" {
-		body = "## What Changed\n\nFinal diff unavailable; no complete scope summary was generated."
-	}
-	body = neutralizeAttestationMarkers(body)
-	if bodyLimit > 0 {
-		body = assemblePRBody(sctx, body, riskLine, testingMD, pipelineMD, bodyLimit)
-	} else {
-		body = buildPRBody(body, riskLine, testingMD, pipelineMD, sctx)
-	}
-	return prContent{
-		Title: title,
-		Body:  body,
-	}, nil
 }
