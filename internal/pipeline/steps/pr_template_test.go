@@ -32,6 +32,7 @@ func templateDraft(title, body, template string) templatePRContent {
 	return templatePRContent{
 		prContent:           prContent{Title: title, Body: body},
 		HeadingTranslations: identityHeadingTranslations(template),
+		UnsupportedRules:    []string{},
 	}
 }
 
@@ -167,6 +168,56 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	}
 }
 
+func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
+	t.Parallel()
+	dir, _, _ := setupGitRepo(t)
+	name := ".github/pull_request_template.md"
+	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n\n## Rollback\n\nDescribe rollback.\n"
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", name)
+	gitCmd(t, dir, "commit", "-m", "add PR template")
+	base := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "branch", "-f", "main", base)
+	gitCmd(t, dir, "commit", "--allow-empty", "-m", "change")
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	body := "## Summary\n\nUpdate PR composition.\n\n## Testing\n\nTargeted checks passed.\n\n## Rollback\n\nRevert the change."
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if string(opts.JSONSchema) != string(templatePRContentSchema) {
+			t.Fatalf("committed template did not select template drafting: %s", opts.JSONSchema)
+		}
+		data, _ := json.Marshal(templateDraft("fix: follow committed template", body, template))
+		return &agent.Result{Output: data}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := parsePROwnedBody(content.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(parts.before) != body {
+		t.Fatalf("committed template narrative changed:\n%s", parts.before)
+	}
+	if strings.Contains(parts.appendix, "## ") || strings.Count(parts.appendix, pipelineAttestationCommentPrefix) != 1 {
+		t.Fatalf("generated appendix changed the repository heading contract:\n%s", parts.appendix)
+	}
+}
+
 func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
@@ -216,6 +267,39 @@ func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
 	}
 	if content.Body != body {
 		t.Fatalf("translated body = %q, want %q", content.Body, body)
+	}
+}
+
+func TestPRTemplateRejectsNonEnglishHeadingTranslation(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	body := "# Resumen\n\nDescribe the change.\n\n## Pruebas\n\nTargeted checks passed."
+	ag.runFn = func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		content := templatePRContent{
+			prContent: prContent{Title: "fix: describe the change", Body: body},
+			HeadingTranslations: []templateHeadingTranslation{
+				{Source: "# Overview", English: "# Resumen"},
+				{Source: "## Testing", English: "## Pruebas"},
+			},
+			UnsupportedRules: []string{},
+		}
+		data, _ := json.Marshal(content)
+		return &agent.Result{Output: data}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: false, FormatCompliant: true,
+			Issues: []string{"template headings are Spanish, not English"},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0); err == nil || !strings.Contains(err.Error(), "Spanish") {
+		t.Fatalf("buildPRContent() error = %v, want non-English heading refusal", err)
 	}
 }
 
@@ -354,7 +438,7 @@ func TestPRTemplateStructureAllowsTaskEdits(t *testing.T) {
 	for _, line := range []string{"- [ ]", "*\t[ ] Approval", "+   [x] Approval", "1. [ ] Approval", "2) [X] Approval"} {
 		template := "## Overview\n\n" + line + "\n"
 		body := "## Overview\n\nFilled narrative.\n\n" + line + "\n"
-		if err := validateTranslatedTemplateStructure(template, body, nil); err != nil {
+		if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
 			t.Errorf("unchanged checklist %q rejected: %v", line, err)
 		}
 		changed := strings.ReplaceAll(body, "[ ]", "[x]")
@@ -364,8 +448,8 @@ func TestPRTemplateStructureAllowsTaskEdits(t *testing.T) {
 		if err := validateTranslatedTemplateStructure(template, changed, identityHeadingTranslations(template)); err != nil {
 			t.Errorf("changed checklist state %q rejected: %v", line, err)
 		}
-		if err := validateTranslatedTemplateStructure(template, "Filled narrative.", nil); err != nil {
-			t.Errorf("omitted checklist/subheading %q rejected: %v", line, err)
+		if err := validateTranslatedTemplateStructure(template, "Filled narrative.", identityHeadingTranslations(template)); err == nil {
+			t.Errorf("omitted required subheading %q accepted", line)
 		}
 	}
 }
@@ -438,7 +522,7 @@ func TestPRTemplateIncompleteGitHubReadsNeverOverwriteAuthor(t *testing.T) {
 						t.Fatal(reason)
 					}
 					_, appendix := ownedFixture(t)
-					err = updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent{Title: "Author title", Body: author}, "", "", appendix, 0)
+					err = updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent{Title: "Author title", Body: author}, "", "", appendix, 0, nil)
 				}
 				if err == nil {
 					t.Fatal("incomplete read permitted publication")

@@ -158,31 +158,6 @@ func (p PR) RequiresBranch() bool {
 	return err == nil && prTitleTemplateUsesBranch(tmpl)
 }
 
-// ValidateEnglishTitleFormat reports whether configured literal text can be
-// used without adding formatter-owned words to an English drafted title.
-func (p PR) ValidateEnglishTitleFormat() error {
-	if p.TitleFormat == "" {
-		return nil
-	}
-	tmpl, err := template.New("pr.title_format").Option("missingkey=error").Parse(p.TitleFormat)
-	if err != nil {
-		return fmt.Errorf("parse pr.title_format template: %w", err)
-	}
-	if err := validatePRTitleTemplate(tmpl); err != nil {
-		return err
-	}
-	for _, node := range tmpl.Tree.Root.Nodes {
-		text, ok := node.(*parse.TextNode)
-		if !ok {
-			continue
-		}
-		if strings.IndexFunc(string(text.Text), unicode.IsLetter) >= 0 {
-			return fmt.Errorf("pr.title_format literal words cannot be proven English; use placeholders with punctuation only")
-		}
-	}
-	return nil
-}
-
 // RenderTitle applies the configured repository PR title format. An empty
 // format leaves the caller's title unchanged, preserving conventional-title
 // behavior for repositories that configure nothing.

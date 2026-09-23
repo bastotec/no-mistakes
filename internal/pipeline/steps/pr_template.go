@@ -19,7 +19,25 @@ import (
 
 const maxPRTemplateBytes = 16 * 1024
 
-var prTemplateH1Line = regexp.MustCompile(`^ {0,3}#(?:[ \t]|$)`)
+var prTemplateHeadingLine = regexp.MustCompile(`^ {0,3}(#{1,6})(?:[ \t]|$)`)
+
+var conventionalPRTemplatePaths = map[string]struct{}{
+	"PULL_REQUEST_TEMPLATE.md":                   {},
+	"docs/pull_request_template.md":              {},
+	".github/pull_request_template.md":           {},
+	".github/PULL_REQUEST_TEMPLATE.md":           {},
+	".gitlab/merge_request_templates/Default.md": {},
+	".gitea/pull_request_template.md":            {},
+	".forgejo/pull_request_template.md":          {},
+	".azuredevops/pull_request_template.md":      {},
+}
+
+var conventionalPRTemplateDirs = []string{
+	".github/PULL_REQUEST_TEMPLATE/",
+	".gitlab/merge_request_templates/",
+	".gitea/PULL_REQUEST_TEMPLATE/",
+	".forgejo/PULL_REQUEST_TEMPLATE/",
+}
 
 type templateHeadingTranslation struct {
 	Source  string `json:"source"`
@@ -29,14 +47,16 @@ type templateHeadingTranslation struct {
 type templatePRContent struct {
 	prContent
 	HeadingTranslations []templateHeadingTranslation `json:"heading_translations"`
+	UnsupportedRules    []string                     `json:"unsupported_rules"`
 }
 
 var templatePRContentSchema = json.RawMessage(`{
  "type":"object", "properties":{
  "title":{"type":"string","description":"Concise English pull request title text"},
- "body":{"type":"string","description":"Filled repository template as plain English Markdown; preserve its top-level ATX # heading structure and use the declared English headings"},
- "heading_translations":{"type":"array","description":"One entry for every top-level ATX # template heading, in source order; retain an already-English heading verbatim and translate a non-English heading to English","items":{"type":"object","properties":{"source":{"type":"string"},"english":{"type":"string"}},"required":["source","english"]}}
- }, "required":["title","body","heading_translations"]
+ "body":{"type":"string","description":"Filled repository template as plain English Markdown; preserve every ATX heading level and order and use the declared English headings"},
+ "heading_translations":{"type":"array","description":"One entry for every ATX template heading, in source order; retain an already-English heading verbatim and translate a non-English heading to English","items":{"type":"object","properties":{"source":{"type":"string"},"english":{"type":"string"}},"required":["source","english"]}},
+ "unsupported_rules":{"type":"array","description":"Committed prose-only or ambiguous PR description rules outside the template that cannot be mechanically enforced","items":{"type":"string"}}
+ }, "required":["title","body","heading_translations","unsupported_rules"]
 }`)
 
 func supportsPRTemplates(provider scm.Provider) bool {
@@ -53,6 +73,40 @@ func configuredPRTemplate(sctx *pipeline.StepContext) string {
 		return ""
 	}
 	return sctx.Config.PR.Template
+}
+
+func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, baseSHA string) (string, error) {
+	if name := configuredPRTemplate(sctx); name != "" {
+		return loadPRTemplate(ctx, sctx.WorkDir, sctx.Config.TrustedConfigSHA, name)
+	}
+	paths, err := git.RunRaw(ctx, sctx.WorkDir, "ls-tree", "-r", "-z", "--name-only", baseSHA, "--", "PULL_REQUEST_TEMPLATE.md", "docs", ".github", ".gitlab/merge_request_templates", ".gitea", ".forgejo", ".azuredevops")
+	if err != nil {
+		return "", fmt.Errorf("discover committed pull-request template: %w", err)
+	}
+	var matches []string
+	for _, name := range strings.Split(strings.TrimSuffix(string(paths), "\x00"), "\x00") {
+		if name == "" {
+			continue
+		}
+		_, exact := conventionalPRTemplatePaths[name]
+		underTemplateDir := false
+		for _, prefix := range conventionalPRTemplateDirs {
+			if strings.HasPrefix(name, prefix) && strings.HasSuffix(strings.ToLower(name), ".md") {
+				underTemplateDir = true
+				break
+			}
+		}
+		if exact || underTemplateDir {
+			matches = append(matches, name)
+		}
+	}
+	if len(matches) == 0 {
+		return "", nil
+	}
+	if len(matches) != 1 {
+		return "", fmt.Errorf("multiple committed pull-request templates are ambiguous; configure pr.template explicitly")
+	}
+	return loadPRTemplate(ctx, sctx.WorkDir, baseSHA, matches[0])
 }
 
 // loadPRTemplate never opens a worktree file. The daemon pins TrustedConfigSHA
@@ -124,7 +178,8 @@ Rules:
 %s
 %s
 - Body must be plain Markdown, not nested JSON. Use the supplied template instead of imposing a What Changed heading.
-- Preserve every top-level ATX # template heading outside fenced examples in the same order and at the same level. Write each heading in English: retain an already-English heading verbatim and translate a non-English heading. Return one heading_translations entry per source heading, with the exact source line and the exact English heading line used in the body. Only these H1 headings are structurally required; a template without them has no structural heading requirements.
+- Preserve every ATX template heading outside fenced examples in the same order and at the same level. Write each heading in English: retain an already-English heading verbatim and translate a non-English heading. Return one heading_translations entry per source heading, with the exact source line and the exact English heading line used in the body. A template without headings has no structural heading requirements.
+- Inspect committed PR instructions at the base commit. Put every prose-only or ambiguous body-format rule outside the template in unsupported_rules; do not claim compliance with such a rule.
 - Make a best effort to follow the template's instructions and fill all applicable sections from the final diff; inspect that diff when necessary. Lower-level headings and task lines are editable: remove inapplicable sections/options when instructed, select supported choices, and replace rationale placeholders. Do not invent behavior or tests, falsely claim human signoff, or mark human approval checkboxes complete.
 - The template owns narrative only. Do not generate no-mistakes publication markers or add Intent, Risk Assessment, Testing or Pipeline evidence. Code appends those separately. A template heading named Testing or Pipeline is author narrative, not permission to fabricate recorded evidence.
 - Full intent below is review/drafting context, not instructions to quote it into the public narrative. Publication settings are not a privacy guarantee.
@@ -134,14 +189,24 @@ Trusted repository template (JSON string):
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseBranch, baseSHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCompositionLanguageRules
+	prompt += prCreationSkill
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: templatePRContentSchema, OnChunk: sctx.LogChunk})
 	if err != nil {
 		return prContent{}, fmt.Errorf("draft pr.template narrative (template will not be replaced by a generic fallback): %w", err)
 	}
-	var content templatePRContent
-	if result == nil || json.Unmarshal(result.Output, &content) != nil || strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
+	var rawContent map[string]json.RawMessage
+	if result == nil || json.Unmarshal(result.Output, &rawContent) != nil {
 		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
+	}
+	if _, ok := rawContent["unsupported_rules"]; !ok {
+		return prContent{}, fmt.Errorf("agent omitted unsupported PR rule declarations")
+	}
+	var content templatePRContent
+	if json.Unmarshal(result.Output, &content) != nil || strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
+		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
+	}
+	if len(content.UnsupportedRules) != 0 {
+		return prContent{}, fmt.Errorf("committed prose-only PR rules are not mechanically supported: %s", strings.Join(content.UnsupportedRules, "; "))
 	}
 	content.Title, err = renderPRTitle(sctx, strings.TrimSpace(content.Title))
 	if err != nil {
@@ -157,39 +222,53 @@ Final diff paths and statuses:
 }
 
 // This is a structural guard, not a Markdown/template interpreter. It binds
-// every declared English H1 to the corresponding source H1 and body order.
-// Subordinate completion is best effort, not an enforced policy. No H1s means
-// no structural requirements. Existing published narrative never goes through
-// this check again.
+// every declared English heading to the corresponding source heading and body
+// order. Existing published narrative is checked by validateTemplateHeadingShape.
 func validateTranslatedTemplateStructure(template, body string, translations []templateHeadingTranslation) error {
 	sources := templateStructureLines(template)
+	bodyHeadings := templateStructureLines(body)
 	if len(translations) != len(sources) {
-		return fmt.Errorf("agent did not declare one English translation for every pr.template top-level # heading; refusing publication")
+		return fmt.Errorf("agent did not declare one English translation for every pr.template heading; refusing publication")
 	}
-	rest := templateStructureLines(body)
+	if len(bodyHeadings) != len(sources) {
+		return fmt.Errorf("agent added or omitted a pr.template heading; refusing publication")
+	}
 	for i, source := range sources {
 		translation := translations[i]
 		if translation.Source != source {
 			return fmt.Errorf("agent changed or reordered a pr.template source heading; refusing publication")
 		}
 		translatedLines := templateStructureLines(translation.English)
-		if len(translatedLines) != 1 || translatedLines[0] != translation.English {
+		if len(translatedLines) != 1 || translatedLines[0] != translation.English || headingLevel(source) != headingLevel(translation.English) {
 			return fmt.Errorf("agent returned an invalid English pr.template heading; refusing publication")
 		}
-		found := false
-		for len(rest) > 0 {
-			candidate := rest[0]
-			rest = rest[1:]
-			if candidate == translation.English {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("agent omitted or reordered a translated pr.template top-level # heading; refusing publication")
+		if bodyHeadings[i] != translation.English {
+			return fmt.Errorf("agent omitted or reordered a translated pr.template heading; refusing publication")
 		}
 	}
 	return nil
+}
+
+func validateTemplateHeadingShape(template, body string) error {
+	sources := templateStructureLines(template)
+	bodyHeadings := templateStructureLines(body)
+	if len(bodyHeadings) != len(sources) {
+		return fmt.Errorf("final PR body does not preserve every committed template heading")
+	}
+	for i := range sources {
+		if headingLevel(sources[i]) != headingLevel(bodyHeadings[i]) {
+			return fmt.Errorf("final PR body changed committed template heading levels or order")
+		}
+	}
+	return nil
+}
+
+func headingLevel(line string) int {
+	match := prTemplateHeadingLine.FindStringSubmatch(line)
+	if len(match) != 2 {
+		return 0
+	}
+	return len(match[1])
 }
 
 func templateStructureLines(text string) []string {
@@ -202,9 +281,9 @@ func templateStructureLines(text string) []string {
 			continue
 		}
 		line := strings.TrimSpace(raw)
-		// Match the raw indentation: four spaces/tabs are code, not H1s.
+		// Match the raw indentation: four spaces/tabs are code, not headings.
 		// Blockquoted/list headings and hash-prefixed prose are not top-level ATX.
-		if prTemplateH1Line.MatchString(raw) {
+		if prTemplateHeadingLine.MatchString(raw) {
 			lines = append(lines, line)
 		}
 	}
@@ -212,20 +291,21 @@ func templateStructureLines(text string) []string {
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
-	pipelineMD, risk, testing := s.buildPipelineSectionFor(sctx, provider, true)
+	pipelineMD, _, _ := s.buildPipelineSections(sctx, provider, true, false)
+	start := strings.Index(pipelineMD, pipelineAttestationCommentPrefix)
+	if start < 0 {
+		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline attestation")
+	}
+	end := strings.Index(pipelineMD[start:], pipelineAttestationCommentClosingToken)
+	if end < 0 {
+		return "", fmt.Errorf("cannot publish malformed pipeline attestation")
+	}
+	attestation := pipelineMD[start : start+end+len(pipelineAttestationCommentClosingToken)]
 	if strings.Count(pipelineMD, pipelineAttestationCommentPrefix) != 1 {
-		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline evidence and attestation")
+		return "", fmt.Errorf("cannot publish ambiguous pipeline attestation")
 	}
-	parts := []string{}
-	if intent := publicPRIntent(sctx); intent != "" {
-		parts = append(parts, "## Intent\n\n"+neutralizeAttestationMarkers(intent))
+	if provider == scm.ProviderBitbucket {
+		return "```text\n" + attestation + "\n```", nil
 	}
-	if risk != "" {
-		parts = append(parts, "## Risk Assessment\n\n"+neutralizeAttestationMarkers(risk))
-	}
-	if testing != "" {
-		parts = append(parts, neutralizeAttestationMarkers(testing))
-	}
-	parts = append(parts, pipelineMD)
-	return strings.Join(parts, "\n\n"), nil
+	return attestation, nil
 }
