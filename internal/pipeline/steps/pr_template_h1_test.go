@@ -14,11 +14,12 @@ func TestPRTemplateStructureRequiresHeadingLevelsAndOrder(t *testing.T) {
 	t.Parallel()
 	template := "# Summary\n## Details\n# Validation\n"
 	for name, body := range map[string]string{
-		"missing":   "# Summary\nDetails",
-		"changed":   "# Summary\n# Tests",
-		"reordered": "# Validation\n# Summary",
-		"demoted":   "## Summary\n# Validation",
-		"fenced":    "```markdown\n# Summary\n# Validation\n```",
+		"missing":          "# Summary\nDetails",
+		"changed":          "# Summary\n# Tests",
+		"wrong identities": "# Overview\n## Rollout\n# Validation",
+		"reordered":        "# Validation\n# Summary",
+		"demoted":          "## Summary\n# Validation",
+		"fenced":           "```markdown\n# Summary\n# Validation\n```",
 	} {
 		t.Run(name, func(t *testing.T) {
 			if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err == nil {
@@ -28,10 +29,7 @@ func TestPRTemplateStructureRequiresHeadingLevelsAndOrder(t *testing.T) {
 	}
 	body := "# Summary\nFilled.\n## Reviewer Notes\nAuthor addition.\n## Details\n# Validation\nDone."
 	if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
-		t.Fatalf("additional author heading rejected during drafting: %v", err)
-	}
-	if err := validateTemplateHeadingShape(template, body); err != nil {
-		t.Fatalf("additional author heading rejected during update: %v", err)
+		t.Fatalf("additional author heading rejected: %v", err)
 	}
 }
 

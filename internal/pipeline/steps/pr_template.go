@@ -50,7 +50,12 @@ func conventionalPRTemplatesFor(provider scm.Provider) conventionalPRTemplates {
 			dirs:  []string{".forgejo/PULL_REQUEST_TEMPLATE/", ".forgejo/pull_request_template/"},
 		}
 	case scm.ProviderAzureDevOps:
-		return conventionalPRTemplates{exact: []string{".azuredevops/PULL_REQUEST_TEMPLATE.md", ".azuredevops/pull_request_template.md"}}
+		return conventionalPRTemplates{exact: []string{
+			"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
+			"docs/PULL_REQUEST_TEMPLATE.md", "docs/pull_request_template.md",
+			".azuredevops/PULL_REQUEST_TEMPLATE.md", ".azuredevops/pull_request_template.md",
+			".vsts/PULL_REQUEST_TEMPLATE.md", ".vsts/pull_request_template.md",
+		}}
 	default:
 		return conventionalPRTemplates{}
 	}
@@ -256,7 +261,7 @@ Final diff paths and statuses:
 
 // This is a structural guard, not a Markdown/template interpreter. It binds
 // every declared English heading to the corresponding source heading and body
-// order. Existing published narrative is checked by validateTemplateHeadingShape.
+// order while allowing additional author headings around the required sequence.
 func validateTranslatedTemplateStructure(template, body string, translations []templateHeadingTranslation) error {
 	sources := templateStructureLines(template)
 	bodyHeadings := templateStructureLines(body)
@@ -284,27 +289,6 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 		}
 		if !found {
 			return fmt.Errorf("agent omitted or reordered a required translated pr.template heading; refusing publication")
-		}
-	}
-	return nil
-}
-
-func validateTemplateHeadingShape(template, body string) error {
-	sources := templateStructureLines(template)
-	bodyHeadings := templateStructureLines(body)
-	bodyIndex := 0
-	for _, source := range sources {
-		found := false
-		for bodyIndex < len(bodyHeadings) {
-			candidate := bodyHeadings[bodyIndex]
-			bodyIndex++
-			if headingLevel(source) == headingLevel(candidate) {
-				found = true
-				break
-			}
-		}
-		if !found {
-			return fmt.Errorf("final PR body changed or reordered required committed template headings")
 		}
 	}
 	return nil
