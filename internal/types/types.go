@@ -292,6 +292,7 @@ const (
 	AgentRovoDev     AgentName = "rovodev"
 	AgentOpenCode    AgentName = "opencode"
 	AgentPi          AgentName = "pi"
+	AgentDeck        AgentName = "deck"
 	AgentCopilot     AgentName = "copilot"
 	AgentCursor      AgentName = "cursor"
 	AgentAntigravity AgentName = "antigravity"

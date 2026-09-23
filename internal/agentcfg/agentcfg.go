@@ -250,6 +250,10 @@ func ServedMatchesRequested(requested, served, servedProvider string) bool {
 // harnesses is the whole mapping. Every native flag here was read off the
 // harness's own `--help`, not inferred.
 var harnesses = map[types.AgentName]harness{
+	types.AgentDeck: {
+		model:  knob{mechanism: MechanismArgs, args: flagArgs("--model"), pinned: flagPinned("--model", "-m")},
+		effort: unsupported(),
+	},
 	types.AgentClaude: {
 		model:  knob{mechanism: MechanismArgs, args: flagArgs("--model"), pinned: flagPinned("--model")},
 		effort: knob{mechanism: MechanismArgs, args: flagArgs("--effort"), pinned: flagPinned("--effort")},

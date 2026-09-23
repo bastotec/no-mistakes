@@ -7,6 +7,8 @@
 # (commands.test) and docs/src/content/docs/reference/pipeline-steps.md (Test).
 # Lint and format stay explicit so those gates stay deterministic.
 
+agent: deck
+
 commands:
   lint: "make lint"
   format: "gofmt -w ."
