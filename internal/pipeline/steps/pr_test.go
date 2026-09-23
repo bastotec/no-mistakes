@@ -1233,6 +1233,17 @@ func prTruncationTail() string {
 	return "(description truncated)"
 }
 
+func TestValidateDefaultPRHeadingOrderAllowsAdditionalSections(t *testing.T) {
+	t.Parallel()
+	body := "## Intent\n\nContext.\n\n## Acceptance Criteria\n\nDetails.\n\n## What Changed\n\n- change\n\n## Reviewer Notes\n\nNotes.\n\n## Testing\n\nPassed.\n\n## Pipeline\n\nComplete."
+	if err := validateDefaultPRHeadingOrder(body); err != nil {
+		t.Fatalf("additional English sections rejected: %v", err)
+	}
+	if err := validateDefaultPRHeadingOrder("## Testing\n\nPassed.\n\n## What Changed\n\n- change"); err == nil {
+		t.Fatal("required default sections accepted out of order")
+	}
+}
+
 func TestPRBodyBudgetPromptSection(t *testing.T) {
 	t.Parallel()
 	if got := prBodyBudgetPromptSection(0); got != "" {

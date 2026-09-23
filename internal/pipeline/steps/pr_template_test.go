@@ -39,6 +39,7 @@ func templateDraft(title, body, template string) templatePRContent {
 func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, string) {
 	t.Helper()
 	dir, base, _ := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
 	name := ".github/pull_request_template.md"
 	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
 		t.Fatal(err)
@@ -49,8 +50,12 @@ func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, strin
 	gitCmd(t, dir, "add", ".github")
 	gitCmd(t, dir, "commit", "-m", "trusted template")
 	trusted := gitCmd(t, dir, "rev-parse", "HEAD")
-	// Neither the current file nor a later committed pushed version may supply
-	// the PR agent's template. This also models config recovery with a pin.
+	gitCmd(t, dir, "checkout", "feature")
+	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Neither the worktree file nor a later pushed version may supply the PR
+	// agent's template; the target policy remains the trusted main commit.
 	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("## CONTRIBUTOR TEMPLATE MUST NOT WIN\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -347,11 +352,19 @@ func TestPRTemplateDiscoveryIgnoresOptionalDirectoryTemplates(t *testing.T) {
 func TestPRTemplateExistingPRUsesLiveBasePolicy(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
-	gitCmd(t, dir, "checkout", "-b", "develop", "main")
+	gitCmd(t, dir, "checkout", "main")
 	name := ".github/pull_request_template.md"
 	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	mainTemplate := "## Main Summary\n\nDescribe the main-target change.\n"
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(mainTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", name)
+	gitCmd(t, dir, "commit", "-m", "add main PR template")
+	trustedConfigSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "-b", "develop")
 	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n"
 	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
 		t.Fatal(err)
@@ -370,6 +383,8 @@ func TestPRTemplateExistingPRUsesLiveBasePolicy(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 	sctx.Config.PR.BaseBranch = "main"
+	sctx.Config.PR.Template = name
+	sctx.Config.TrustedConfigSHA = trustedConfigSHA
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
 		t.Fatal(err)

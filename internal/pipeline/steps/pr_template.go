@@ -88,7 +88,7 @@ func configuredPRTemplate(sctx *pipeline.StepContext) string {
 
 func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySHA string, provider scm.Provider) (string, error) {
 	if name := configuredPRTemplate(sctx); name != "" {
-		return loadPRTemplate(ctx, sctx.WorkDir, sctx.Config.TrustedConfigSHA, name)
+		return loadPRTemplate(ctx, sctx.WorkDir, policySHA, name)
 	}
 	candidates := conventionalPRTemplatesFor(provider)
 	if len(candidates) == 0 {
@@ -122,10 +122,9 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySH
 	return loadPRTemplate(ctx, sctx.WorkDir, policySHA, matches[0])
 }
 
-// loadPRTemplate never opens a worktree file. The daemon pins TrustedConfigSHA
-// after a fresh default-branch fetch, including on recovery. Resolve the literal
-// tree entry first (rejecting symlinks/submodules), then size-check and read that
-// immutable blob. Neither pushed paths nor allow_repo_commands choose its bytes.
+// loadPRTemplate never opens a worktree file. It resolves the configured
+// literal path from the pinned target-policy tree, rejecting symlinks and
+// submodules before size-checking and reading the immutable blob.
 func loadPRTemplate(ctx context.Context, dir, sha, name string) (string, error) {
 	if name == "" {
 		return "", nil
@@ -134,7 +133,7 @@ func loadPRTemplate(ctx context.Context, dir, sha, name string) (string, error) 
 		return "", err
 	}
 	if (len(sha) != 40 && len(sha) != 64) || !isHexObjectID(sha) {
-		return "", fmt.Errorf("pr.template requires a pinned trusted default-branch commit")
+		return "", fmt.Errorf("pr.template requires a pinned target-policy commit")
 	}
 	entry, err := git.RunRaw(ctx, dir, "ls-tree", "-z", sha, "--", ":(literal)"+name)
 	if err != nil {
@@ -143,7 +142,7 @@ func loadPRTemplate(ctx context.Context, dir, sha, name string) (string, error) 
 	metadata, entryName, ok := strings.Cut(strings.TrimSuffix(string(entry), "\x00"), "\t")
 	fields := strings.Fields(metadata)
 	if !ok || entryName != name || len(fields) != 3 || fields[1] != "blob" || (fields[0] != "100644" && fields[0] != "100755") || !isHexObjectID(fields[2]) {
-		return "", fmt.Errorf("pr.template %q must name a regular file in the pinned trusted tree (no symlinks or submodules)", name)
+		return "", fmt.Errorf("pr.template %q must name a regular file in the pinned target-policy tree (no symlinks or submodules)", name)
 	}
 	sizeText, err := git.Run(ctx, dir, "cat-file", "-s", fields[2])
 	if err != nil {
