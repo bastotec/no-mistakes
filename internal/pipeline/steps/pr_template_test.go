@@ -141,7 +141,7 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	sctx.UserIntent = "Complete reviewer context stays available."
 	env, _ := fakeGH(t, "")
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
-	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=feat(pipeline): fill template")
 	out, err := (&PRStep{}).Execute(sctx)
 	if err != nil || out == nil || out.PRURL == "" {
 		t.Fatalf("create: %+v, %v", out, err)
@@ -170,25 +170,24 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 
 func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
 	t.Parallel()
-	dir, _, _ := setupGitRepo(t)
-	name := ".github/pull_request_template.md"
-	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
-		t.Fatal(err)
-	}
+	dir, base, head := setupGitRepo(t)
+	name := "pull_request_template.md"
+	gitCmd(t, dir, "checkout", "main")
 	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n\n## Rollback\n\nDescribe rollback.\n"
 	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, dir, "add", name)
 	gitCmd(t, dir, "commit", "-m", "add PR template")
-	base := gitCmd(t, dir, "rev-parse", "HEAD")
-	gitCmd(t, dir, "branch", "-f", "main", base)
-	gitCmd(t, dir, "commit", "--allow-empty", "-m", "change")
-	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
 	body := "## Summary\n\nUpdate PR composition.\n\n## Testing\n\nTargeted checks passed.\n\n## Rollback\n\nRevert the change."
 	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		if string(opts.JSONSchema) != string(templatePRContentSchema) {
 			t.Fatalf("committed template did not select template drafting: %s", opts.JSONSchema)
+		}
+		if !strings.Contains(opts.Prompt, policySHA) || !strings.Contains(opts.Prompt, base) {
+			t.Fatalf("template worker did not receive distinct policy and diff commits:\n%s", opts.Prompt)
 		}
 		data, _ := json.Marshal(templateDraft("fix: follow committed template", body, template))
 		return &agent.Result{Output: data}, nil
@@ -215,6 +214,37 @@ func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
 	}
 	if strings.Contains(parts.appendix, "## ") || strings.Count(parts.appendix, pipelineAttestationCommentPrefix) != 1 {
 		t.Fatalf("generated appendix changed the repository heading contract:\n%s", parts.appendix)
+	}
+}
+
+func TestPRTemplateDiscoveryUsesActiveProviderNamespace(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	for name, body := range map[string]string{
+		".github/pull_request_template.md":           "## GitHub Summary\n",
+		".gitlab/merge_request_templates/Default.md": "## GitLab Summary\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", ".github", ".gitlab")
+	gitCmd(t, dir, "commit", "-m", "add provider templates")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+	githubTemplate, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || githubTemplate != "## GitHub Summary\n" {
+		t.Fatalf("GitHub template = %q, err %v", githubTemplate, err)
+	}
+	gitlabTemplate, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitLab)
+	if err != nil || gitlabTemplate != "## GitLab Summary\n" {
+		t.Fatalf("GitLab template = %q, err %v", gitlabTemplate, err)
 	}
 }
 
@@ -261,7 +291,7 @@ func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
 		return &agent.Result{Output: data}, nil
 	}
 
-	content, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, template)
+	content, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, template)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +352,7 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 		t.Fatal(err)
 	}
 	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
-	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=Author title")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=PROJ-123: add widget")
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)

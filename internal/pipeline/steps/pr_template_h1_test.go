@@ -67,7 +67,7 @@ func TestPRTemplateDraftAllowsSubordinateCompletion(t *testing.T) {
 				data, _ := json.Marshal(templateDraft("fix: correct narrative", tc.body, tc.template))
 				return &agent.Result{Output: data}, nil
 			}
-			got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, tc.template)
+			got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, tc.template)
 			if err != nil || got.Body != tc.body {
 				t.Fatalf("draft = %+v, error %v", got, err)
 			}
