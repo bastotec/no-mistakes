@@ -248,6 +248,65 @@ func TestPRTemplateDiscoveryUsesActiveProviderNamespace(t *testing.T) {
 	}
 }
 
+func TestPRTemplateExistingPRUsesLiveBasePolicy(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "-b", "develop", "main")
+	name := ".github/pull_request_template.md"
+	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n"
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", name)
+	gitCmd(t, dir, "commit", "-m", "add develop PR template")
+	developTip := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	body := "## Summary\n\nUpdate PR policy selection.\n\n## Testing\n\nTargeted checks passed."
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if string(opts.JSONSchema) != string(templatePRContentSchema) || !strings.Contains(opts.Prompt, developTip) {
+			t.Fatalf("existing PR did not use develop policy:\n%s", opts.Prompt)
+		}
+		data, _ := json.Marshal(templateDraft("fix: follow live PR base", body, template))
+		return &agent.Result{Output: data}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.Config.PR.BaseBranch = "main"
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/42", "develop")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=fix: follow live PR base")
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	published, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(published), "## Summary") || !strings.Contains(string(published), "## Testing") || strings.Contains(string(published), "## What Changed") {
+		t.Fatalf("existing PR did not receive live-base template:\n%s", published)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "--base main") {
+		t.Fatalf("repository config change retargeted existing PR:\n%s", logData)
+	}
+}
+
 func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
@@ -346,7 +405,7 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 		data, _ := json.Marshal(map[string]string{"title": "add widget"})
 		return &agent.Result{Output: data}, nil
 	}
-	author := "## Overview\n\nHuman account.\n\nCloses https://github.com/test/repo/issues/7\n"
+	author := "# Overview\n\nHuman account.\n\n## Testing\n\nNot yet recorded.\n\nCloses https://github.com/test/repo/issues/7\n"
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
 		t.Fatal(err)
@@ -382,7 +441,7 @@ func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T
 	sctx, ag, _ := templateTestContext(t)
 	// An existing author body without old generated attestation can be adopted
 	// without a model rewrite. Reserved-looking headings are not ownership.
-	author := "## Overview\n\nHuman account.\n\n## Tests\n\n- [x] Maintainer approves rollout\n\nCloses https://github.com/test/repo/issues/7\n"
+	author := "# Overview\n\nHuman account.\n\n## Testing\n\n- [x] Maintainer approves rollout\n\n## Reviewer Notes\n\nKeep this author section.\n\nCloses https://github.com/test/repo/issues/7\n"
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
 		t.Fatal(err)

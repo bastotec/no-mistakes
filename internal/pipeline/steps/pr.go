@@ -105,23 +105,6 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 	}
 
-	policySHA, err := resolvePRPolicySHA(ctx, sctx, baseBranch)
-	if err != nil {
-		return nil, err
-	}
-	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
-	if err != nil {
-		return nil, err
-	}
-	template, err := resolvePRTemplate(ctx, sctx, policySHA, provider)
-	if err != nil {
-		return nil, err
-	}
-	if template != "" {
-		if _, ok := host.(scm.PRContentReader); !ok {
-			return nil, fmt.Errorf("committed PR templates require raw PR content reads; this provider is unsupported")
-		}
-	}
 	bodyLimit := scm.MaxPRBodyChars(provider)
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
 	existing := explicit
@@ -134,6 +117,27 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	existing, err = bindExistingPR(sctx, host, existing)
 	if err != nil {
 		return nil, err
+	}
+	publicationBaseBranch, err := publicationPRBaseBranch(sctx, host, existing, baseBranch)
+	if err != nil {
+		return nil, err
+	}
+	policySHA, err := resolvePRPolicySHA(ctx, sctx, publicationBaseBranch)
+	if err != nil {
+		return nil, err
+	}
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, publicationBaseBranch)
+	if err != nil {
+		return nil, err
+	}
+	template, err := resolvePRTemplate(ctx, sctx, policySHA, provider)
+	if err != nil {
+		return nil, err
+	}
+	if template != "" {
+		if _, ok := host.(scm.PRContentReader); !ok {
+			return nil, fmt.Errorf("committed PR templates require raw PR content reads; this provider is unsupported")
+		}
 	}
 	if existing != nil {
 		var live scm.PRContent
@@ -160,14 +164,14 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// the pull request's author, not to this repository's template.
 			if explicit == nil {
 				if live.Body == "" && template != "" {
-					draft, err := s.draftTemplateNarrative(sctx, branch, baseBranch, baseSHA, policySHA, template)
+					draft, err := s.draftTemplateNarrative(sctx, branch, publicationBaseBranch, baseSHA, policySHA, template)
 					if err != nil {
 						return nil, err
 					}
 					emptyNarrative = neutralizeAttestationMarkers(draft.Body)
 					title = draft.Title
 				} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
-					title, err = s.draftConfiguredPRTitle(sctx, branch, baseBranch, baseSHA, policySHA)
+					title, err = s.draftConfiguredPRTitle(sctx, branch, publicationBaseBranch, baseSHA, policySHA)
 					if err != nil {
 						return nil, err
 					}
@@ -187,7 +191,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				return nil, err
 			}
 		} else {
-			content, err := s.buildPRContentWithPolicy(sctx, branch, baseBranch, baseSHA, policySHA, provider, bodyLimit)
+			content, err := s.buildPRContentWithPolicy(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider, bodyLimit)
 			if err != nil {
 				return nil, err
 			}
@@ -208,7 +212,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{}, nil
 	}
 
-	content, err := s.buildPRContentWithPolicy(sctx, branch, baseBranch, baseSHA, policySHA, provider, bodyLimit)
+	content, err := s.buildPRContentWithPolicy(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider, bodyLimit)
 	if err != nil {
 		return nil, err
 	}
@@ -383,6 +387,32 @@ func samePRIdentity(ownedURL string, discovered *scm.PR) bool {
 		return false
 	}
 	return discovered.Number != "" && discovered.Number == ownedNum
+}
+
+func publicationPRBaseBranch(sctx *pipeline.StepContext, host scm.Host, existing *scm.PR, configured string) (string, error) {
+	if existing == nil {
+		return configured, nil
+	}
+	if requested := runPRBaseBranch(sctx); requested != "" && existingPRURL(sctx) == "" {
+		return requested, nil
+	}
+	actual := strings.TrimSpace(existing.BaseBranch)
+	if actual == "" {
+		reader, ok := host.(scm.PRBaseBranchReader)
+		if !ok {
+			return "", fmt.Errorf("existing pull request %s has no readable base branch for PR format policy", describePR(existing))
+		}
+		base, err := reader.GetPRBaseBranch(sctx.Ctx, existing)
+		if err != nil {
+			return "", fmt.Errorf("read existing pull request %s base branch for PR format policy: %w", describePR(existing), err)
+		}
+		actual = strings.TrimSpace(base)
+		if actual == "" {
+			return "", fmt.Errorf("existing pull request %s has an empty base branch for PR format policy", describePR(existing))
+		}
+		existing.BaseBranch = actual
+	}
+	return actual, nil
 }
 
 func describePR(pr *scm.PR) string {
