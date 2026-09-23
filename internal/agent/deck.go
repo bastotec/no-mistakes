@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os/exec"
@@ -51,23 +52,49 @@ func (a *deckAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
 		_, _ = io.Copy(io.Discard, started.stderr)
 		stderr <- strings.TrimSpace(string(b))
 	}()
-	result, parseErr := parseDeckEvents(started.stdout, opts)
-	var waitErr error
-	if parseErr != nil {
-		waitErr = started.waitAfterParseError(parseErr)
-	} else {
-		waitErr = started.wait()
+	stream := &deckStreamReader{Reader: started.stdout}
+	result, parseErr := parseDeckEvents(stream, opts)
+	if parseErr != nil && !stream.ended {
+		// An early protocol error must not leave Deck running. Keep stderr
+		// open so its diagnostic drains, rather than racing closePipes.
+		started.terminate()
+		_, _ = io.Copy(io.Discard, started.stdout)
 	}
+	// EOF validation errors (notably no run_finished) are not grounds to
+	// kill the child: it may still be writing its startup failure to stderr.
+	// waitAfterParseError would also replace the real exit status with the
+	// parser error. Retain both, with the process failure first.
+	waitErr := started.wait()
 	detail := <-stderr
 	err = parseErr
 	if waitErr != nil {
-		err = fmt.Errorf("deck exited: %w: %s", waitErr, detail)
+		exitErr := fmt.Errorf("deck exited: %w", waitErr)
+		if detail != "" {
+			exitErr = fmt.Errorf("%w: %s", exitErr, detail)
+		}
+		err = errors.Join(exitErr, parseErr)
+	} else if err != nil && detail != "" {
+		err = fmt.Errorf("%w: %s", err, detail)
 	}
 	if ctx.Err() != nil {
 		err = ctx.Err()
 	}
 	emitAgentExited(opts, "deck", pid, err)
 	return result, err
+}
+
+// deckStreamReader distinguishes EOF validation from an early parse failure.
+type deckStreamReader struct {
+	io.Reader
+	ended bool
+}
+
+func (r *deckStreamReader) Read(p []byte) (int, error) {
+	n, err := r.Reader.Read(p)
+	if err != nil {
+		r.ended = true
+	}
+	return n, err
 }
 
 func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
@@ -101,6 +128,12 @@ func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
 				usage = TokenUsage{InputTokens: *event.Input, OutputTokens: *event.OutputTokens, Reported: true}
 			}
 			if event.Type == "run_finished" {
+				if finished {
+					return resultFromUsage(usage), fmt.Errorf("deck duplicate run_finished")
+				}
+				if len(event.Output) == 0 || string(event.Output) == "null" {
+					return resultFromUsage(usage), fmt.Errorf("deck terminal output must be a string")
+				}
 				// Tool events also carry output, but as a structured object.
 				// Decode only the terminal answer as text.
 				if err := json.Unmarshal(event.Output, &output); err != nil {

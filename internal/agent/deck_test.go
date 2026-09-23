@@ -24,6 +24,10 @@ func TestDeckEventsRequireSuccessfulTerminalAnswer(t *testing.T) {
 {"type":"tool_finished","output":{"stdout":"ok","exit_code":0}}
 {"type":"usage","input_tokens":2,"output_tokens":1}
 {"type":"run_finished","output":"{\"ok\":true}","input_tokens":9,"output_tokens":3}`, false, false},
+		{"null terminal", `{"type":"run_finished","output":null}`, true, false},
+		{"missing output", `{"type":"run_finished"}`, true, false},
+		{"duplicate terminal", `{"type":"run_finished","output":"{\"ok\":true}"}
+{"type":"run_finished","output":"{\"ok\":true}"}`, true, false},
 		{"failed with zero exit", `{"type":"run_failed","error":"quota unavailable"}`, true, false},
 		{"progress is not verdict", `{"type":"text_delta","text":"{\"ok\":true}"}`, true, false},
 		{"malformed stream", `{`, true, false},
@@ -112,5 +116,71 @@ func TestDeckRunCancellationAndExitFailure(t *testing.T) {
 		if strings.Contains(body, "refused") && !strings.Contains(err.Error(), "refused") {
 			t.Fatalf("lost stderr: %v", err)
 		}
+	}
+}
+
+// Mirrors Deck's startup credential check without reading a real credential or
+// contacting a gateway. Closing stdout before the diagnostic makes the old
+// parse-error cleanup race deterministic.
+func TestDeckRunStartupDiagnosticAndTerminalContract(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	t.Setenv("PROXAI_API_KEY", "")
+	t.Setenv("PROXAI_API_KEY_FILE", "")
+	for _, tc := range []struct {
+		name, body, keyPath, want string
+	}{
+		{"no credential path", `cat >/dev/null
+if [ -z "$PROXAI_API_KEY_FILE" ]; then
+ exec 1>&-
+ sleep 0.05
+ echo 'resolve gateway client key: no gateway client key: set PROXAI_API_KEY_FILE' >&2
+ exit 1
+fi`, "", "exit status 1"},
+		{"configured credential path", `cat >/dev/null
+[ "$PROXAI_API_KEY_FILE" = fixture-only ] || exit 3
+printf '%s\n' '{"type":"run_started","model":"provider/model"}' '{"type":"text_delta","text":"partial"}' '{"type":"run_finished","output":"{\"ok\":true}"}'`, "fixture-only", ""},
+		{"missing terminal", `cat >/dev/null; echo diagnostic >&2`, "", "without run_finished"},
+		{"malformed terminal", `cat >/dev/null; echo diagnostic >&2; echo '{"type":"run_finished","output":{}}'`, "", "terminal output"},
+		{"malformed stream", `cat >/dev/null; echo diagnostic >&2; echo '{'`, "", "deck event"},
+		{"failed event", `cat >/dev/null; echo diagnostic >&2; echo '{"type":"run_failed","error":"provider refused"}'`, "", "provider refused"},
+		{"nonzero after terminal", `cat >/dev/null; echo diagnostic >&2; echo '{"type":"run_finished","output":"{\"ok\":true}"}'; exit 7`, "", "exit status 7"},
+		{"stderr beyond excerpt", `cat >/dev/null; exec 1>&-; sleep 0.05; echo diagnostic >&2; head -c 131072 /dev/zero >&2; exit 9`, "", "exit status 9"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "deck")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+tc.body+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			a, err := New(types.AgentDeck, bin, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			result, err := a.Run(ctx, RunOpts{CWD: dir, Prompt: "review", Env: []string{"PROXAI_API_KEY_FILE=" + tc.keyPath}, JSONSchema: json.RawMessage(`{"type":"object","required":["ok"],"properties":{"ok":{"type":"boolean"}}}`)})
+			if tc.want == "" {
+				if err != nil || result == nil || string(result.Output) != `{"ok":true}` {
+					t.Fatalf("result=%+v err=%v", result, err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("want %q, got %v", tc.want, err)
+			}
+			diagnostic := "diagnostic"
+			if tc.name == "no credential path" {
+				diagnostic = "resolve gateway client key: no gateway client key: set PROXAI_API_KEY_FILE"
+			}
+			if !strings.Contains(err.Error(), diagnostic) {
+				t.Fatalf("lost stderr: %v", err)
+			}
+			if ctx.Err() != nil {
+				t.Fatalf("failed to drain stderr before deadline: %v", err)
+			}
+		})
 	}
 }
