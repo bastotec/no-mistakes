@@ -21,6 +21,7 @@ func TestDeckEventsRequireSuccessfulTerminalAnswer(t *testing.T) {
 	}{
 		{"success", `{"type":"run_started","model":"provider/model"}
 {"type":"text_delta","text":"progress"}
+{"type":"tool_finished","output":{"stdout":"ok","exit_code":0}}
 {"type":"usage","input_tokens":2,"output_tokens":1}
 {"type":"run_finished","output":"{\"ok\":true}","input_tokens":9,"output_tokens":3}`, false, false},
 		{"failed with zero exit", `{"type":"run_failed","error":"quota unavailable"}`, true, false},

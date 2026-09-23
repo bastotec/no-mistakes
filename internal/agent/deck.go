@@ -78,13 +78,13 @@ func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
 	finished := false
 	for scanner.Scan() {
 		var event struct {
-			Type         string `json:"type"`
-			Text         string `json:"text"`
-			Output       string `json:"output"`
-			Error        string `json:"error"`
-			Model        string `json:"model"`
-			Input        *int   `json:"input_tokens"`
-			OutputTokens *int   `json:"output_tokens"`
+			Type         string          `json:"type"`
+			Text         string          `json:"text"`
+			Output       json.RawMessage `json:"output"`
+			Error        string          `json:"error"`
+			Model        string          `json:"model"`
+			Input        *int            `json:"input_tokens"`
+			OutputTokens *int            `json:"output_tokens"`
 		}
 		if err := json.Unmarshal(scanner.Bytes(), &event); err != nil {
 			return resultFromUsage(usage), fmt.Errorf("deck event: %w", err)
@@ -101,7 +101,12 @@ func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
 				usage = TokenUsage{InputTokens: *event.Input, OutputTokens: *event.OutputTokens, Reported: true}
 			}
 			if event.Type == "run_finished" {
-				output, finished = event.Output, true
+				// Tool events also carry output, but as a structured object.
+				// Decode only the terminal answer as text.
+				if err := json.Unmarshal(event.Output, &output); err != nil {
+					return resultFromUsage(usage), fmt.Errorf("deck terminal output: %w", err)
+				}
+				finished = true
 			}
 		case "run_failed":
 			return resultFromUsage(usage), fmt.Errorf("deck run failed: %s", event.Error)
