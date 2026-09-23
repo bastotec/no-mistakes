@@ -21,12 +21,12 @@ func TestPRTemplateStructureRequiresH1TextAndOrder(t *testing.T) {
 		"fenced":    "```markdown\n# Summary\n# Validation\n```",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateTemplateStructure(template, body); err == nil {
+			if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err == nil {
 				t.Fatal("invalid H1 structure accepted")
 			}
 		})
 	}
-	if err := validateTemplateStructure(template, "# Extra\n# Summary\nFilled.\n# Validation\nDone."); err != nil {
+	if err := validateTranslatedTemplateStructure(template, "# Extra\n# Summary\nFilled.\n# Validation\nDone.", identityHeadingTranslations(template)); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -38,7 +38,7 @@ func TestPRTemplateStructureRecognizesOnlyTopLevelATXH1(t *testing.T) {
 	if got := templateStructureLines(text); !reflect.DeepEqual(got, want) {
 		t.Fatalf("H1s = %q, want %q", got, want)
 	}
-	if err := validateTemplateStructure("## Optional\n### Nested\n- [ ] Choice\n```\n# Example\n```", "Narrative only."); err != nil {
+	if err := validateTranslatedTemplateStructure("## Optional\n### Nested\n- [ ] Choice\n```\n# Example\n```", "Narrative only.", nil); err != nil {
 		t.Fatalf("no-H1 template rejected: %v", err)
 	}
 }
@@ -64,7 +64,7 @@ func TestPRTemplateDraftAllowsSubordinateCompletion(t *testing.T) {
 						t.Errorf("missing drafting rule %q", rule)
 					}
 				}
-				data, _ := json.Marshal(prContent{Title: "fix: correct narrative", Body: tc.body})
+				data, _ := json.Marshal(templateDraft("fix: correct narrative", tc.body, tc.template))
 				return &agent.Result{Output: data}, nil
 			}
 			got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, tc.template)

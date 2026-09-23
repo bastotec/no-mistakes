@@ -38,6 +38,9 @@ func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result,
 	if m.runFn != nil {
 		return m.runFn(ctx, opts)
 	}
+	if string(opts.JSONSchema) == string(prContentSchema) {
+		return &agent.Result{Output: []byte(`{"title":"chore: update pull request","body":"## What Changed\n\n- update the pull request"}`)}, nil
+	}
 	return &agent.Result{}, nil
 }
 

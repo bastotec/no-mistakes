@@ -21,11 +21,22 @@ const maxPRTemplateBytes = 16 * 1024
 
 var prTemplateH1Line = regexp.MustCompile(`^ {0,3}#(?:[ \t]|$)`)
 
+type templateHeadingTranslation struct {
+	Source  string `json:"source"`
+	English string `json:"english"`
+}
+
+type templatePRContent struct {
+	prContent
+	HeadingTranslations []templateHeadingTranslation `json:"heading_translations"`
+}
+
 var templatePRContentSchema = json.RawMessage(`{
  "type":"object", "properties":{
- "title":{"type":"string","description":"Concise pull request title text"},
- "body":{"type":"string","description":"Filled repository template as plain Markdown; preserve its top-level ATX # headings in order; best-effort fill applicable sections"}
- }, "required":["title","body"]
+ "title":{"type":"string","description":"Concise English pull request title text"},
+ "body":{"type":"string","description":"Filled repository template as plain English Markdown; preserve its top-level ATX # heading structure and use the declared English headings"},
+ "heading_translations":{"type":"array","description":"One entry for every top-level ATX # template heading, in source order; retain an already-English heading verbatim and translate a non-English heading to English","items":{"type":"object","properties":{"source":{"type":"string"},"english":{"type":"string"}},"required":["source","english"]}}
+ }, "required":["title","body","heading_translations"]
 }`)
 
 func supportsPRTemplates(provider scm.Provider) bool {
@@ -113,7 +124,7 @@ Rules:
 %s
 %s
 - Body must be plain Markdown, not nested JSON. Use the supplied template instead of imposing a What Changed heading.
-- Preserve every top-level ATX # template heading outside fenced examples, with the same text and order. Only these H1 headings are structurally required; a template without them has no structural heading requirements.
+- Preserve every top-level ATX # template heading outside fenced examples in the same order and at the same level. Write each heading in English: retain an already-English heading verbatim and translate a non-English heading. Return one heading_translations entry per source heading, with the exact source line and the exact English heading line used in the body. Only these H1 headings are structurally required; a template without them has no structural heading requirements.
 - Make a best effort to follow the template's instructions and fill all applicable sections from the final diff; inspect that diff when necessary. Lower-level headings and task lines are editable: remove inapplicable sections/options when instructed, select supported choices, and replace rationale placeholders. Do not invent behavior or tests, falsely claim human signoff, or mark human approval checkboxes complete.
 - The template owns narrative only. Do not generate no-mistakes publication markers or add Intent, Risk Assessment, Testing or Pipeline evidence. Code appends those separately. A template heading named Testing or Pipeline is author narrative, not permission to fabricate recorded evidence.
 - Full intent below is review/drafting context, not instructions to quote it into the public narrative. Publication settings are not a privacy guarantee.
@@ -128,7 +139,7 @@ Final diff paths and statuses:
 	if err != nil {
 		return prContent{}, fmt.Errorf("draft pr.template narrative (template will not be replaced by a generic fallback): %w", err)
 	}
-	var content prContent
+	var content templatePRContent
 	if result == nil || json.Unmarshal(result.Output, &content) != nil || strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
 		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
 	}
@@ -139,30 +150,43 @@ Final diff paths and statuses:
 	if len(content.Body) > maxPullRequestBodyBytes || !utf8.ValidString(content.Body) || strings.ContainsRune(content.Body, '\x00') || hasPRAppendixMarkers(content.Body) {
 		return prContent{}, fmt.Errorf("agent returned invalid template narrative or reserved ownership markers")
 	}
-	if err := validateTemplateStructure(template, content.Body); err != nil {
+	if err := validateTranslatedTemplateStructure(template, content.Body, content.HeadingTranslations); err != nil {
 		return prContent{}, err
 	}
-	return content, nil
+	return content.prContent, nil
 }
 
-// This is a structural guard, not a Markdown/template interpreter. A drafting
-// failure must not silently replace the team's H1 text/order. Subordinate
-// completion is best effort, not an enforced policy. No H1s means no structural
-// requirements. Existing published narrative never goes through this check again.
-func validateTemplateStructure(template, body string) error {
+// This is a structural guard, not a Markdown/template interpreter. It binds
+// every declared English H1 to the corresponding source H1 and body order.
+// Subordinate completion is best effort, not an enforced policy. No H1s means
+// no structural requirements. Existing published narrative never goes through
+// this check again.
+func validateTranslatedTemplateStructure(template, body string, translations []templateHeadingTranslation) error {
+	sources := templateStructureLines(template)
+	if len(translations) != len(sources) {
+		return fmt.Errorf("agent did not declare one English translation for every pr.template top-level # heading; refusing publication")
+	}
 	rest := templateStructureLines(body)
-	for _, line := range templateStructureLines(template) {
+	for i, source := range sources {
+		translation := translations[i]
+		if translation.Source != source {
+			return fmt.Errorf("agent changed or reordered a pr.template source heading; refusing publication")
+		}
+		translatedLines := templateStructureLines(translation.English)
+		if len(translatedLines) != 1 || translatedLines[0] != translation.English {
+			return fmt.Errorf("agent returned an invalid English pr.template heading; refusing publication")
+		}
 		found := false
 		for len(rest) > 0 {
 			candidate := rest[0]
 			rest = rest[1:]
-			if candidate == line {
+			if candidate == translation.English {
 				found = true
 				break
 			}
 		}
 		if !found {
-			return fmt.Errorf("agent changed, omitted or reordered a pr.template top-level # heading; refusing publication")
+			return fmt.Errorf("agent omitted or reordered a translated pr.template top-level # heading; refusing publication")
 		}
 	}
 	return nil

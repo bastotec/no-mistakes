@@ -19,6 +19,22 @@ import (
 const testPRTemplate = "# Overview\n\n<!-- Describe the final change. -->\n\n## Testing\n\n- [ ] Maintainer approves rollout\n"
 const filledPRTemplate = "# Overview\n\nAdd a Bar helper.\n\n## Testing\n\n- [ ] Maintainer approves rollout\n"
 
+func identityHeadingTranslations(template string) []templateHeadingTranslation {
+	lines := templateStructureLines(template)
+	translations := make([]templateHeadingTranslation, len(lines))
+	for i, line := range lines {
+		translations[i] = templateHeadingTranslation{Source: line, English: line}
+	}
+	return translations
+}
+
+func templateDraft(title, body, template string) templatePRContent {
+	return templatePRContent{
+		prContent:           prContent{Title: title, Body: body},
+		HeadingTranslations: identityHeadingTranslations(template),
+	}
+}
+
 func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, string) {
 	t.Helper()
 	dir, base, _ := setupGitRepo(t)
@@ -41,7 +57,7 @@ func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, strin
 	gitCmd(t, dir, "commit", "-m", "pushed template override")
 	head := gitCmd(t, dir, "rev-parse", "HEAD")
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		data, _ := json.Marshal(prContent{Title: "feat(pipeline): fill template", Body: filledPRTemplate})
+		data, _ := json.Marshal(templateDraft("feat(pipeline): fill template", filledPRTemplate, testPRTemplate))
 		return &agent.Result{Output: data}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
@@ -161,7 +177,7 @@ func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 		if strings.Contains(opts.Prompt, sctx.Config.PR.TitleFormat) {
 			t.Fatal("prompt exposed configured title format")
 		}
-		data, _ := json.Marshal(prContent{Title: "add widget", Body: filledPRTemplate})
+		data, _ := json.Marshal(templateDraft("add widget", filledPRTemplate, testPRTemplate))
 		return &agent.Result{Output: data}, nil
 	}
 
@@ -171,6 +187,35 @@ func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 	}
 	if content.Title != "PROJ-123: add widget" {
 		t.Fatalf("title = %q, want configured title", content.Title)
+	}
+}
+
+func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	template := "# Resumo\n\nDescreva a mudança.\n\n# Testes\n"
+	body := "# Summary\n\nDescribe the change.\n\n# Testing\n\nTargeted checks passed."
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, "translate a non-English heading") {
+			t.Fatal("template prompt omitted heading translation policy")
+		}
+		content := templatePRContent{
+			prContent: prContent{Title: "fix: describe the change", Body: body},
+			HeadingTranslations: []templateHeadingTranslation{
+				{Source: "# Resumo", English: "# Summary"},
+				{Source: "# Testes", English: "# Testing"},
+			},
+		}
+		data, _ := json.Marshal(content)
+		return &agent.Result{Output: data}, nil
+	}
+
+	content, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Body != body {
+		t.Fatalf("translated body = %q, want %q", content.Body, body)
 	}
 }
 
@@ -261,7 +306,7 @@ func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T
 
 func TestPRTemplateDraftFailureDoesNotFallBackOrPublish(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"agent-error", "missing", "nested-json", "missing-heading", "heading", "ownership", "fenced", "oversized"} {
+	for _, mode := range []string{"agent-error", "missing", "nested-json", "missing-translations", "missing-heading", "heading", "ownership", "fenced", "oversized"} {
 		t.Run(mode, func(t *testing.T) {
 			sctx, ag, _ := templateTestContext(t)
 			ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
@@ -284,7 +329,11 @@ func TestPRTemplateDraftFailureDoesNotFallBackOrPublish(t *testing.T) {
 				case "oversized":
 					body += strings.Repeat("x", maxPullRequestBodyBytes)
 				}
-				data, _ := json.Marshal(prContent{Title: "feat: change", Body: body})
+				draft := templateDraft("feat: change", body, testPRTemplate)
+				if mode == "missing-translations" {
+					draft.HeadingTranslations = nil
+				}
+				data, _ := json.Marshal(draft)
 				return &agent.Result{Output: data}, nil
 			}
 			env, logFile := fakeGH(t, "")
@@ -305,17 +354,17 @@ func TestPRTemplateStructureAllowsTaskEdits(t *testing.T) {
 	for _, line := range []string{"- [ ]", "*\t[ ] Approval", "+   [x] Approval", "1. [ ] Approval", "2) [X] Approval"} {
 		template := "## Overview\n\n" + line + "\n"
 		body := "## Overview\n\nFilled narrative.\n\n" + line + "\n"
-		if err := validateTemplateStructure(template, body); err != nil {
+		if err := validateTranslatedTemplateStructure(template, body, nil); err != nil {
 			t.Errorf("unchanged checklist %q rejected: %v", line, err)
 		}
 		changed := strings.ReplaceAll(body, "[ ]", "[x]")
 		if changed == body {
 			changed = strings.ReplaceAll(strings.ReplaceAll(body, "[x]", "[ ]"), "[X]", "[ ]")
 		}
-		if err := validateTemplateStructure(template, changed); err != nil {
+		if err := validateTranslatedTemplateStructure(template, changed, identityHeadingTranslations(template)); err != nil {
 			t.Errorf("changed checklist state %q rejected: %v", line, err)
 		}
-		if err := validateTemplateStructure(template, "Filled narrative."); err != nil {
+		if err := validateTranslatedTemplateStructure(template, "Filled narrative.", nil); err != nil {
 			t.Errorf("omitted checklist/subheading %q rejected: %v", line, err)
 		}
 	}
@@ -414,17 +463,17 @@ func TestPRTemplateStructureInvalidBacktickFenceKeepsRequiredHeadings(t *testing
 	t.Parallel()
 	template := "``` `example`\n# First\n# Second\n"
 	for _, body := range []string{"# First\n# Second\n", template} {
-		if err := validateTemplateStructure(template, body); err != nil {
+		if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
 			t.Fatalf("preserved headings rejected: %v", err)
 		}
 	}
 	for _, body := range []string{"# First\n", "# Second\n# First\n"} {
-		if err := validateTemplateStructure(template, body); err == nil {
+		if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err == nil {
 			t.Fatalf("missing or reordered required heading accepted: %q", body)
 		}
 	}
 	// Tilde fences allow backticks in their info strings.
-	if err := validateTemplateStructure("~~~ `example`\n# Example\n~~~\n# Required\n", "# Required\n"); err != nil {
+	if err := validateTranslatedTemplateStructure("~~~ `example`\n# Example\n~~~\n# Required\n", "# Required\n", []templateHeadingTranslation{{Source: "# Required", English: "# Required"}}); err != nil {
 		t.Fatalf("fenced example treated as required: %v", err)
 	}
 }

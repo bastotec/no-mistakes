@@ -358,7 +358,10 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 	env, logFile := fakeGH(t, "")
 
 	findings := `{"findings":[],"summary":"clean","risk_level":"medium","risk_rationale":"touches critical error handling"}`
-	ag := &mockAgent{name: "test"}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(prContent{Title: "chore: update pull request", Body: "## What Changed\n\nFinal changed paths and statuses:\n\n```text\nA\tfeature.txt\n```"})
+		return &agent.Result{Output: data}, nil
+	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	sctx.Config.Providers.GitHub.DraftPullRequests = true
@@ -398,16 +401,16 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 		t.Fatalf("expected configured GitHub PR creation to use --draft, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "--title chore: update pull request --body") {
-		t.Fatalf("expected fallback PR title to make no scope claim, got:\n%s", ghLog)
+		t.Fatalf("expected agent PR title, got:\n%s", ghLog)
 	}
 	if strings.Contains(ghLog, "--title feat: add feature") {
-		t.Fatalf("expected fallback PR title to exclude commit-history scope, got:\n%s", ghLog)
+		t.Fatalf("expected PR title to exclude unrelated commit-history scope, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "## Risk Assessment\n\n⚠️ Medium: touches critical error handling") {
-		t.Fatalf("expected fallback PR body to append risk note under Risk Assessment heading, got:\n%s", ghLog)
+		t.Fatalf("expected PR body to append risk note under Risk Assessment heading, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "A\tfeature.txt") {
-		t.Fatalf("expected fallback PR body to derive scope from the final diff, got:\n%s", ghLog)
+		t.Fatalf("expected PR body to describe the final diff, got:\n%s", ghLog)
 	}
 
 	// Verify PR URL was stored
@@ -796,6 +799,29 @@ func TestPRStep_UsesConfiguredTitleFormat(t *testing.T) {
 	}
 	if !strings.Contains(string(logData), "--title PROJ-123: add widget") {
 		t.Fatalf("expected configured PR title, got:\n%s", logData)
+	}
+}
+
+func TestPRStep_RefusesNonEnglishTitleFormatLiteral(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, logFile := fakeGH(t, "")
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"title":"repair widget","body":"## What Changed\n\n- repair widget"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	sctx.Config.PR.TitleFormat = "Correção: {{.Title}}"
+
+	if _, err := (&PRStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "cannot be proven English") {
+		t.Fatalf("Execute() error = %v, want English title-format refusal", err)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "pr create") || strings.Contains(string(logData), "pr edit") {
+		t.Fatalf("non-English rendered title reached publication:\n%s", logData)
 	}
 }
 
@@ -1710,54 +1736,6 @@ func TestPRStep_CreateCapsBodyAfterPrependedIntent(t *testing.T) {
 	}
 }
 
-func TestFallbackPRContentCapsBodyAfterPrependedIntent(t *testing.T) {
-	t.Parallel()
-	sctx := newTestContext(t, &mockAgent{name: "test"}, t.TempDir(), "", "", config.Commands{})
-	sctx.UserIntent = "Fallback intent survives.\n" + strings.Repeat("fallback intent context line\n", 900)
-
-	rounds := make([]string, 0, 140)
-	for i := 1; i <= 140; i++ {
-		rounds = append(rounds, fmt.Sprintf("review round %03d - %s", i, strings.Repeat("x", 700)))
-	}
-
-	content, err := fallbackPRContent(
-		sctx,
-		"A\tinternal/pipeline/steps/pr.go",
-		"✅ Low: generated PR body length guard only",
-		"## Testing\n\n- go test ./internal/pipeline/steps",
-		pipelineMarkdownForTest(rounds...),
-		0,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	assertGitHubBodyLimitForTest(t, content.Body)
-	for _, want := range []string{
-		"## Intent",
-		"Fallback intent survives.",
-		"## What Changed",
-		"internal/pipeline/steps/pr.go",
-		"## Risk Assessment",
-		"## Testing",
-		"earlier update rounds omitted",
-		"review round 140",
-	} {
-		if !strings.Contains(content.Body, want) {
-			t.Fatalf("expected fallback PR body to contain %q", want)
-		}
-	}
-	if strings.Contains(content.Body, "review round 001") {
-		t.Fatal("expected oldest pipeline update to be omitted")
-	}
-	if strings.Contains(content.Body, "add feature") {
-		t.Fatalf("expected fallback body to exclude commit-history scope, got:\n%s", content.Body)
-	}
-	if content.Title != "chore: update pull request" {
-		t.Fatalf("fallback title = %q, want neutral title", content.Title)
-	}
-}
-
 func bitbucketPRDescriptionForTest(t *testing.T, raw string) string {
 	t.Helper()
 	var payload struct {
@@ -2053,50 +2031,37 @@ func TestPRStep_PromptUsesWhatChanged(t *testing.T) {
 	}
 }
 
-func TestPRStep_FallbackUsesWhatChangedAndIntent(t *testing.T) {
+func TestPRStep_InvalidDraftNeverPublishesGenericFallback(t *testing.T) {
 	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
+	for _, tc := range []struct {
+		name   string
+		result *agent.Result
+		err    error
+	}{
+		{name: "agent error", err: fmt.Errorf("simulated agent failure")},
+		{name: "malformed output", result: &agent.Result{Output: json.RawMessage(`{"title":`)}},
+		{name: "incomplete output", result: &agent.Result{Output: json.RawMessage(`{"title":"fix: incomplete"}`)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, baseSHA, headSHA := setupGitRepo(t)
+			env, logFile := fakeGH(t, "")
+			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return tc.result, tc.err
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+			sctx.Env = env
 
-	env, logFile := fakeGH(t, "")
-
-	ag := &mockAgent{
-		name: "test",
-		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			return nil, fmt.Errorf("simulated agent failure")
-		},
-	}
-	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Env = env
-	sctx.UserIntent = "fallback intent text"
-
-	step := &PRStep{}
-	if _, err := step.Execute(sctx); err != nil {
-		t.Fatal(err)
-	}
-
-	logData, err := os.ReadFile(logFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ghLog := string(logData)
-
-	if !strings.Contains(ghLog, "## What Changed") {
-		t.Fatalf("expected fallback PR body to use ## What Changed heading, got:\n%s", ghLog)
-	}
-	if strings.Contains(ghLog, "## Summary") {
-		t.Fatalf("expected fallback PR body to no longer use ## Summary heading, got:\n%s", ghLog)
-	}
-	if !strings.Contains(ghLog, "## Intent") {
-		t.Fatalf("expected fallback PR body to include ## Intent section, got:\n%s", ghLog)
-	}
-	if !strings.Contains(ghLog, "fallback intent text") {
-		t.Fatalf("expected fallback PR body to include intent text, got:\n%s", ghLog)
-	}
-
-	intentIdx := strings.Index(ghLog, "## Intent")
-	whatChangedIdx := strings.Index(ghLog, "## What Changed")
-	if intentIdx > whatChangedIdx {
-		t.Fatalf("expected ## Intent before ## What Changed in fallback, got:\n%s", ghLog)
+			if _, err := (&PRStep{}).Execute(sctx); err == nil {
+				t.Fatal("invalid draft published a generic fallback")
+			}
+			logData, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(logData), "pr create") || strings.Contains(string(logData), "pr edit") {
+				t.Fatalf("invalid draft mutated a pull request:\n%s", logData)
+			}
+		})
 	}
 }
 
@@ -2186,7 +2151,7 @@ func TestPRStep_SkipsBeforeBuildingContentWhenProviderCLIUnavailable(t *testing.
 	}
 }
 
-func TestPRStep_ExistingBranchFallbackUsesMergeBaseFinalDiff(t *testing.T) {
+func TestPRStep_ExistingBranchUsesMergeBaseFinalDiff(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
 	gitCmd(t, dir, "init")
@@ -2210,7 +2175,10 @@ func TestPRStep_ExistingBranchFallbackUsesMergeBaseFinalDiff(t *testing.T) {
 
 	env, logFile := fakeGH(t, "")
 
-	ag := &mockAgent{name: "test"}
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(prContent{Title: "chore: update pull request", Body: "## What Changed\n\nFinal changed paths and statuses:\n\nA\tfirst.txt\nA\tsecond.txt"})
+		return &agent.Result{Output: data}, nil
+	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, oldRemoteSHA, headSHA, config.Commands{})
 	sctx.Env = env
 
@@ -2409,7 +2377,7 @@ func TestPRStep_PromptGuidesScopeToRealModule(t *testing.T) {
 	}
 }
 
-func TestPRStep_HangingAgentFallsBackAfterTimeout(t *testing.T) {
+func TestPRStep_HangingAgentFailsAfterTimeout(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &mockAgent{
@@ -2423,14 +2391,8 @@ func TestPRStep_HangingAgentFallsBackAfterTimeout(t *testing.T) {
 	sctx.Config.AgentTimeout = 20 * time.Millisecond
 
 	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
-	if err != nil {
-		t.Fatalf("buildPRContent: %v", err)
-	}
-	if content.Title != "chore: update pull request" {
-		t.Fatalf("title = %q, want fallback after timeout", content.Title)
-	}
-	if strings.Contains(content.Body, "late") {
-		t.Fatalf("used late agent body after timeout: %s", content.Body)
+	if err == nil {
+		t.Fatalf("buildPRContent = %+v, want timeout failure without fallback", content)
 	}
 }
 
@@ -2448,11 +2410,8 @@ func TestPRStep_LateSuccessAfterTimeoutDoesNotUseAgentTitle(t *testing.T) {
 	sctx.Config.AgentTimeout = 20 * time.Millisecond
 
 	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
-	if err != nil {
-		t.Fatalf("buildPRContent: %v", err)
-	}
-	if content.Title == "feat: should not ship" {
-		t.Fatal("late successful PR title was used after the deadline")
+	if err == nil {
+		t.Fatalf("buildPRContent = %+v, want late result refusal", content)
 	}
 }
 
@@ -2579,31 +2538,6 @@ func TestPRStep_AgentBodyAttestationDoesNotShadowTheRealOne(t *testing.T) {
 	assertFirstAttestationBindsHead(t, content.Body, sctx.Run.HeadSHA)
 	if !strings.Contains(content.Body, escapedPipelineAttestationCommentPrefix) || !strings.Contains(content.Body, foreignSHA) {
 		t.Fatalf("agent-authored attestation was neither neutralized nor kept readable:\n%s", content.Body)
-	}
-}
-
-// TestFallbackPRBodyAttestationDoesNotShadowTheRealOne covers the fallback
-// body, whose What Changed section embeds the final diff verbatim.
-func TestFallbackPRBodyAttestationDoesNotShadowTheRealOne(t *testing.T) {
-	t.Parallel()
-	dir, baseSHA, headSHA := setupGitRepo(t)
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
-	insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{TestingSummary: "Ran the focused suite."}), "")
-
-	foreignSHA := strings.Repeat("d", 40)
-	embedded := pipelineAttestationCommentPrefix +
-		`{"head_sha":"` + foreignSHA + `","steps":[{"step":"review","status":"completed"}]}` +
-		pipelineAttestationCommentClosingToken
-
-	pipelineMD, riskLine, testingMD := (&PRStep{}).buildPipelineSection(sctx, scm.ProviderGitHub)
-	content, err := fallbackPRContent(sctx, "A\t"+embedded, riskLine, testingMD, pipelineMD, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	assertFirstAttestationBindsHead(t, content.Body, sctx.Run.HeadSHA)
-	if !strings.Contains(content.Body, escapedPipelineAttestationCommentPrefix) || !strings.Contains(content.Body, foreignSHA) {
-		t.Fatalf("fallback-embedded attestation was neither neutralized nor kept readable:\n%s", content.Body)
 	}
 }
 
