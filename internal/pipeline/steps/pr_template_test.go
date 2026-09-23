@@ -248,6 +248,39 @@ func TestPRTemplateDiscoveryUsesActiveProviderNamespace(t *testing.T) {
 	}
 }
 
+func TestPRTemplateDiscoveryAzureDefaultLocations(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"pull_request_template.md",
+		"docs/pull_request_template.md",
+		".azuredevops/pull_request_template.md",
+		".vsts/pull_request_template.md",
+	} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "## Azure Summary\n"
+			if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", name)
+			gitCmd(t, dir, "commit", "-m", "add Azure PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderAzureDevOps)
+			if err != nil || got != body {
+				t.Fatalf("Azure template %q = %q, err %v", name, got, err)
+			}
+		})
+	}
+}
+
 func TestPRTemplateExistingPRUsesLiveBasePolicy(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
