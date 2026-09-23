@@ -26,8 +26,12 @@ func TestPRTemplateStructureRequiresHeadingLevelsAndOrder(t *testing.T) {
 			}
 		})
 	}
-	if err := validateTranslatedTemplateStructure(template, "# Extra\n# Summary\nFilled.\n## Details\n# Validation\nDone.", identityHeadingTranslations(template)); err == nil {
-		t.Fatal("extra heading accepted")
+	body := "# Summary\nFilled.\n## Reviewer Notes\nAuthor addition.\n## Details\n# Validation\nDone."
+	if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
+		t.Fatalf("additional author heading rejected during drafting: %v", err)
+	}
+	if err := validateTemplateHeadingShape(template, body); err != nil {
+		t.Fatalf("additional author heading rejected during update: %v", err)
 	}
 }
 

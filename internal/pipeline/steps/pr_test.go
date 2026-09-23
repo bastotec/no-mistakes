@@ -493,6 +493,7 @@ func TestPRStep_UsesConfiguredBaseBranch(t *testing.T) {
 func TestPRStep_ExistingPRAgainstDifferentBaseIsUpdatedNotDuplicated(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "develop", baseSHA)
 	env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/42", "develop")
 
 	ag := &mockAgent{name: "test"}

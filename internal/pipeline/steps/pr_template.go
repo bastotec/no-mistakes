@@ -263,9 +263,7 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 	if len(translations) != len(sources) {
 		return fmt.Errorf("agent did not declare one English translation for every pr.template heading; refusing publication")
 	}
-	if len(bodyHeadings) != len(sources) {
-		return fmt.Errorf("agent added or omitted a pr.template heading; refusing publication")
-	}
+	bodyIndex := 0
 	for i, source := range sources {
 		translation := translations[i]
 		if translation.Source != source {
@@ -275,8 +273,17 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 		if len(translatedLines) != 1 || translatedLines[0] != translation.English || headingLevel(source) != headingLevel(translation.English) {
 			return fmt.Errorf("agent returned an invalid English pr.template heading; refusing publication")
 		}
-		if bodyHeadings[i] != translation.English {
-			return fmt.Errorf("agent omitted or reordered a translated pr.template heading; refusing publication")
+		found := false
+		for bodyIndex < len(bodyHeadings) {
+			candidate := bodyHeadings[bodyIndex]
+			bodyIndex++
+			if candidate == translation.English {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("agent omitted or reordered a required translated pr.template heading; refusing publication")
 		}
 	}
 	return nil
@@ -285,12 +292,19 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 func validateTemplateHeadingShape(template, body string) error {
 	sources := templateStructureLines(template)
 	bodyHeadings := templateStructureLines(body)
-	if len(bodyHeadings) != len(sources) {
-		return fmt.Errorf("final PR body does not preserve every committed template heading")
-	}
-	for i := range sources {
-		if headingLevel(sources[i]) != headingLevel(bodyHeadings[i]) {
-			return fmt.Errorf("final PR body changed committed template heading levels or order")
+	bodyIndex := 0
+	for _, source := range sources {
+		found := false
+		for bodyIndex < len(bodyHeadings) {
+			candidate := bodyHeadings[bodyIndex]
+			bodyIndex++
+			if headingLevel(source) == headingLevel(candidate) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("final PR body changed or reordered required committed template headings")
 		}
 	}
 	return nil
