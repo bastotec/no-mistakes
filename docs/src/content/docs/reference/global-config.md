@@ -126,10 +126,10 @@ Default agent for all repos and setup-wizard suggestions. Can be overridden per-
 |         |                                                                                             |
 | ------- | ------------------------------------------------------------------------------------------- |
 | Type    | `string` or `string[]`                                                                      |
-| Values  | `auto`, `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
+| Values  | `auto`, `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `deck`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
 | Default | `auto`                                                                                      |
 
-`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `grok`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, `antigravity`, then `cursor`.
+`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `grok`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, `antigravity`, `deck`, then `cursor`.
 `cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
 With default paths, `auto` only selects it when both `cursor-agent` and `acpx` resolve; `acp_registry_overrides.cursor` and `acpx_path` replace those respective defaults during availability checks.
 `acp:<target>` uses the user-installed `acpx` binary to run an ACP target, for example `acp:gemini`; `acp:cursor` uses the same default command as `cursor`.
@@ -137,6 +137,8 @@ Arbitrary `acp:<target>` agents are opt-in and are not considered by `agent: aut
 The effective agent configuration must resolve to a runnable runner before a new validation gate starts.
 If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
+
+This fork configures `agent: deck` in its repository config; other agents remain available. Deck runs `deck run --ephemeral -`, feeds the prompt and output schema on stdin, and validates the terminal JSONL `run_finished.output`. A missing terminal event or `run_failed` is an error, even with exit status zero. Review, fix, and Test use the same adapter with fresh sessions. Deck model selection uses `agent_config.deck.model`; effort and `disable_project_settings: true` are unsupported and fail closed. Native Deck turn/deadline limits still apply and can be configured through `agent_args_override.deck`.
 
 You can also set an ordered fallback list:
 
@@ -213,6 +215,7 @@ Default native binary names when no override is set:
 | `rovodev`  | `acli`     |
 | `opencode` | `opencode` |
 | `pi`       | `pi`       |
+| `deck`     | `deck`     |
 | `copilot`  | `copilot`  |
 | `antigravity` | `agy`      |
 
@@ -223,7 +226,7 @@ Model and reasoning effort per agent, in one common spelling. no-mistakes maps e
 |         |                                                                                     |
 | ------- | ----------------------------------------------------------------------------------- |
 | Type    | `map[string]{model, effort}`                                                        |
-| Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
+| Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `deck`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
 | Default | Empty (every harness keeps its own defaults)                                        |
 
 ```yaml
@@ -252,6 +255,7 @@ How each field maps:
 | `copilot`         | `--model`                                     | `--effort`                        | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `pi`              | `--model`                                     | `--thinking`                      | `minimal`, `low`, `medium`, `high`, `xhigh`, `max`  |
 | `opencode`        | session-message `model` (needs `provider/model`) | session-message `variant`      | provider-specific                                   |
+| `deck`           | `--model`                                     | not expressible                   | -                                                   |
 | `cursor`, `acp:*` | `acpx --model`                                | not expressible                   | -                                                   |
 | `rovodev`         | not expressible                               | not expressible                   | -                                                   |
 | `antigravity`     | not expressible                               | not expressible                   | -                                                   |
@@ -314,7 +318,7 @@ Use this for anything [`agent_config`](#agent_config) does not cover - service t
 |         |                                                           |
 | ------- | --------------------------------------------------------- |
 | Type    | `map[string][]string`                                     |
-| Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity` |
+| Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `deck`, `copilot`, `antigravity` |
 | Default | Empty (no extra flags)                                    |
 
 User-supplied flags are normally inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. Security suppression selected by trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) may be placed first while preserving a compatible operator pin. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
@@ -327,6 +331,7 @@ User-supplied flags are normally inserted ahead of no-mistakes' managed flags, s
 | `rovodev`  | `rovodev`, `serve`, `--disable-session-token`                                                               |
 | `opencode` | `serve`, `--hostname`, `--port`, `--print-logs`                                                             |
 | `pi`       | `--mode`, `--no-session`, `-c`, `--continue`, `-r`, `--resume`, `--session`, `--session-id`, `--fork`     |
+| `deck`     | `run`, `--ephemeral`, `--session`, `-s`                                                                    |
 | `copilot`  | `-p`, `--prompt`, `--output-format`, `--no-color`                                                          |
 | `antigravity` | `--dangerously-skip-permissions`, `--print`, `--json-schema`, `--output-format`, `--conversation`, `-c`, `--continue` |
 

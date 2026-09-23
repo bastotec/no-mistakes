@@ -126,10 +126,10 @@ Override the default agent for this repo and its setup-wizard suggestions.
 | | |
 | --- | --- |
 | Type | `string` or `string[]` |
-| Values | `auto`, `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `copilot`, `antigravity`, `cursor`, `acp:<target>` |
+| Values | Same as global [`agent`](/no-mistakes/reference/global-config/#agent) |
 | Default | Inherits from global config |
 
-`auto` resolves to the first supported native agent or ACP alias in this order: `claude`, `codex`, `grok`, `opencode`, `acli` with `rovodev` support, `pi`, `copilot`, `antigravity`, then `cursor`.
+The `auto` detection order is defined under global [`agent`](/no-mistakes/reference/global-config/#agent).
 `cursor` is an ACP alias for the `cursor` target with default command `cursor-agent acp`.
 Its availability uses the global `acpx_path` and `acp_registry_overrides.cursor` settings when present.
 `acp:<target>` uses the user-installed `acpx` binary configured in global config; `acp:cursor` uses the same default command as `cursor`.
