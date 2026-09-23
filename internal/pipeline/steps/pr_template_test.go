@@ -281,6 +281,69 @@ func TestPRTemplateDiscoveryAzureDefaultLocations(t *testing.T) {
 	}
 }
 
+func TestPRTemplateDiscoveryGiteaRootDefaults(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"pull_request_template.md", "PULL_REQUEST_TEMPLATE.md"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			body := "## Gitea Summary\n"
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", name)
+			gitCmd(t, dir, "commit", "-m", "add Gitea PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitea)
+			if err != nil || got != body {
+				t.Fatalf("Gitea template %q = %q, err %v", name, got, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateDiscoveryIgnoresOptionalDirectoryTemplates(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	files := map[string]scm.Provider{
+		".github/PULL_REQUEST_TEMPLATE/security.md":   scm.ProviderGitHub,
+		".gitlab/merge_request_templates/Security.md": scm.ProviderGitLab,
+		".gitea/PULL_REQUEST_TEMPLATE/security.md":    scm.ProviderGitea,
+		".forgejo/PULL_REQUEST_TEMPLATE/security.md":  scm.ProviderForgejo,
+	}
+	for name := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("## Security Review\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", ".github", ".gitlab", ".gitea", ".forgejo")
+	gitCmd(t, dir, "commit", "-m", "add optional PR templates")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+	for name, provider := range files {
+		got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, provider)
+		if err != nil || got != "" {
+			t.Fatalf("optional template %q selected for %s: %q, err %v", name, provider, got, err)
+		}
+	}
+	sctx.Config.PR.Template = ".github/PULL_REQUEST_TEMPLATE/security.md"
+	sctx.Config.TrustedConfigSHA = policySHA
+	selected, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || selected != "## Security Review\n" {
+		t.Fatalf("explicit optional template = %q, err %v", selected, err)
+	}
+}
+
 func TestPRTemplateExistingPRUsesLiveBasePolicy(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
