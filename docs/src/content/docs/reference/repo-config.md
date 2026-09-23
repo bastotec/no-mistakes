@@ -234,7 +234,7 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 | --- | --- |
 | Type | `string` (literal repository-relative path) |
 | Default | Empty: discover one conventional committed template, otherwise use the default generated narrative |
-| Trust | An explicit path and bytes come from the pinned trusted default-branch commit, even under `allow_repo_commands: true`; conventional discovery reads a freshly fetched, pinned tip of the active PR target branch; no global setting |
+| Trust | The configured path is selected only by the pinned trusted default-branch config, even under `allow_repo_commands: true`; its bytes and conventional discovery come from a freshly fetched, pinned tip of the active PR target branch; no global setting |
 
 ```yaml
 pr:
@@ -262,7 +262,7 @@ When `pr.template` is empty, the PR step also discovers one conventional committ
 
 With no committed Markdown default template, the default `## What Changed` format applies only when the writing and validation workers find no prose-only or ambiguous repository format rule. Such a rule is reported as unsupported and publication fails rather than claiming best-effort compliance. This bounded refusal is intentional: arbitrary prose cannot provide the source-bound heading identities the mechanical final check requires; repositories using prose-only format rules must commit a Markdown template or select one with `pr.template`.
 
-The configured path is read as a literal Git tree entry, never through the pushed worktree filesystem. Absolute/Windows paths, traversal, ref expressions, symlinks, submodules, missing/unreadable files, empty/non-UTF-8/NUL-containing content, and files over 16 KiB fail rather than silently replacing the template with a generic summary. Raw no-mistakes ownership/attestation markers are reserved. Invalid agent output, an incomplete or reordered heading-translation declaration, a changed required heading level, a missing required heading, unsupported prose-only rules, and agent or final-validation failure all stop publication. Templates without headings require an empty translation declaration. The structural guard is not a full Markdown parser or template policy engine; the SHA-bound final validator handles English and semantic format checks while the deterministic guard owns required heading shape and order.
+The configured path is validated as a literal Git path and read from the same pinned live target-policy tree as conventional discovery; trusted default-branch configuration chooses the path but cannot substitute another branch's bytes. The worktree file is never opened. Absolute/Windows paths, traversal, ref expressions, symlinks, submodules, missing/unreadable files, empty/non-UTF-8/NUL-containing content, and files over 16 KiB fail rather than silently replacing the template with a generic summary. Raw no-mistakes ownership/attestation markers are reserved. Invalid agent output, an incomplete or reordered heading-translation declaration, a changed required heading level, a missing required heading, unsupported prose-only rules, and agent or final-validation failure all stop publication. Templates without headings require an empty translation declaration. The structural guard is not a full Markdown parser or template policy engine; the SHA-bound final validator handles English and semantic format checks while the deterministic guard owns required heading shape and order.
 
 #### Author-preserving regeneration
 

@@ -49,7 +49,10 @@ func validateDefaultPRHeadingOrder(body string) error {
 		}
 		name := strings.TrimSpace(strings.TrimRight(strings.TrimSpace(strings.TrimPrefix(line, "##")), "#"))
 		position, ok := order[name]
-		if !ok || seen[name] || position < last {
+		if !ok {
+			continue
+		}
+		if seen[name] || position < last {
 			return fmt.Errorf("final PR body does not preserve the supported section order")
 		}
 		seen[name] = true
