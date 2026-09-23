@@ -35,6 +35,23 @@ Override how long a CLI client waits for an existing daemon socket to accept a c
 
 Takes precedence over `daemon_connect_timeout` in `config.yaml`. An empty, unparsable, or non-positive value is ignored and the config value (or its default) is used instead.
 
+## Deck gateway credentials
+
+The Deck CLI, not no-mistakes, resolves `PROXAI_API_KEY` or
+`PROXAI_API_KEY_FILE` (a path to a gateway client key file). When using Deck,
+make the selected variable available to the **daemon**, not only the terminal
+that launches `axi run`. Prefer a credential-file reference; the file must be
+readable by the daemon's account. Do not put a key value in repository config,
+prompts, or command arguments.
+
+A successful direct `deck run` does not prove the daemon inherited the same
+environment. See [Environment the daemon sees](#environment-the-daemon-sees)
+for startup environment resolution; an operator must arrange a daemon restart
+to pick up environment changes when no runs are in flight. Missing credentials
+can make Deck exit before emitting any JSONL. The adapter reports that nonzero
+exit and Deck's stderr diagnostic; a zero-exit stream without `run_finished`
+is still a protocol error, never a partial success.
+
 ## `FORGEJO_BASE_URL`
 
 Canonical Forgejo web base URL used for provider discovery and forgejo-axi commands.
