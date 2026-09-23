@@ -184,8 +184,18 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
+			// The repository template is a rule for the narrative this run
+			// writes, not a rule the run imposes on somebody else's prose. An
+			// existing description - including the empty one on a pull request
+			// the run is merely associated with - belongs to its author, so
+			// only a narrative drafted here is held to the template structure.
+			// The English and no-fabrication checks still cover every case.
+			validationTemplate := ""
+			if emptyNarrative != "" {
+				validationTemplate = template
+			}
 			validate := func(content prContent) error {
-				return s.validateFinalPRContent(sctx, content, template, policySHA, false)
+				return s.validateFinalPRContent(sctx, content, validationTemplate, policySHA, false)
 			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, validate); err != nil {
 				return nil, err
@@ -400,7 +410,12 @@ func publicationPRBaseBranch(sctx *pipeline.StepContext, host scm.Host, existing
 	if actual == "" {
 		reader, ok := host.(scm.PRBaseBranchReader)
 		if !ok {
-			return "", fmt.Errorf("existing pull request %s has no readable base branch for PR format policy", describePR(existing))
+			// Only some providers can report an existing pull request's live
+			// base branch; the rest carry it on FindPR or cannot answer at all.
+			// The configured integration branch is what every other step reads
+			// for those, so PR-format policy reads it from there too rather
+			// than refusing to publish on the provider entirely.
+			return configured, nil
 		}
 		base, err := reader.GetPRBaseBranch(sctx.Ctx, existing)
 		if err != nil {
