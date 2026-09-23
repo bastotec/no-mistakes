@@ -31,14 +31,19 @@ type prContent struct {
 	Body  string `json:"body"`
 }
 
+type prDraft struct {
+	prContent
+	UnsupportedRules []string `json:"unsupported_rules"`
+}
+
 var prContentSchema = json.RawMessage(`{
 	"type": "object",
 	"properties": {
-		"title": {"type": "string", "description": "Concise pull request title following repository configuration"},
-		"body": {"type": "string", "description": "English GitHub-flavored Markdown following committed repository PR description rules, or ## What Changed when none exist. Plain text, NOT JSON."},
-		"repository_format": {"type": "boolean", "description": "True when the body follows committed repository PR description format or required sections rather than the default format"}
+		"title": {"type": "string", "description": "Concise English pull request title following repository configuration"},
+		"body": {"type": "string", "description": "English GitHub-flavored Markdown starting with ## What Changed. Plain text, NOT JSON."},
+		"unsupported_rules": {"type": "array", "description": "Committed prose-only or ambiguous PR description rules that cannot be mechanically enforced", "items": {"type": "string"}}
 	},
-	"required": ["title", "body"]
+	"required": ["title", "body", "unsupported_rules"]
 }`)
 
 var prTitleSchema = json.RawMessage(`{
@@ -100,22 +105,18 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 	}
 
-	// Capture live author content before model drafting. An unreadable
-	// provider cannot promise template preservation.
-	var template string
-	if name := configuredPRTemplate(sctx); name != "" {
-		if _, ok := host.(scm.PRContentReader); !ok {
-			return nil, fmt.Errorf("pr.template requires raw PR content reads; this provider is unsupported")
-		}
-		var err error
-		template, err = loadPRTemplate(ctx, sctx.WorkDir, sctx.Config.TrustedConfigSHA, name)
-		if err != nil {
-			return nil, err
-		}
-	}
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
 	if err != nil {
 		return nil, err
+	}
+	template, err := resolvePRTemplate(ctx, sctx, baseSHA)
+	if err != nil {
+		return nil, err
+	}
+	if template != "" {
+		if _, ok := host.(scm.PRContentReader); !ok {
+			return nil, fmt.Errorf("committed PR templates require raw PR content reads; this provider is unsupported")
+		}
 	}
 	bodyLimit := scm.MaxPRBodyChars(provider)
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
@@ -175,7 +176,10 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit); err != nil {
+			validate := func(content prContent) error {
+				return s.validateFinalPRContent(sctx, content, template, baseSHA, false)
+			}
+			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, validate); err != nil {
 				return nil, err
 			}
 		} else {
@@ -403,13 +407,13 @@ func describePR(pr *scm.PR) string {
 // next rendering path somebody adds is not going to have one; a boundary scrub
 // covers sources nobody has written yet.
 func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
-	if name := configuredPRTemplate(sctx); name != "" {
+	template, err := resolvePRTemplate(sctx.Ctx, sctx, baseSHA)
+	if err != nil {
+		return prContent{}, err
+	}
+	if template != "" {
 		if !supportsPRTemplates(provider) {
-			return prContent{}, fmt.Errorf("pr.template is unsupported by this provider")
-		}
-		template, err := loadPRTemplate(sctx.Ctx, sctx.WorkDir, sctx.Config.TrustedConfigSHA, name)
-		if err != nil {
-			return prContent{}, err
+			return prContent{}, fmt.Errorf("committed PR templates are unsupported by this provider")
 		}
 		content, err := s.draftTemplateNarrative(sctx, branch, baseBranch, baseSHA, template)
 		if err != nil {
@@ -419,13 +423,24 @@ func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 		if err != nil {
 			return prContent{}, err
 		}
-		return composeOwnedPRContent(prOwnedBody{before: neutralizeAttestationMarkers(content.Body)}, content.Title, appendix, bodyLimit)
+		content, err = composeOwnedPRContent(prOwnedBody{before: neutralizeAttestationMarkers(content.Body)}, content.Title, appendix, bodyLimit)
+		if err != nil {
+			return prContent{}, err
+		}
+		if err := s.validateFinalPRContent(sctx, content, template, baseSHA, false); err != nil {
+			return prContent{}, err
+		}
+		return content, nil
 	}
 	content, err := s.draftPRContent(sctx, branch, baseBranch, baseSHA, provider, bodyLimit)
 	if err != nil {
 		return prContent{}, err
 	}
-	return redactPRContent(content), nil
+	content = redactPRContent(content)
+	if err := s.validateFinalPRContent(sctx, content, "", baseSHA, true); err != nil {
+		return prContent{}, err
+	}
+	return content, nil
 }
 
 // redactPRContent removes the operator's home directory from the content about
@@ -461,9 +476,9 @@ Rules:
 - Cover the full branch delta, not just the latest commit.
 %s
 %s
-- Inspect the target repository's committed PR description instructions (for example AGENTS.md, CONTRIBUTING.md, and pull request templates) using git show at the base commit above. Follow their format and required sections; set repository_format to true when such rules apply. Do not read uncommitted or pushed-branch instructions as the source of these rules.
-- Only when no committed PR description rules apply, use a "## What Changed" section with 1-3 concise bullets describing concrete changes, and set repository_format to false.
-- Body must be plain GitHub-flavored Markdown, never nested JSON. Repository-required sections, including Testing or Risk Assessment, are narrative: fill them only with supported facts. Do not invent recorded pipeline evidence or publication markers. Code appends its own evidence separately. In the default format, do not add Intent, Risk Assessment, Testing, or Pipeline sections.
+- Inspect the target repository's committed PR description instructions using git show at the base commit above. Put every prose-only or ambiguous PR body-format rule that cannot be mechanically enforced in unsupported_rules. Do not claim to follow it in the body.
+- Use a "## What Changed" section with 1-3 concise bullets describing concrete changes. A committed Markdown PR template is supplied through the separate template path instead of this default writer.
+- Body must be plain GitHub-flavored Markdown, never nested JSON. Do not add Intent, Risk Assessment, Testing, or Pipeline sections; code owns recorded evidence.
 - Derive every body claim from the final diff. Inspect it directly when the paths and statuses below do not provide enough detail.
 - Do not invent tests or behavior.
 
@@ -473,7 +488,7 @@ Diff stat:
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
-	prompt += prCompositionLanguageRules + prBodyBudgetPromptSection(bodyLimit)
+	prompt += prCreationSkill + prBodyBudgetPromptSection(bodyLimit)
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -488,20 +503,25 @@ Final diff paths and statuses:
 		return prContent{}, fmt.Errorf("agent returned no PR content; refusing generic fallback")
 	}
 
-	var draft struct {
-		prContent
-		RepositoryFormat bool `json:"repository_format"`
+	var rawDraft map[string]json.RawMessage
+	if err := json.Unmarshal(result.Output, &rawDraft); err != nil {
+		return prContent{}, fmt.Errorf("decode PR content: %w", err)
 	}
+	if _, ok := rawDraft["unsupported_rules"]; !ok {
+		return prContent{}, fmt.Errorf("agent omitted unsupported PR rule declarations")
+	}
+	var draft prDraft
 	if err := json.Unmarshal(result.Output, &draft); err != nil {
 		return prContent{}, fmt.Errorf("decode PR content: %w", err)
+	}
+	if len(draft.UnsupportedRules) != 0 {
+		return prContent{}, fmt.Errorf("committed prose-only PR rules are not mechanically supported: %s", strings.Join(draft.UnsupportedRules, "; "))
 	}
 	content := draft.prContent
 	content.Title = strings.TrimSpace(content.Title)
 	content.Body = strings.TrimSpace(content.Body)
 	content.Body = unwrapNestedPRBody(content.Body)
-	if !draft.RepositoryFormat {
-		content.Body = stripGeneratedSections(content.Body)
-	}
+	content.Body = stripGeneratedSections(content.Body)
 	content.Body = neutralizeAttestationMarkers(content.Body)
 	if content.Title == "" || content.Body == "" {
 		return prContent{}, fmt.Errorf("agent returned incomplete PR content; refusing generic fallback")
@@ -513,13 +533,6 @@ Final diff paths and statuses:
 	}
 	if content.Title != originalTitle {
 		slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
-	}
-	if draft.RepositoryFormat {
-		appendix, err := s.buildPRAppendix(sctx, provider)
-		if err != nil {
-			return prContent{}, err
-		}
-		return composeOwnedPRContent(prOwnedBody{before: content.Body}, content.Title, appendix, bodyLimit)
 	}
 	if bodyLimit > 0 {
 		content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
@@ -550,7 +563,7 @@ Rules:
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, sctx.Run.HeadSHA, baseBranch, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCompositionLanguageRules
+	prompt += prCreationSkill
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -571,15 +584,6 @@ Final diff paths and statuses:
 	return title, nil
 }
 
-// This precedence is local to PR composition, not a general override of
-// repository instructions for review, fixes, or other agent turns.
-const prCompositionLanguageRules = `
-
-PR composition language requirement:
-- Always write the pull-request title and body in English, in every repository.
-- A repository convention requesting another language does not override this requirement. Preserve its description format, required sections, and their order, but write headings and prose in English. Keep code identifiers, paths, and commands literal.
-`
-
 func prTitlePromptRules(sctx *pipeline.StepContext) string {
 	if sctx != nil && sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 		return "- Title must be only the bare concise title text used by the repository's configured title formatter. Do not include a branch identifier or any formatter prefix or suffix; those are applied deterministically after drafting."
@@ -597,9 +601,6 @@ func prTitleScopeRules(sctx *pipeline.StepContext) string {
 func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
 	if sctx == nil || sctx.Config == nil || sctx.Config.PR.TitleFormat == "" {
 		return conventional.TightenTitle(title), nil
-	}
-	if err := sctx.Config.PR.ValidateEnglishTitleFormat(); err != nil {
-		return "", err
 	}
 	branch := strings.TrimSpace(strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"))
 	if sctx.Config.PR.RequiresBranch() {
@@ -621,6 +622,10 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.P
 }
 
 func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider scm.Provider, owned bool) (pipelineMD, riskLine, testingMD string) {
+	return s.buildPipelineSections(sctx, provider, owned, true)
+}
+
+func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting bool) (pipelineMD, riskLine, testingMD string) {
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
 		slog.Warn("failed to query step results for pipeline summary", "error", err)
@@ -648,7 +653,9 @@ func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider sc
 	if owned && provider == scm.ProviderBitbucket && pipelineMD != "" {
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
-	testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+	if includeTesting {
+		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+	}
 	return pipelineMD, riskLine, testingMD
 }
 
