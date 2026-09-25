@@ -401,6 +401,136 @@ func TestMakeBuildRanksPrereleaseIdentifiersNumerically(t *testing.T) {
 	}
 }
 
+// Semver ranks a numeric prerelease identifier below an alphanumeric one:
+// with both v1.86.0-2 and v1.86.0-beta known, the beta is the newer
+// prerelease and an off-tag build must stamp it, not the numeric one git's
+// refname sort would hand back.
+func TestMakeBuildRanksNumericPrereleaseIdentifiersBelowAlphanumeric(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.86.0-2")
+	runScratchGit(t, gitPath, workDir, "tag", "v1.86.0-beta")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=1.86.0-beta-fork-") {
+		t.Fatalf("make build should stamp the alphanumeric prerelease semver ranks above the numeric one, got:\n%s", output)
+	}
+	if strings.Contains(output, "buildinfo.Version=1.86.0-2-fork-") {
+		t.Fatalf("make build must not stamp the numeric prerelease semver ranks below an alphanumeric one, got:\n%s", output)
+	}
+}
+
+// Semver orders alphanumeric prerelease identifiers of one core by text
+// order: `rc.1` is newer than `alpha.1`, so a clone knowing both stamps the
+// rc, never the alpha.
+func TestMakeBuildRanksPrereleaseIdentifiersByTextOrder(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.86.0-rc.1")
+	runScratchGit(t, gitPath, workDir, "tag", "v1.86.0-alpha.1")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=1.86.0-rc.1-fork-") {
+		t.Fatalf("make build should stamp rc.1, which semver ranks above alpha.1, got:\n%s", output)
+	}
+	if strings.Contains(output, "buildinfo.Version=1.86.0-alpha.1-fork-") {
+		t.Fatalf("make build must not stamp alpha.1 below the rc semver ranks above it, got:\n%s", output)
+	}
+}
+
+// A prerelease is everything after the version's first hyphen, so an
+// identifier may itself carry hyphens: `1.84.0-foo-bar`'s single identifier
+// `foo-bar` outranks `1.84.0-foo.bar`'s `foo`, which is only a prefix of
+// it, and the build must stamp it.
+func TestMakeBuildReadsHyphenBearingPrereleaseIdentifiers(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0-foo-bar")
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0-foo.bar")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=1.84.0-foo-bar-fork-") {
+		t.Fatalf("make build should stamp the hyphen-bearing prerelease whose identifier outranks its prefix, got:\n%s", output)
+	}
+	if strings.Contains(output, "buildinfo.Version=1.84.0-foo.bar-fork-") {
+		t.Fatalf("make build must not stamp the dot-split prerelease semver ranks below, got:\n%s", output)
+	}
+}
+
+// The tag scan accepts the optional v prefix exactly as the guard's own
+// version pattern does, and ranks by the stripped core: a clone whose only
+// release tag is v2.0.0 - or the same tag without the v - stamps
+// 2.0.0-fork-<sha>, never the silent dev fallback.
+func TestMakeBuildNamesTheOnlyReleaseTagWhateverShapeItHas(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	for _, tag := range []string{"v2.0.0", "2.0.0"} {
+		t.Run(tag, func(t *testing.T) {
+			workDir := writeTestMakeWorkspace(t)
+			commitTestMakeWorkspace(t, gitPath, workDir)
+			// The tag lands on a side branch so neither `git describe`
+			// nor reachability can supply the release and mask what the
+			// scan itself accepts.
+			runScratchGit(t, gitPath, workDir, "checkout", "-q", "-b", "side")
+			runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "the release")
+			runScratchGit(t, gitPath, workDir, "tag", tag)
+			runScratchGit(t, gitPath, workDir, "checkout", "-q", "-")
+
+			revCmd := exec.Command(gitPath, "rev-parse", "--short", "HEAD")
+			revCmd.Dir = workDir
+			revCmd.Env = scratchEnv(t)
+			revOut, err := revCmd.Output()
+			if err != nil {
+				t.Fatalf("rev-parse --short HEAD failed: %v", err)
+			}
+			short := strings.TrimSpace(string(revOut))
+
+			output := runMakeDryBuild(t, makePath, workDir, nil)
+
+			want := "/internal/buildinfo.Version=2.0.0-fork-" + short + " "
+			if !strings.Contains(output, want) {
+				t.Fatalf("make build should stamp %q from the only release tag, got:\n%s", strings.TrimSpace(want), output)
+			}
+		})
+	}
+}
+
 // A clone holding only a prerelease tag still knows a release: the fork
 // stamp names that prerelease, never a fabricated stable version.
 func TestMakeBuildUsesAPrereleaseOnlyClonesHighestPrerelease(t *testing.T) {
