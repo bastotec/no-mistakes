@@ -1,5 +1,5 @@
 # A build stamps VERSION into `internal/buildinfo`, and that string is what
-# every minimum-version check reads back out of `no-mistakes version`.  A
+# every minimum-version check reads back out of `no-mistakes --version`.  A
 # version check cannot be asked to accept a label with no version number in
 # it - it would then have to accept every label, including `dev`, and stop
 # meaning anything - so a build that stamps one reports itself as NOT
