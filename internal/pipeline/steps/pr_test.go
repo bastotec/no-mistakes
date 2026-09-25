@@ -1250,7 +1250,8 @@ func TestValidateFinalPRContentIntentProseHeadingsDoNotBreakDefaultOrder(t *test
 	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 	sctx.UserIntent = "## Testing\n\nManual verification.\n\n## What Changed\n\nNested intent heading."
 	body := prependIntentSection("## What Changed\n\n- add helper\n\n## Testing\n\nunit passed\n\n## Pipeline\n\ncomplete", sctx)
-	if err := (&PRStep{}).validateFinalPRContent(sctx, prContent{Title: "feat: helper", Body: body}, "", strings.Repeat("a", 40), true); err != nil {
+	content := prContent{Title: "feat: helper", Body: body}
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, "", strings.Repeat("a", 40), true); err != nil {
 		t.Fatalf("intent prose headings broke default heading order validation: %v", err)
 	}
 }
