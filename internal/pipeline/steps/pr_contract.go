@@ -77,7 +77,7 @@ func prContentDigest(content prContent) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(content.Title+"\x00"+content.Body)))
 }
 
-func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content prContent, template, baseSHA string, defaultFormat bool) error {
+func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, runWritten prContent, template, baseSHA string, defaultFormat bool) error {
 	if strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
 		return fmt.Errorf("cannot validate empty pull-request title or body")
 	}
@@ -86,27 +86,27 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content prCo
 			return err
 		}
 	}
-	digest := prContentDigest(content)
-	contentJSON, _ := json.Marshal(content)
+	digest := prContentDigest(runWritten)
+	contentJSON, _ := json.Marshal(runWritten)
 	templateJSON, _ := json.Marshal(template)
 	headingSourcesJSON, _ := json.Marshal(templateStructureLines(template))
-	prompt := fmt.Sprintf(`Validate the exact final pull-request title and body below before publication.
+	prompt := fmt.Sprintf(`Validate the pull-request title and body written by this run, below, before publication. Text owned by the pull request's author is preserved separately and is out of scope.
 %s
-The SHA-256 binds your verdict to the exact title and body. Return it unchanged.
+The SHA-256 binds your verdict to the exact title and body below. Return it unchanged.
 - pr_format_policy_sha: %s
-- mechanical_default_format: %t
 - content_sha256: %s
 - required_heading_sources_json: %s
-- english is true only when every natural-language passage is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, and machine metadata.
-- format_compliant is true only when the final body follows the supplied committed Markdown template, when non-empty, and contains its required sections in order. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported.
-- heading_translations contains one source/English pair for every required_heading_sources_json entry, in order. Copy source exactly; English must be the exact English heading present in the final body. Return an empty array when there is no template.
+- english is true only when every natural-language passage below is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, and machine metadata.
+- An empty title below means this run wrote no title; there is nothing to judge there.
+- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty, and contains its required sections in order. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported.
+- heading_translations contains one source/English pair for every required_heading_sources_json entry, in order. Copy source exactly; English must be the exact English heading present in the body below. Return an empty array when there is no template.
 - List every concrete violation in issues. Do not edit or translate the content.
 
 Committed template JSON string:
 %s
 
-Final PR content JSON:
-%s`, prCreationSkill, baseSHA, defaultFormat, digest, headingSourcesJSON, templateJSON, contentJSON)
+Run-written PR content JSON:
+%s`, prCreationSkill, baseSHA, digest, headingSourcesJSON, templateJSON, contentJSON)
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,

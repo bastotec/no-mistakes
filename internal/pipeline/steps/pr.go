@@ -206,13 +206,16 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// existing description - including the empty one on a pull request
 			// the run is merely associated with - belongs to its author, so
 			// only a narrative drafted here is held to the template structure.
-			// The English and no-fabrication checks still cover every case.
+			// The English and no-fabrication checks likewise cover only the
+			// fields this run writes: its drafted title, its drafted narrative,
+			// and the generated appendix.
 			validationTemplate := ""
 			if emptyNarrative != "" {
 				validationTemplate = template
 			}
+			runWritten := prContent{Title: title, Body: strings.TrimSpace(emptyNarrative + "\n\n" + appendix)}
 			validate := func(content prContent) error {
-				return s.validateFinalPRContent(sctx, content, validationTemplate, policySHA, false)
+				return s.validateFinalPRContent(sctx, content, redactPRContent(runWritten), validationTemplate, policySHA, false)
 			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, validate); err != nil {
 				return nil, err
@@ -500,7 +503,7 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 		if err != nil {
 			return prContent{}, err
 		}
-		if err := s.validateFinalPRContent(sctx, content, template, policySHA, false); err != nil {
+		if err := s.validateFinalPRContent(sctx, content, content, template, policySHA, false); err != nil {
 			return prContent{}, err
 		}
 		return content, nil
@@ -510,7 +513,7 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 		return prContent{}, err
 	}
 	content = redactPRContent(content)
-	if err := s.validateFinalPRContent(sctx, content, "", policySHA, true); err != nil {
+	if err := s.validateFinalPRContent(sctx, content, content, "", policySHA, true); err != nil {
 		return prContent{}, err
 	}
 	return content, nil

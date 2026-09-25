@@ -550,6 +550,49 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 	}
 }
 
+func TestPRStep_ValidationVerdictScopeExcludesAuthorProse(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	author := "# Overview\n\nDescrição humana em português.\n\n## Testing\n\n- [ ] Mantenedor aprova\n"
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=Título do autor")
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "mechanical_default_format") {
+			t.Error("verdict prompt carried the unconsumed mechanical_default_format field")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		// The verdict may only see what this run writes: authored prose that
+		// reaches the validator here would deadlock a body the run must preserve.
+		english := !strings.Contains(opts.Prompt, "Descrição humana em português")
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: english, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("author-owned prose failed the run-written verdict: %v", err)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := parsePROwnedBody(string(body))
+	if err != nil || !strings.Contains(parts.before, "Descrição humana em português") {
+		t.Fatalf("author body changed or dropped: %+v, %v", parts, err)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("run-written appendix missing:\n%s", body)
+	}
+}
+
 func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
