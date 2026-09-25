@@ -110,6 +110,21 @@ func wrapPRAppendix(appendix string) string {
 	return fmt.Sprintf("%s%x -->\n%s\n%s", prAppendixStart, sha256.Sum256([]byte(appendix)), appendix, prAppendixEnd)
 }
 
+func prTitleMatches(published, stored string) bool {
+	return stripDraftPRTitleMarker(stored) == stripDraftPRTitleMarker(published)
+}
+
+func stripDraftPRTitleMarker(title string) string {
+	trimmed := strings.TrimSpace(title)
+	lower := strings.ToLower(trimmed)
+	for _, marker := range []string{"draft:", "[draft]", "(draft)"} {
+		if strings.HasPrefix(lower, marker) {
+			return strings.TrimSpace(trimmed[len(marker):])
+		}
+	}
+	return trimmed
+}
+
 // composeOwnedPRContent uses the same publication redaction owner as ordinary
 // drafting, BEFORE stamping the byte-integrity guard. No clamp or heading-based
 // stripper may run here: if author text and all recorded evidence cannot fit,
@@ -195,7 +210,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return fmt.Errorf("verify templated PR update: %w", err)
 		}
-		if verified.Body != content.Body || verified.Title != expectedTitle {
+		if verified.Body != content.Body || !prTitleMatches(expectedTitle, verified.Title) {
 			return fmt.Errorf("PR title or body changed or update did not settle; refusing to report successful publication")
 		}
 		return nil

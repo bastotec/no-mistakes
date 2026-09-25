@@ -1244,6 +1244,17 @@ func TestValidateDefaultPRHeadingOrderAllowsAdditionalSections(t *testing.T) {
 	}
 }
 
+func TestValidateFinalPRContentIntentProseHeadingsDoNotBreakDefaultOrder(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	sctx.UserIntent = "## Testing\n\nManual verification.\n\n## What Changed\n\nNested intent heading."
+	body := prependIntentSection("## What Changed\n\n- add helper\n\n## Testing\n\nunit passed\n\n## Pipeline\n\ncomplete", sctx)
+	if err := (&PRStep{}).validateFinalPRContent(sctx, prContent{Title: "feat: helper", Body: body}, "", strings.Repeat("a", 40), true); err != nil {
+		t.Fatalf("intent prose headings broke default heading order validation: %v", err)
+	}
+}
+
 func TestPRBodyBudgetPromptSection(t *testing.T) {
 	t.Parallel()
 	if got := prBodyBudgetPromptSection(0); got != "" {
@@ -1768,7 +1779,7 @@ func TestPRStep_BuildPRContentTruncatesGeneratedPipelineUpdates(t *testing.T) {
 		}
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2088,9 +2099,10 @@ func TestPRStep_ProseOnlyRepositoryFormatFailsClosed(t *testing.T) {
 		if got := gitCmd(t, opts.CWD, "show", baseSHA+":CONTRIBUTING.md"); got != strings.TrimSpace(rule) {
 			t.Fatalf("committed rule unavailable: %q", got)
 		}
-		payload, err := json.Marshal(prDraft{
-			prContent:        prContent{Title: "fix: follow repository PR sections", Body: "## What Changed\n\n- update PR composition"},
-			UnsupportedRules: []string{"required sections are declared only in CONTRIBUTING.md"},
+		payload, err := json.Marshal(map[string]any{
+			"title":             "fix: follow repository PR sections",
+			"body":              "## What Changed\n\n- update PR composition",
+			"unsupported_rules": []string{"required sections are declared only in CONTRIBUTING.md"},
 		})
 		return &agent.Result{Output: payload}, err
 	}}
@@ -2427,7 +2439,7 @@ func TestPRStep_PromptRequiresReleaseTypesForProductImpact(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 
 	step := &PRStep{}
-	if _, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0); err != nil {
+	if _, err := step.buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0); err != nil {
 		t.Fatal(err)
 	}
 	if len(ag.calls) != 1 {
@@ -2495,7 +2507,7 @@ func TestPRStep_HangingAgentFailsAfterTimeout(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.AgentTimeout = 20 * time.Millisecond
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err == nil {
 		t.Fatalf("buildPRContent = %+v, want timeout failure without fallback", content)
 	}
@@ -2514,7 +2526,7 @@ func TestPRStep_LateSuccessAfterTimeoutDoesNotUseAgentTitle(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Config.AgentTimeout = 20 * time.Millisecond
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err == nil {
 		t.Fatalf("buildPRContent = %+v, want late result refusal", content)
 	}
@@ -2552,7 +2564,7 @@ func TestPRStep_EmbeddedAttestationDoesNotShadowTheRealOne(t *testing.T) {
 		strings.ReplaceAll(embedded, `"`, `\"`) + `"}]}`
 	insertCompletedStep(t, sctx, types.StepTest, findings, "")
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2635,7 +2647,7 @@ func TestPRStep_AgentBodyAttestationDoesNotShadowTheRealOne(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{TestingSummary: "Ran the focused suite."}), "")
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2705,7 +2717,7 @@ func TestPRStep_ForeignAttestationsInEveryComponentDoNotShadowTheRealOne(t *test
 		}},
 	}), "")
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

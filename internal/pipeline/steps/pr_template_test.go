@@ -162,6 +162,9 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	if err != nil || !parts.managed || !strings.Contains(parts.before, "## Testing") {
 		t.Fatalf("author Testing heading was stripped or ownership missing: %+v, %v", parts, err)
 	}
+	if !strings.Contains(parts.appendix, noMistakesPRSignature) {
+		t.Fatalf("template appendix dropped the no-mistakes signature:\n%s", parts.appendix)
+	}
 	if got := parsePipelineAttestationForTest(t, string(body)).HeadSHA; got != sctx.Run.HeadSHA {
 		t.Fatalf("head = %q, want %s", got, sctx.Run.HeadSHA)
 	}
@@ -206,7 +209,7 @@ func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +435,7 @@ func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 		return &agent.Result{Output: data}, nil
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature/PROJ-123-add-widget", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature/PROJ-123-add-widget", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +501,7 @@ func TestPRTemplateRejectsNonEnglishHeadingTranslation(t *testing.T) {
 		return &agent.Result{Output: payload}, nil
 	}
 
-	if _, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0); err == nil || !strings.Contains(err.Error(), "Spanish") {
+	if _, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0); err == nil || !strings.Contains(err.Error(), "Spanish") {
 		t.Fatalf("buildPRContent() error = %v, want non-English heading refusal", err)
 	}
 }
@@ -691,7 +694,7 @@ func TestPRTemplateUnsupportedProviderIsExplicit(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
 	for _, provider := range []scm.Provider{scm.ProviderUnknown} {
-		if _, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, provider, 4000); err == nil {
+		if _, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, provider, 4000); err == nil {
 			t.Errorf("provider %v silently accepted template preservation", provider)
 		}
 	}
