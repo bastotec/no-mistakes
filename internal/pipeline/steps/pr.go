@@ -31,7 +31,7 @@ type prContent struct {
 	Body  string `json:"body"`
 }
 
-func decodePRDraftOutput(output []byte, dest any, failure string) error {
+func decodePRDraftOutput(output []byte, dest any, failure string, refuseUnsupportedRules bool) error {
 	var fields map[string]json.RawMessage
 	if err := json.Unmarshal(output, &fields); err != nil {
 		return fmt.Errorf("%s: %w", failure, err)
@@ -47,7 +47,7 @@ func decodePRDraftOutput(output []byte, dest any, failure string) error {
 	if err := json.Unmarshal(rulesJSON, &rules); err != nil {
 		return fmt.Errorf("%s: %w", failure, err)
 	}
-	if len(rules) != 0 {
+	if refuseUnsupportedRules && len(rules) != 0 {
 		return fmt.Errorf("committed prose-only PR rules are not mechanically supported: %s", strings.Join(rules, "; "))
 	}
 	return nil
@@ -583,7 +583,7 @@ Final diff paths and statuses:
 	}
 
 	var content prContent
-	if err := decodePRDraftOutput(result.Output, &content, "decode PR content"); err != nil {
+	if err := decodePRDraftOutput(result.Output, &content, "decode PR content", true); err != nil {
 		return prContent{}, err
 	}
 	content.Title = strings.TrimSpace(content.Title)
@@ -687,11 +687,7 @@ func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
 // scoped to this run's own steps and rounds, so they already describe only
 // the final terminal state each step reached in this run.
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.Provider) (pipelineMD, riskLine, testingMD string) {
-	return s.buildPipelineSectionFor(sctx, provider, false)
-}
-
-func (s *PRStep) buildPipelineSectionFor(sctx *pipeline.StepContext, provider scm.Provider, owned bool) (pipelineMD, riskLine, testingMD string) {
-	return s.buildPipelineSections(sctx, provider, owned, true)
+	return s.buildPipelineSections(sctx, provider, false, true)
 }
 
 func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting bool) (pipelineMD, riskLine, testingMD string) {

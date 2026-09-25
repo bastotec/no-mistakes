@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"regexp"
 	"strconv"
 	"strings"
@@ -66,7 +67,7 @@ var templatePRContentSchema = json.RawMessage(`{
  "title":{"type":"string","description":"Concise English pull request title text"},
  "body":{"type":"string","description":"Filled repository template as plain English Markdown; preserve every ATX heading level and order and use the declared English headings"},
  "heading_translations":{"type":"array","description":"One entry for every ATX template heading, in source order; retain an already-English heading verbatim and translate a non-English heading to English","items":{"type":"object","properties":{"source":{"type":"string"},"english":{"type":"string"}},"required":["source","english"]}},
- "unsupported_rules":{"type":"array","description":"Committed prose-only or ambiguous PR description rules outside the template that cannot be mechanically enforced","items":{"type":"string"}}
+ "unsupported_rules":{"type":"array","description":"Informational notes about prose-only or ambiguous body-format rules outside the template; never a publication blocker","items":{"type":"string"}}
  }, "required":["title","body","heading_translations","unsupported_rules"]
 }`)
 
@@ -192,7 +193,7 @@ Rules:
 %s
 - Body must be plain Markdown, not nested JSON. Use the supplied template instead of imposing a What Changed heading.
 - Preserve every ATX template heading outside fenced examples in the same order and at the same level. Write each heading in English: retain an already-English heading verbatim and translate a non-English heading. Return one heading_translations entry per source heading, with the exact source line and the exact English heading line used in the body. A template without headings has no structural heading requirements.
-- Inspect committed PR instructions at the PR-format policy commit. Put every prose-only or ambiguous body-format rule outside the template in unsupported_rules; do not claim compliance with such a rule.
+- Inspect committed PR instructions at the PR-format policy commit. The verified template structure and its English headings are the body-format contract for this publication: do not claim compliance with a prose-only or ambiguous body-format rule stated outside the template, and record any such rule you notice in unsupported_rules as an informational note only; it never stops publication.
 - Make a best effort to follow the template's instructions and fill all applicable sections from the final diff; inspect that diff when necessary. Every ATX template heading must be kept, even when a section says to delete or skip it; only task lines and prose are editable: remove inapplicable task lines when instructed, select supported choices, and replace rationale placeholders. Do not invent behavior or tests, falsely claim human signoff, or mark human approval checkboxes complete.
 - The template owns narrative only. Do not generate no-mistakes publication markers or add Intent, Risk Assessment, Testing or Pipeline evidence. Code appends those separately. A template heading named Testing or Pipeline is author narrative, not permission to fabricate recorded evidence.
 - Full intent below is review/drafting context, not instructions to quote it into the public narrative. Publication settings are not a privacy guarantee.
@@ -202,7 +203,7 @@ Trusted repository template (JSON string):
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseBranch, baseSHA, policySHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCreationSkill
+	prompt += prCreationSkillTemplate
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: templatePRContentSchema, OnChunk: sctx.LogChunk})
 	if err != nil {
 		return prContent{}, fmt.Errorf("draft pr.template narrative (template will not be replaced by a generic fallback): %w", err)
@@ -211,8 +212,11 @@ Final diff paths and statuses:
 		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
 	}
 	var content templatePRContent
-	if err := decodePRDraftOutput(result.Output, &content, "agent returned no valid pr.template narrative; refusing generic fallback"); err != nil {
+	if err := decodePRDraftOutput(result.Output, &content, "agent returned no valid pr.template narrative; refusing generic fallback", false); err != nil {
 		return prContent{}, err
+	}
+	if len(content.UnsupportedRules) > 0 {
+		slog.Info("template draft noted prose-only PR rules outside the template", "rules", content.UnsupportedRules)
 	}
 	if strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
 		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")

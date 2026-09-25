@@ -15,10 +15,16 @@ const prContentValidationPurpose = "pr-content-validation"
 // The policy clauses are included only when this run authors narrative; the
 // narrative-free final verdict omits them (see validateFinalPRContent), where
 // there is no run-written prose for a repository body-format rule to govern.
-const prCreationSkillPolicyClauses = `
-- Inspect only the pinned PR-format policy revision named in the task for repository pull-request rules.
-- A committed Markdown pull-request template is the only mechanically enforceable custom body format. Preserve every ATX heading level and order, translating heading text to English when necessary.
+const prCreationSkillInspectClause = `
+- Inspect only the pinned PR-format policy revision named in the task for repository pull-request rules.`
+
+const prCreationSkillTemplateFormatClause = `
+- A committed Markdown pull-request template is the only mechanically enforceable custom body format. Preserve every ATX heading level and order, translating heading text to English when necessary.`
+
+const prCreationSkillProseRuleClause = `
 - Report prose-only or ambiguous body-format rules as unsupported instead of claiming compliance. Never replace them with the default format.`
+
+const prCreationSkillPolicyClauses = prCreationSkillInspectClause + prCreationSkillTemplateFormatClause + prCreationSkillProseRuleClause
 
 const prCreationSkillEnglishClauses = `
 - Write all natural-language title and body text in English. Paths, URLs, commands, code, identifiers, product names, and repository issue keys remain literal.
@@ -28,6 +34,8 @@ const prCreationSkillHeader = `
 Shared pull-request creation skill:`
 
 const prCreationSkill = prCreationSkillHeader + prCreationSkillPolicyClauses + prCreationSkillEnglishClauses + "\n"
+
+const prCreationSkillTemplate = prCreationSkillHeader + prCreationSkillInspectClause + prCreationSkillTemplateFormatClause + prCreationSkillEnglishClauses + "\n"
 
 var prContentValidationSchema = json.RawMessage(`{
  "type":"object","properties":{
@@ -100,10 +108,16 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	templateJSON, _ := json.Marshal(template)
 	headingSourcesJSON, _ := json.Marshal(templateStructureLines(template))
 	skill := prCreationSkillHeader + prCreationSkillEnglishClauses
-	if runWroteNarrative {
+	switch {
+	case template != "":
+		skill = prCreationSkillTemplate
+	case runWroteNarrative:
 		skill = prCreationSkill
 	}
 	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty, with every heading from required_heading_sources_json present in order. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported."
+	if template != "" {
+		formatRule += " A template is supplied here: the verified template structure is the format contract, so prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
+	}
 	if !runWroteNarrative {
 		formatRule = "- format_compliant covers only prose this run wrote: the content below is only this run's title (empty when it wrote none) and its machine-generated no-mistakes evidence appendix, so there is no run-written body prose for a repository body-format rule to govern. Do not report prose-only or ambiguous body-format rules as issues; judge only English and fabrication in the run-written text."
 	}

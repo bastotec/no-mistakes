@@ -176,6 +176,58 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	}
 }
 
+func TestPRTemplatePublishesWhenDraftNotesOutsideProseRules(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "Report prose-only or ambiguous body-format rules as unsupported") {
+			t.Error("template drafting prompt still solicits prose-rule declarations")
+		}
+		draft := templateDraft("feat(pipeline): fill template", filledPRTemplate, testPRTemplate)
+		draft.UnsupportedRules = []string{"PR descriptions must link the issue they close"}
+		data, err := json.Marshal(draft)
+		return &agent.Result{Output: data}, err
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "Report prose-only or ambiguous body-format rules as unsupported") {
+			t.Error("template verdict prompt still solicits a prose-rule refusal")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	env, logFile := fakeGH(t, "")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=feat(pipeline): fill template")
+
+	out, err := (&PRStep{}).Execute(sctx)
+	if err != nil || out == nil || out.PRURL == "" {
+		t.Fatalf("template publication blocked by an outside prose rule: %+v, %v", out, err)
+	}
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logs), "pr create") {
+		t.Fatalf("template PR was not created:\n%s", logs)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), filledPRTemplate) {
+		t.Fatalf("template narrative not published:\n%s", body)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("template appendix missing:\n%s", body)
+	}
+}
+
 func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
