@@ -909,7 +909,10 @@ func TestPRStep_FinalValidatorMustBindExactContent(t *testing.T) {
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: json.RawMessage(`{"title":"fix: repair widget","body":"## What Changed\n\n- repair widget"}`)}, nil
 	}}
-	ag.validationFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, "Report prose-only or ambiguous body-format rules as unsupported") {
+			t.Error("narrative-written verdict prompt lost the prose-rule policy clause")
+		}
 		payload, _ := json.Marshal(prContentValidation{
 			ContentSHA256: strings.Repeat("0", 64), English: true, FormatCompliant: true, Issues: []string{},
 		})

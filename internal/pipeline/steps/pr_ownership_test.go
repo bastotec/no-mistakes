@@ -2,13 +2,17 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
 )
 
 func ownedFixture(t *testing.T) (prContent, string) {
@@ -237,6 +241,47 @@ func TestUpdateOwnedPRAcceptsForgeDraftTitleMarker(t *testing.T) {
 	}
 	if !strings.Contains(host.body, "New recorded fact.") || host.title != "Draft: "+content.Title {
 		t.Fatalf("draft title update did not settle: title=%q body=%q", host.title, host.body)
+	}
+}
+
+// A draft marker written by GitLab's UpdatePR (which re-applies the live MR's
+// marker onto the written title) must round-trip through the readback
+// comparison inside updateOwnedPR for every marker form a forge can store.
+func TestGitLabDraftMarkerWrittenByUpdatePRRoundTripsReadbackComparison(t *testing.T) {
+	t.Parallel()
+	content, appendix := ownedFixture(t)
+	for _, marker := range []string{"Draft: ", "[Draft] ", "(draft) "} {
+		t.Run(strings.TrimSpace(marker), func(t *testing.T) {
+			storedTitle := marker + content.Title
+			viewJSON, err := json.Marshal(map[string]any{
+				"iid":         9,
+				"title":       storedTitle,
+				"description": content.Body,
+				"web_url":     "https://gitlab.com/test/repo/-/merge_requests/9",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env, logFile := fakeGlab(t, string(viewJSON))
+			sctx := &pipeline.StepContext{Ctx: context.Background(), Env: env, WorkDir: t.TempDir()}
+			cmdFactory := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return stepCmdContext(sctx, ctx, name, args...)
+			}
+			host := gitlab.New(cmdFactory, func() bool { return true }, "gitlab.com", "test/repo")
+			pr := &scm.PR{Number: "9", URL: "https://gitlab.com/test/repo/-/merge_requests/9"}
+			initial := scm.PRContent{Title: storedTitle, Body: content.Body}
+			if err := updateOwnedPR(sctx, host, pr, initial, content.Title, "", appendix, 0, nil); err != nil {
+				t.Fatalf("marker written by UpdatePR reported readback divergence: %v", err)
+			}
+			logged, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "mr update 9 --title Draft: " + content.Title + " --description"
+			if !strings.Contains(string(logged), want) {
+				t.Fatalf("UpdatePR did not re-apply the draft marker %q:\n%s", want, logged)
+			}
+		})
 	}
 }
 

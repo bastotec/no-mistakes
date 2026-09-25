@@ -115,14 +115,7 @@ func prTitleMatches(published, stored string) bool {
 }
 
 func stripDraftPRTitleMarker(title string) string {
-	trimmed := strings.TrimSpace(title)
-	lower := strings.ToLower(trimmed)
-	for _, marker := range []string{"draft:", "[draft]", "(draft)"} {
-		if strings.HasPrefix(lower, marker) {
-			return strings.TrimSpace(trimmed[len(marker):])
-		}
-	}
-	return trimmed
+	return scm.StripDraftTitleMarker(title)
 }
 
 // composeOwnedPRContent uses the same publication redaction owner as ordinary

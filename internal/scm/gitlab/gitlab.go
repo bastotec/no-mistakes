@@ -366,10 +366,11 @@ func (h *Host) SetPRBaseBranch(ctx context.Context, pr *scm.PR, baseBranch strin
 }
 
 // isDraftTitle reports whether an MR title carries a marker GitLab treats as
-// draft: "Draft:", "[Draft]", or "(Draft)", all case-insensitive.
+// draft: "Draft:", "[Draft]", or "(Draft)", all case-insensitive. The marker
+// set is owned by scm.HasDraftTitleMarker so the write side here and the PR
+// readback comparison cannot drift apart.
 func isDraftTitle(title string) bool {
-	t := strings.ToLower(strings.TrimSpace(title))
-	return strings.HasPrefix(t, "draft:") || strings.HasPrefix(t, "[draft]") || strings.HasPrefix(t, "(draft)")
+	return scm.HasDraftTitleMarker(title)
 }
 
 func validateMRTitle(title string) error {
