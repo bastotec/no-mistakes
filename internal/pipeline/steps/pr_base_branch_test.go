@@ -55,6 +55,16 @@ func TestEffectivePRBaseBranch_DefaultBranchWhenUnset(t *testing.T) {
 	}
 }
 
+func TestPublicationPRBaseBranchPrefersExistingPRForgeBase(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	existing := &scm.PR{Number: "7", BaseBranch: "develop"}
+	got, err := publicationPRBaseBranch(sctx, &ownershipRaceHost{}, existing, "main")
+	if err != nil || got != "develop" {
+		t.Fatalf("publicationPRBaseBranch() = (%q, %v), want the existing PR's live forge base develop", got, err)
+	}
+}
+
 func TestValidateRunPRBaseBranchName_RejectsInvalidBranch(t *testing.T) {
 	t.Parallel()
 	_, err := ValidateRunPRBaseBranchName("bad..branch")

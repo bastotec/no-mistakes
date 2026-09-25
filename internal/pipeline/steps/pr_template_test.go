@@ -607,6 +607,17 @@ func TestPRStep_NarrativeFreeAppendixPublicationSkipsFormatVerdict(t *testing.T)
 		if strings.Contains(opts.Prompt, "set it false when committed prose-only") {
 			t.Error("narrative-free verdict still demands a prose-rule format refusal")
 		}
+		for _, policyClause := range []string{
+			"Inspect only the pinned PR-format policy revision named in the task",
+			"Report prose-only or ambiguous body-format rules as unsupported",
+		} {
+			if strings.Contains(opts.Prompt, policyClause) {
+				t.Errorf("narrative-free verdict prompt still carries the policy clause %q", policyClause)
+			}
+		}
+		if !strings.Contains(opts.Prompt, "Write all natural-language title and body text in English") {
+			t.Error("narrative-free verdict prompt lost the English requirement")
+		}
 		digest, err := validationDigestFromPrompt(opts.Prompt)
 		if err != nil {
 			return nil, err
