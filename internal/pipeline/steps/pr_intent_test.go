@@ -45,7 +45,7 @@ func TestPRPublishIntentSuppressionCoversDefaultAgent(t *testing.T) {
 			sctx.Config.PR = config.Merge(config.DefaultGlobalConfig(), config.EffectiveRepoConfig(pushed, trusted, true)).PR
 			sctx.UserIntent = "Entire original intent remains reviewer input."
 			for _, limit := range []int{0, 4000} {
-				got, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", base, scm.ProviderGitHub, limit)
+				got, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, limit)
 				if err != nil || strings.Contains(got.Body, "## Intent") != tc.want || !strings.Contains(got.Body, "## What Changed") {
 					t.Fatalf("limit=%d: %+v, %v", limit, got, err)
 				}

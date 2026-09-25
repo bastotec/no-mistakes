@@ -31,9 +31,26 @@ type prContent struct {
 	Body  string `json:"body"`
 }
 
-type prDraft struct {
-	prContent
-	UnsupportedRules []string `json:"unsupported_rules"`
+func decodePRDraftOutput(output []byte, dest any, failure string) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(output, &fields); err != nil {
+		return fmt.Errorf("%s: %w", failure, err)
+	}
+	rulesJSON, ok := fields["unsupported_rules"]
+	if !ok {
+		return fmt.Errorf("agent omitted unsupported PR rule declarations")
+	}
+	if err := json.Unmarshal(output, dest); err != nil {
+		return fmt.Errorf("%s: %w", failure, err)
+	}
+	var rules []string
+	if err := json.Unmarshal(rulesJSON, &rules); err != nil {
+		return fmt.Errorf("%s: %w", failure, err)
+	}
+	if len(rules) != 0 {
+		return fmt.Errorf("committed prose-only PR rules are not mechanically supported: %s", strings.Join(rules, "; "))
+	}
+	return nil
 }
 
 var prContentSchema = json.RawMessage(`{
@@ -250,7 +267,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if err != nil {
 			return nil, fmt.Errorf("verify created templated PR: %w", err)
 		}
-		if actual.Title != content.Title || actual.Body != content.Body {
+		if !prTitleMatches(content.Title, actual.Title) || actual.Body != content.Body {
 			return nil, fmt.Errorf("created PR title or body differs from the validated template content; refusing successful publication")
 		}
 	}
@@ -443,7 +460,15 @@ func describePR(pr *scm.PR) string {
 	return ""
 }
 
-// buildPRContent drafts the pull request title and body and then applies the
+func resolvePRPolicySHA(ctx context.Context, sctx *pipeline.StepContext, baseBranch string) (string, error) {
+	sha, resolved := resolveRunDefaultBranchTip(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	if !resolved || !usableBaseSHA(sha) {
+		return "", fmt.Errorf("fetch and pin current PR target branch %s before reading its format", baseBranch)
+	}
+	return sha, nil
+}
+
+// buildPRContentWithPolicy drafts the pull request title and body and then applies the
 // publication redaction boundary. New template bodies and author-preserving
 // updates use composeOwnedPRContent, which calls the same redactPRContent owner
 // before stamping its integrity guard. This covers every source: agent-authored
@@ -454,22 +479,6 @@ func describePR(pr *scm.PR) string {
 // per-source scrub is a set of guards that has to be complete to work, and the
 // next rendering path somebody adds is not going to have one; a boundary scrub
 // covers sources nobody has written yet.
-func resolvePRPolicySHA(ctx context.Context, sctx *pipeline.StepContext, baseBranch string) (string, error) {
-	sha, resolved := resolveRunDefaultBranchTip(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
-	if !resolved || !usableBaseSHA(sha) {
-		return "", fmt.Errorf("fetch and pin current PR target branch %s before reading its format", baseBranch)
-	}
-	return sha, nil
-}
-
-func (s *PRStep) buildPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
-	policySHA, err := resolvePRPolicySHA(sctx.Ctx, sctx, baseBranch)
-	if err != nil {
-		return prContent{}, err
-	}
-	return s.buildPRContentWithPolicy(sctx, branch, baseBranch, baseSHA, policySHA, provider, bodyLimit)
-}
-
 func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
 	template, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, provider)
 	if err != nil {
@@ -568,21 +577,10 @@ Final diff paths and statuses:
 		return prContent{}, fmt.Errorf("agent returned no PR content; refusing generic fallback")
 	}
 
-	var rawDraft map[string]json.RawMessage
-	if err := json.Unmarshal(result.Output, &rawDraft); err != nil {
-		return prContent{}, fmt.Errorf("decode PR content: %w", err)
+	var content prContent
+	if err := decodePRDraftOutput(result.Output, &content, "decode PR content"); err != nil {
+		return prContent{}, err
 	}
-	if _, ok := rawDraft["unsupported_rules"]; !ok {
-		return prContent{}, fmt.Errorf("agent omitted unsupported PR rule declarations")
-	}
-	var draft prDraft
-	if err := json.Unmarshal(result.Output, &draft); err != nil {
-		return prContent{}, fmt.Errorf("decode PR content: %w", err)
-	}
-	if len(draft.UnsupportedRules) != 0 {
-		return prContent{}, fmt.Errorf("committed prose-only PR rules are not mechanically supported: %s", strings.Join(draft.UnsupportedRules, "; "))
-	}
-	content := draft.prContent
 	content.Title = strings.TrimSpace(content.Title)
 	content.Body = strings.TrimSpace(content.Body)
 	content.Body = unwrapNestedPRBody(content.Body)

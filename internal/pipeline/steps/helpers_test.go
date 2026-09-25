@@ -20,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -108,6 +109,17 @@ func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result,
 }
 
 func (m *mockAgent) Close() error { return nil }
+
+// buildPRContentForTest resolves the PR-format policy exactly the way
+// Execute does (once, from the publication base branch) so tests can draft
+// content without running the whole step.
+func (s *PRStep) buildPRContentForTest(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
+	policySHA, err := resolvePRPolicySHA(sctx.Ctx, sctx, baseBranch)
+	if err != nil {
+		return prContent{}, err
+	}
+	return s.buildPRContentWithPolicy(sctx, branch, baseBranch, baseSHA, policySHA, provider, bodyLimit)
+}
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()

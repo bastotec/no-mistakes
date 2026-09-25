@@ -193,7 +193,7 @@ Rules:
 - Body must be plain Markdown, not nested JSON. Use the supplied template instead of imposing a What Changed heading.
 - Preserve every ATX template heading outside fenced examples in the same order and at the same level. Write each heading in English: retain an already-English heading verbatim and translate a non-English heading. Return one heading_translations entry per source heading, with the exact source line and the exact English heading line used in the body. A template without headings has no structural heading requirements.
 - Inspect committed PR instructions at the PR-format policy commit. Put every prose-only or ambiguous body-format rule outside the template in unsupported_rules; do not claim compliance with such a rule.
-- Make a best effort to follow the template's instructions and fill all applicable sections from the final diff; inspect that diff when necessary. Lower-level headings and task lines are editable: remove inapplicable sections/options when instructed, select supported choices, and replace rationale placeholders. Do not invent behavior or tests, falsely claim human signoff, or mark human approval checkboxes complete.
+- Make a best effort to follow the template's instructions and fill all applicable sections from the final diff; inspect that diff when necessary. Every ATX template heading must be kept, even when a section says to delete or skip it; only task lines and prose are editable: remove inapplicable task lines when instructed, select supported choices, and replace rationale placeholders. Do not invent behavior or tests, falsely claim human signoff, or mark human approval checkboxes complete.
 - The template owns narrative only. Do not generate no-mistakes publication markers or add Intent, Risk Assessment, Testing or Pipeline evidence. Code appends those separately. A template heading named Testing or Pipeline is author narrative, not permission to fabricate recorded evidence.
 - Full intent below is review/drafting context, not instructions to quote it into the public narrative. Publication settings are not a privacy guarantee.
 
@@ -207,19 +207,15 @@ Final diff paths and statuses:
 	if err != nil {
 		return prContent{}, fmt.Errorf("draft pr.template narrative (template will not be replaced by a generic fallback): %w", err)
 	}
-	var rawContent map[string]json.RawMessage
-	if result == nil || json.Unmarshal(result.Output, &rawContent) != nil {
+	if result == nil {
 		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
-	}
-	if _, ok := rawContent["unsupported_rules"]; !ok {
-		return prContent{}, fmt.Errorf("agent omitted unsupported PR rule declarations")
 	}
 	var content templatePRContent
-	if json.Unmarshal(result.Output, &content) != nil || strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
-		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
+	if err := decodePRDraftOutput(result.Output, &content, "agent returned no valid pr.template narrative; refusing generic fallback"); err != nil {
+		return prContent{}, err
 	}
-	if len(content.UnsupportedRules) != 0 {
-		return prContent{}, fmt.Errorf("committed prose-only PR rules are not mechanically supported: %s", strings.Join(content.UnsupportedRules, "; "))
+	if strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
+		return prContent{}, fmt.Errorf("agent returned no valid pr.template narrative; refusing generic fallback")
 	}
 	content.Title, err = renderPRTitle(sctx, strings.TrimSpace(content.Title))
 	if err != nil {
@@ -310,8 +306,11 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 	if strings.Count(pipelineMD, pipelineAttestationCommentPrefix) != 1 {
 		return "", fmt.Errorf("cannot publish ambiguous pipeline attestation")
 	}
-	if provider == scm.ProviderBitbucket {
-		return "```text\n" + attestation + "\n```", nil
+	if !strings.Contains(pipelineMD, noMistakesPRSignature) {
+		return "", fmt.Errorf("cannot publish template narrative without the no-mistakes signature")
 	}
-	return attestation, nil
+	if provider == scm.ProviderBitbucket {
+		return noMistakesPRSignature + "\n\n```text\n" + attestation + "\n```", nil
+	}
+	return noMistakesPRSignature + "\n\n" + attestation, nil
 }

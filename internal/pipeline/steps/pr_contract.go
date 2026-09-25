@@ -39,6 +39,15 @@ type prContentValidation struct {
 	Issues              []string                     `json:"issues"`
 }
 
+func defaultSectionsWithoutIntent(body string, sctx *pipeline.StepContext) string {
+	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	section := "## Intent\n\n" + cleaned
+	if cleaned == "" || !strings.HasPrefix(body, section) {
+		return body
+	}
+	return strings.TrimLeft(strings.TrimPrefix(body, section), "\n")
+}
+
 func validateDefaultPRHeadingOrder(body string) error {
 	order := map[string]int{"Intent": 0, "What Changed": 1, "Risk Assessment": 2, "Testing": 3, "Pipeline": 4}
 	seen := map[string]bool{}
@@ -73,7 +82,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content prCo
 		return fmt.Errorf("cannot validate empty pull-request title or body")
 	}
 	if template == "" && defaultFormat {
-		if err := validateDefaultPRHeadingOrder(content.Body); err != nil {
+		if err := validateDefaultPRHeadingOrder(defaultSectionsWithoutIntent(content.Body, sctx)); err != nil {
 			return err
 		}
 	}

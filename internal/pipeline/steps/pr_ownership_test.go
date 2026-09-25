@@ -209,6 +209,37 @@ func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 	}
 }
 
+type draftTitleStoreHost struct {
+	scm.Host
+	title string
+	body  string
+}
+
+func (h *draftTitleStoreHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
+	return scm.PRContent{Title: h.title, Body: h.body}, nil
+}
+
+func (h *draftTitleStoreHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
+	h.body = content.Body
+	if strings.TrimSpace(content.Title) != "" {
+		h.title = "Draft: " + content.Title
+	}
+	return pr, nil
+}
+
+func TestUpdateOwnedPRAcceptsForgeDraftTitleMarker(t *testing.T) {
+	t.Parallel()
+	content, appendix := ownedFixture(t)
+	host := &draftTitleStoreHost{title: "Draft: " + content.Title, body: content.Body}
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), content.Title, "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
+		t.Fatalf("stored draft title marker reported divergence after the write: %v", err)
+	}
+	if !strings.Contains(host.body, "New recorded fact.") || host.title != "Draft: "+content.Title {
+		t.Fatalf("draft title update did not settle: title=%q body=%q", host.title, host.body)
+	}
+}
+
 func TestPROwnershipRestampPreservesAuthorsAndConsumerContract(t *testing.T) {
 	t.Parallel()
 	content, _ := ownedFixture(t)

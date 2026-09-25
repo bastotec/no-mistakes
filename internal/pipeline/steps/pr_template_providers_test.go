@@ -17,7 +17,7 @@ func TestPRTemplateProviderCompositionUpdateAndRestamp(t *testing.T) {
 			sctx, ag, _ := templateTestContext(t)
 			step := &PRStep{}
 			budget := scm.MaxPRBodyChars(provider)
-			created, err := step.buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, provider, budget)
+			created, err := step.buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, provider, budget)
 			if err != nil {
 				t.Fatal(err)
 			}

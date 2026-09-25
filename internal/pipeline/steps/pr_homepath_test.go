@@ -417,7 +417,7 @@ func buildHomePathLeakPRContentWithLimit(t *testing.T, tc homePathLeakCase, body
 		insertCompletedStep(t, sctx, types.StepTest, testFindings, tc.testStepError)
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, bodyLimit)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, bodyLimit)
 	if err != nil {
 		t.Fatal(err)
 	}
