@@ -309,6 +309,77 @@ func TestMakeBuildStampsTheForkStampByDefaultOffATag(t *testing.T) {
 	}
 }
 
+// A checkout sitting exactly at a non-version tag is not a release build:
+// this repository itself carries tags like `channels` whose name carries no
+// version number, and stamping one verbatim would ship a binary every
+// minimum-version check reads as not installed - inviting an install over
+// the very binary running - while bypassing the hand-passed refusal that
+// exists to stop exactly that. The exact tag is taken verbatim only when it
+// is a comparable version; otherwise the build takes the fork stamp.
+func TestMakeBuildDoesNotStampANonVersionExactTagVerbatim(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "channels")
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if strings.Contains(output, "/internal/buildinfo.Version=channels") {
+		t.Fatalf("make build must not stamp a non-version exact tag verbatim, got:\n%s", output)
+	}
+	// No release tag exists in this clone either, so the fallback is the
+	// dev sentinel, not a label shaped like a version.
+	if !strings.Contains(output, "/internal/buildinfo.Version=dev") {
+		t.Fatalf("make build at a non-version exact tag should fall back to the dev sentinel, got:\n%s", output)
+	}
+}
+
+// With a real release known to the clone, a non-version exact tag takes the
+// fork stamp of that release rather than its own name: the release path is
+// reserved for comparable version tags, everything else identifies as this
+// fork's build.
+func TestMakeBuildForkStampsWhenANonVersionTagSitsAtHead(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.83.1")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the tag")
+	runScratchGit(t, gitPath, workDir, "tag", "channels")
+
+	revCmd := exec.Command(gitPath, "rev-parse", "--short", "HEAD")
+	revCmd.Dir = workDir
+	revCmd.Env = scratchEnv(t)
+	revOut, err := revCmd.Output()
+	if err != nil {
+		t.Fatalf("rev-parse --short HEAD failed: %v", err)
+	}
+	short := strings.TrimSpace(string(revOut))
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	want := "/internal/buildinfo.Version=1.83.1-fork-" + short + " "
+	if !strings.Contains(output, want) {
+		t.Fatalf("make build should stamp %q when a non-version tag sits at head, got:\n%s", strings.TrimSpace(want), output)
+	}
+	if strings.Contains(output, "/internal/buildinfo.Version=channels") {
+		t.Fatalf("make build must not stamp a non-version exact tag verbatim, got:\n%s", output)
+	}
+}
+
 // A tagless clone knows no release tag, so the fork stamp's core falls back
 // to the 0.0.0 placeholder and the suggestion must be a value the same guard
 // accepts, never a bare commit dressed up with a marker.

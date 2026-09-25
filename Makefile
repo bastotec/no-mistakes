@@ -33,9 +33,17 @@ DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
 # release build: `git describe` names the tag and only the tag, and that
 # verbatim tag is stamped.  Anything else - commits after the tag, a dirty
 # tree (`--dirty` suffixes describe and therefore no longer equals the
-# tag) - is a fork build and takes the fork stamp below.
+# tag) - is a fork build and takes the fork stamp below.  The verbatim
+# path is only for tags carrying a comparable version number: this
+# repository itself carries non-version tags (`channels`,
+# `no-mistakes-abandoned/...`), and stamping one of those verbatim would
+# ship a label every minimum-version check reads as not installed - the
+# exact failure the guard exists to prevent - while bypassing the
+# hand-passed refusal, because the value came from the Makefile rather
+# than the environment.  A non-version exact tag therefore falls through
+# to the fork stamp like any other off-release build.
 EXACT_TAG := $(shell git describe --tags --exact-match 2>/dev/null)
-RELEASE_AT_HEAD := $(if $(filter $(EXACT_TAG),$(DESCRIBED_VERSION)),$(EXACT_TAG))
+RELEASE_AT_HEAD := $(if $(filter $(EXACT_TAG),$(DESCRIBED_VERSION)),$(if $(call comparable_version,$(EXACT_TAG)),$(EXACT_TAG)))
 # The newest release tag the clone knows is the upstream semantic version
 # this fork tracks (`v1.83.1` -> `1.83.1`).  A clone whose tags arrive in
 # any other shape falls back to the release `git describe` found, stripped
