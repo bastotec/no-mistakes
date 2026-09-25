@@ -205,16 +205,18 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// writes, not a rule the run imposes on somebody else's prose. An
 			// existing description - including the empty one on a pull request
 			// the run is merely associated with - belongs to its author, so
-			// only a narrative drafted here is held to the template structure.
-			// The English and no-fabrication checks likewise cover only the
-			// fields this run writes: its drafted title, its drafted narrative,
-			// and the generated appendix.
-			validationTemplate := ""
-			if emptyNarrative != "" {
-				validationTemplate = template
-			}
-			runWritten := prContent{Title: title, Body: strings.TrimSpace(emptyNarrative + "\n\n" + appendix)}
-			validate := func(content prContent) error {
+			// only a narrative actually composed here is held to the template
+			// structure, and a narrative displaced by a concurrent author edit
+			// leaves the verdict scope with it. The English and no-fabrication
+			// checks likewise cover only the fields this run writes: its
+			// drafted title, the narrative it actually published, and the
+			// generated appendix.
+			validate := func(content prContent, narrative string) error {
+				validationTemplate := ""
+				if narrative != "" {
+					validationTemplate = template
+				}
+				runWritten := prContent{Title: title, Body: strings.TrimSpace(narrative + "\n\n" + appendix)}
 				return s.validateFinalPRContent(sctx, content, redactPRContent(runWritten), validationTemplate, policySHA, false)
 			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, validate); err != nil {
