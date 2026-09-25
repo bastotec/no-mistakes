@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.77.0](https://github.com/bastotec/no-mistakes/compare/v1.76.0...v1.77.0) (2026-09-25)
+
+
+### Features
+
+* **agent:** support Deck and select it for this fork ([#7](https://github.com/bastotec/no-mistakes/issues/7)) ([ec03d66](https://github.com/bastotec/no-mistakes/commit/ec03d669d4d0b5583c60fbc7742fce8a95155277))
+* **cli:** add --existing-pr to bind a branch to an existing upstream PR ([#1](https://github.com/bastotec/no-mistakes/issues/1)) ([4c73c3e](https://github.com/bastotec/no-mistakes/commit/4c73c3edd690a35b38941726d218d6d8b0751078))
+* **pipeline:** add --preserve-history runs that pin the integration and refuse rebase or force pushes ([#2](https://github.com/bastotec/no-mistakes/issues/2)) ([34d5856](https://github.com/bastotec/no-mistakes/commit/34d5856f063fd12afaa27cc42792df071cf37042))
+* **pipeline:** add advisory Jev evaluation step after review ([#5](https://github.com/bastotec/no-mistakes/issues/5)) ([60ad4af](https://github.com/bastotec/no-mistakes/commit/60ad4af245a4bef80d752c5efa7fa02616c4acf9))
+* **pipeline:** integrate a moved base by merging behind rebase.strategy ([#1081](https://github.com/bastotec/no-mistakes/issues/1081)) ([ae2e99a](https://github.com/bastotec/no-mistakes/commit/ae2e99a8b250eb90e66211ae98508f1b21442293))
+* stamp fork builds with an upstream-semver fork version ([#9](https://github.com/bastotec/no-mistakes/issues/9)) ([21dbb3d](https://github.com/bastotec/no-mistakes/commit/21dbb3dbbeaa8e2932edec25d546064dfd10363b))
+
+
+### Bug Fixes
+
+* **agent:** preserve Deck exit diagnostics and terminal contract ([#8](https://github.com/bastotec/no-mistakes/issues/8)) ([6911e03](https://github.com/bastotec/no-mistakes/commit/6911e03548dfae93308d0ba08e0850f3f4d7f55d))
+* **branchsync:** release stale terminal bindings and stop false at-risk mirror verdicts ([#6](https://github.com/bastotec/no-mistakes/issues/6)) ([3eaeb18](https://github.com/bastotec/no-mistakes/commit/3eaeb18a827dfacdd96a80efee8527370a067681))
+* **pipeline:** park approval-held CI checks and name the real PR base in bundled-commit findings ([#3](https://github.com/bastotec/no-mistakes/issues/3)) ([7e84d0d](https://github.com/bastotec/no-mistakes/commit/7e84d0d1d6b30a41e2ce12e68457c312c7339b0f))
+* stamp a comparable version into every build and refuse labels without one ([a9e4271](https://github.com/bastotec/no-mistakes/commit/a9e4271e9373605077416892bd513466f6371a93))
+
 ## [1.76.0](https://github.com/kunchenguid/no-mistakes/compare/v1.75.3...v1.76.0) (2026-09-15)
 
 
