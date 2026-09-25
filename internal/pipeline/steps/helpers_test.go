@@ -45,24 +45,6 @@ func validationDigestFromPrompt(prompt string) (string, error) {
 	return strings.TrimSpace(strings.SplitN(prompt[start+len(prefix):], "\n", 2)[0]), nil
 }
 
-func validationHeadingTranslationsFromPrompt(prompt string) ([]templateHeadingTranslation, error) {
-	const prefix = "- required_heading_sources_json: "
-	start := strings.Index(prompt, prefix)
-	if start < 0 {
-		return nil, fmt.Errorf("validation prompt omitted required heading sources")
-	}
-	line := strings.TrimSpace(strings.SplitN(prompt[start+len(prefix):], "\n", 2)[0])
-	var sources []string
-	if err := json.Unmarshal([]byte(line), &sources); err != nil {
-		return nil, err
-	}
-	translations := make([]templateHeadingTranslation, len(sources))
-	for i, source := range sources {
-		translations[i] = templateHeadingTranslation{Source: source, English: source}
-	}
-	return translations, nil
-}
-
 func addEmptyUnsupportedRules(result *agent.Result, schema json.RawMessage) *agent.Result {
 	if result == nil || (string(schema) != string(prContentSchema) && string(schema) != string(templatePRContentSchema)) {
 		return result
@@ -90,11 +72,7 @@ func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result,
 		if err != nil {
 			return nil, err
 		}
-		headings, err := validationHeadingTranslationsFromPrompt(opts.Prompt)
-		if err != nil {
-			return nil, err
-		}
-		payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, HeadingTranslations: headings, Issues: []string{}})
+		payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}})
 		return &agent.Result{Output: payload}, nil
 	}
 	m.calls = append(m.calls, opts)

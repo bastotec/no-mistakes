@@ -593,6 +593,136 @@ func TestPRStep_ValidationVerdictScopeExcludesAuthorProse(t *testing.T) {
 	}
 }
 
+func TestPRStep_NarrativeFreeAppendixPublicationSkipsFormatVerdict(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	author := "# Overview\n\nAuthor-written description.\n"
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "set it false when committed prose-only") {
+			t.Error("narrative-free verdict still demands a prose-rule format refusal")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		// The run authors no prose here, so an obedient validator following
+		// the prose-rule policy would return exactly this verdict.
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: false,
+			Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("narrative-free appendix publication blocked by format verdict: %v", err)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), author) {
+		t.Fatalf("author description changed:\n%s", body)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("run-written appendix missing:\n%s", body)
+	}
+}
+
+func TestPRStep_ConcurrentAuthorNarrativeDisplacedFromVerdictScope(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantTitle, err := renderPRTitle(sctx, "feat: fill template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE="+wantTitle)
+	author := "Human description added while the run was drafting.\n"
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		// A human publishes a description while the drafting turn is running.
+		if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+			return nil, err
+		}
+		data, _ := json.Marshal(templateDraft("feat: fill template", filledPRTemplate, testPRTemplate))
+		return &agent.Result{Output: data}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(opts.Prompt, "Add a Bar helper") {
+			t.Error("verdict scope still carries the displaced drafted narrative")
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("concurrent author description failed publication: %v", err)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), author) {
+		t.Fatalf("author description changed or dropped:\n%s", body)
+	}
+	if strings.Contains(string(body), "Add a Bar helper") {
+		t.Fatalf("displaced narrative published:\n%s", body)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("run-written appendix missing:\n%s", body)
+	}
+}
+
+func TestPRTemplateFinalVerdictReliesOnDrafterSideHeadingCheck(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		body := strings.ReplaceAll(filledPRTemplate, "# Overview", "")
+		data, _ := json.Marshal(templateDraft("feat: fill template", body, testPRTemplate))
+		return &agent.Result{Output: data}, nil
+	}
+	if _, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, testPRTemplate); err == nil {
+		t.Fatal("drafter-side structure check accepted a template body missing a required heading")
+	}
+
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(templateDraft("feat: fill template", filledPRTemplate, testPRTemplate))
+		return &agent.Result{Output: data}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "heading_translations") {
+			t.Error("final verdict prompt asked the validator to re-derive heading translations")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	if _, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0); err != nil {
+		t.Fatalf("template publication required a validator-side heading table: %v", err)
+	}
+}
+
 func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)

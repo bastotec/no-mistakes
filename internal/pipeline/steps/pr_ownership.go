@@ -164,7 +164,10 @@ func validateOwnedPRBudget(body string, bodyLimit int) error {
 // This is NOT compare-and-swap: providers expose full-body writes. Detected
 // pre-write edits are merged from their latest version (bounded); a write error
 // or post-write divergence fails without replaying a potentially applied write.
-func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initial scm.PRContent, title, emptyNarrative, appendix string, bodyLimit int, validate func(prContent) error) error {
+// The validate callback receives the narrative actually composed into the
+// candidate, so a concurrent author edit that displaces a drafted narrative
+// also removes it from the verdict scope.
+func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initial scm.PRContent, title, emptyNarrative, appendix string, bodyLimit int, validate func(prContent, string) error) error {
 	reader, ok := host.(scm.PRContentReader)
 	if !ok {
 		return fmt.Errorf("provider cannot read PR content; author-safe template updates are unsupported")
@@ -175,8 +178,10 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return err
 		}
+		appliedNarrative := ""
 		if current.Body == "" && !parts.managed {
 			parts.before = emptyNarrative
+			appliedNarrative = emptyNarrative
 		}
 		content, err := composeOwnedPRContent(parts, title, appendix, bodyLimit)
 		if err != nil {
@@ -197,7 +202,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if validate != nil {
 			candidate := content
 			candidate.Title = expectedTitle
-			if err := validate(candidate); err != nil {
+			if err := validate(candidate, appliedNarrative); err != nil {
 				return err
 			}
 		}
