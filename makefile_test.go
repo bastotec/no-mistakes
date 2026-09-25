@@ -249,8 +249,9 @@ func TestMakeBuildFallsBackToDevWhenGitDescribeCarriesNoVersion(t *testing.T) {
 	}
 }
 
-// The documented from-source path: a full clone already knows a comparable
-// version, which is the one the broken build threw away.
+// The release path: a checkout sitting exactly at a release tag is the
+// release build and stamps that tag verbatim, exactly as before fork
+// stamping existed.
 func TestMakeBuildDerivesTheDescribedVersionInATaggedCheckout(t *testing.T) {
 	skipMakeBuildTestsOnWindows(t)
 
@@ -271,9 +272,46 @@ func TestMakeBuildDerivesTheDescribedVersionInATaggedCheckout(t *testing.T) {
 	}
 }
 
-// A tagless clone derives a bare commit from `git describe`, which the guard
-// itself refuses. The suggested replacement must therefore be a value the
-// same guard accepts, not that commit dressed up with `+fork`.
+// The default every from-source build actually takes: away from a release
+// tag, the build stamps the fork stamp - the newest release tag the clone
+// knows (the upstream semantic version), the `-fork-` marker, and the
+// build's own short commit. This is the string the bootstrap version probe
+// reads to prove the minimum-version floor while identifying the binary as
+// this fork's build rather than stock upstream.
+func TestMakeBuildStampsTheForkStampByDefaultOffATag(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.83.1")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the tag")
+
+	revCmd := exec.Command(gitPath, "rev-parse", "--short", "HEAD")
+	revCmd.Dir = workDir
+	revCmd.Env = scratchEnv(t)
+	revOut, err := revCmd.Output()
+	if err != nil {
+		t.Fatalf("rev-parse --short HEAD failed: %v", err)
+	}
+	short := strings.TrimSpace(string(revOut))
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	want := "/internal/buildinfo.Version=1.83.1-fork-" + short + " "
+	if !strings.Contains(output, want) {
+		t.Fatalf("make build should stamp %q by default off a release tag, got:\n%s", strings.TrimSpace(want), output)
+	}
+}
+
+// A tagless clone knows no release tag, so the fork stamp's core falls back
+// to the 0.0.0 placeholder and the suggestion must be a value the same guard
+// accepts, never a bare commit dressed up with a marker.
 func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testing.T) {
 	skipMakeBuildTestsOnWindows(t)
 
@@ -289,13 +327,13 @@ func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testin
 	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
-	if !strings.HasPrefix(suggested, "v0.0.0+") {
+	if !strings.HasPrefix(suggested, "0.0.0-fork-") {
 		t.Fatalf("a tagless checkout knows no release, so the suggestion should carry the placeholder core rather than a plausible release number, got %q in:\n%s", suggested, output)
 	}
 	if !strings.Contains(output, "placeholder") {
 		t.Fatalf("the refusal should say the placeholder core must be replaced, got:\n%s", output)
 	}
-	assertPureBuildMetadata(t, suggested)
+	assertForkStamp(t, suggested)
 
 	accepted := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": suggested})
 	if !strings.Contains(accepted, "/internal/buildinfo.Version="+suggested) {
@@ -303,11 +341,10 @@ func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testin
 	}
 }
 
-// A prerelease-shaped fork marker sorts BELOW the release it names, so the
-// updater offers to replace the fork with the older build it came from. The
-// suggestion must carry the release the repository knows plus the commit as
-// build metadata instead.
-func TestMakeBuildSuggestsTheKnownReleaseWithBuildMetadataNotAPrerelease(t *testing.T) {
+// The suggestion a refusal prints is the fork stamp itself: the newest
+// release the repository knows plus the fork marker plus the commit, the
+// exact shape the default stamps when nothing is passed by hand.
+func TestMakeBuildSuggestsTheKnownReleaseAsAForkStamp(t *testing.T) {
 	skipMakeBuildTestsOnWindows(t)
 
 	makePath := lookupMake(t)
@@ -324,13 +361,13 @@ func TestMakeBuildSuggestsTheKnownReleaseWithBuildMetadataNotAPrerelease(t *test
 	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
-	if !strings.HasPrefix(suggested, "v1.76.0+") {
-		t.Fatalf("the suggestion should carry the release the repository knows, got %q in:\n%s", suggested, output)
+	if !strings.HasPrefix(suggested, "1.76.0-fork-") {
+		t.Fatalf("the suggestion should carry the release the repository knows plus the fork stamp, got %q in:\n%s", suggested, output)
 	}
 	if strings.Contains(output, "placeholder") {
 		t.Fatalf("a described release is not a placeholder, got:\n%s", output)
 	}
-	assertPureBuildMetadata(t, suggested)
+	assertForkStamp(t, suggested)
 
 	accepted := runMakeDryBuild(t, makePath, workDir, map[string]string{"VERSION": suggested})
 	if !strings.Contains(accepted, "/internal/buildinfo.Version="+suggested) {
@@ -390,7 +427,7 @@ func TestMakeBuildSuggestionKeepsAPrereleaseTagsIdentifier(t *testing.T) {
 	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
-	if !strings.HasPrefix(suggested, "v1.77.0-rc.1+") {
+	if !strings.HasPrefix(suggested, "1.77.0-rc.1-fork-") {
 		t.Fatalf("the suggestion should keep the described prerelease rather than name the unreleased release above it, got %q in:\n%s", suggested, output)
 	}
 
@@ -412,18 +449,23 @@ func suggestedVersion(t *testing.T, refusal string) string {
 	return match[1]
 }
 
-func assertPureBuildMetadata(t *testing.T, version string) {
+// assertForkStamp checks the fork stamp shape a suggestion (and the default)
+// carries: an upstream semantic version core, the `-fork-` marker, and the
+// build's short commit - e.g. `1.83.1-fork-6911e03` - which is what every
+// minimum-version probe parses back as a comparable version identifying a
+// fork build.
+func assertForkStamp(t *testing.T, version string) {
 	t.Helper()
 
-	core, metadata, found := strings.Cut(version, "+")
+	core, commit, found := strings.Cut(version, "-fork-")
 	if !found {
-		t.Fatalf("suggested VERSION=%s should carry the fork marker as build metadata", version)
+		t.Fatalf("suggested VERSION=%s should carry the -fork- marker", version)
 	}
-	if strings.Contains(core, "-") {
-		t.Fatalf("suggested VERSION=%s is prerelease-shaped, which semver ranks below the release it names", version)
+	if core == "" || commit == "" {
+		t.Fatalf("suggested VERSION=%s should keep a release core in front of the marker and a commit after it", version)
 	}
-	if !strings.HasPrefix(metadata, "fork") {
-		t.Fatalf("suggested VERSION=%s should mark the build as a fork, got metadata %q", version, metadata)
+	if strings.HasPrefix(core, "v") {
+		t.Fatalf("suggested VERSION=%s should carry the plain upstream semantic version, not a v-prefixed one", version)
 	}
 }
 
