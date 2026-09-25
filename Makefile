@@ -66,7 +66,7 @@ RANKS_SEMVER := awk 'BEGIN { FS = "-" } { core = $$1; sub(/^v/, "", core); n = s
 # describe's own trailing `-<count>-g<sha>[-dirty]` but never of the tag's
 # own prerelease: a fork of `v1.77.0-rc.1` must not be told to call itself
 # the unreleased `v1.77.0`.
-NEWEST_RELEASE := $(patsubst v%,%,$(shell git tag --list 'v[0-9]*' '[0-9]*' 2>/dev/null | $(RANKS_SEMVER) | LC_ALL=C sort -r | head -n1 | awk '{print $$2}'))
+NEWEST_RELEASE := $(patsubst v%,%,$(shell git tag --list 'v[0-9]*' '[0-9]*' 2>/dev/null | grep -E '$(VERSION_PATTERN)' | $(RANKS_SEMVER) | LC_ALL=C sort -r | head -n1 | awk '{print $$2}'))
 DESCRIBED_RELEASE := $(shell printf '%s' '$(DESCRIBED_VERSION)' | sed -E 's/-[0-9]+-g[0-9a-f]+(-dirty)?$$//; s/-dirty$$//')
 UPSTREAM_RELEASE := $(if $(NEWEST_RELEASE),$(NEWEST_RELEASE),$(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(patsubst v%,%,$(DESCRIBED_RELEASE))))
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)

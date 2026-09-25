@@ -531,6 +531,53 @@ func TestMakeBuildNamesTheOnlyReleaseTagWhateverShapeItHas(t *testing.T) {
 	}
 }
 
+// Only tags the version pattern accepts may enter the release ranking: a
+// version-shaped junk tag like `v1.84fix` matches the scan's git glob but is
+// not a comparable version, and ranking it above the valid release the clone
+// knows hands the stamp a core no floor check can read - silently
+// downgrading the build to the `dev` sentinel while a valid release is
+// present. The junk tag must be ignored and the known release stamped.
+func TestMakeBuildIgnoresTagsTheVersionPatternRejects(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.83.1")
+	// The junk tag lands on a side branch, unreachable from HEAD, and
+	// outranks the valid release under the scan's own ordering, so nothing
+	// but acceptance-by-pattern keeps it from shadowing the release.
+	runScratchGit(t, gitPath, workDir, "checkout", "-q", "-b", "side")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "side")
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84fix")
+	runScratchGit(t, gitPath, workDir, "checkout", "-q", "-")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	revCmd := exec.Command(gitPath, "rev-parse", "--short", "HEAD")
+	revCmd.Dir = workDir
+	revCmd.Env = scratchEnv(t)
+	revOut, err := revCmd.Output()
+	if err != nil {
+		t.Fatalf("rev-parse --short HEAD failed: %v", err)
+	}
+	short := strings.TrimSpace(string(revOut))
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	want := "/internal/buildinfo.Version=1.83.1-fork-" + short + " "
+	if !strings.Contains(output, want) {
+		t.Fatalf("make build should stamp %q despite a junk version-shaped tag, got:\n%s", strings.TrimSpace(want), output)
+	}
+	if strings.Contains(output, "/internal/buildinfo.Version=dev") {
+		t.Fatalf("a tag the version pattern rejects must not shadow the known release into the dev sentinel, got:\n%s", output)
+	}
+}
+
 // A clone holding only a prerelease tag still knows a release: the fork
 // stamp names that prerelease, never a fabricated stable version.
 func TestMakeBuildUsesAPrereleaseOnlyClonesHighestPrerelease(t *testing.T) {
