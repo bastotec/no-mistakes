@@ -1,17 +1,24 @@
 # A build stamps VERSION into `internal/buildinfo`, and that string is what
-# every minimum-version check reads back out of `no-mistakes version`.  A
+# every minimum-version check reads back out of `no-mistakes --version`.  A
 # version check cannot be asked to accept a label with no version number in
 # it - it would then have to accept every label, including `dev`, and stop
 # meaning anything - so a build that stamps one reports itself as NOT
 # INSTALLED and invites the operator to install over the very binary that is
 # running.  That is exactly what `VERSION=fork-7e84d0d` produced: a hand
 # passed label discarded `v1.76.0-5-g7e84d0d`, the comparable version this
-# repository already knew.  Mark a fork with semantic versioning's build
-# metadata BESIDE the real version (`v1.76.0+fork.7e84d0d`), never instead of
-# it.  Build metadata rather than a prerelease suffix: semver ranks a
-# prerelease BELOW the release it names, so a prerelease-shaped fork of
-# `v1.76.0` reads as older than `v1.76.0` and the updater offers to replace
-# it with the release it was built from.
+# repository already knew.
+#
+# A default build stamps the fork stamp `<upstream-semver>-fork-<sha>`
+# (for example `1.83.1-fork-6911e03`): the newest release tag the clone
+# knows - the upstream semantic version this fork tracks - then the fork
+# marker, then the short commit.  The comparable core is what proves the
+# minimum-version floor a bootstrap probe asks for instead of reporting the
+# build as unknown, and the whole stamp marks the binary as this fork's
+# build rather than stock upstream.  A checkout sitting exactly at a release
+# tag, clean, still stamps that tag verbatim: that is the release path and
+# it is unchanged.  The fork stamp's `-fork-<sha>` is semver prerelease
+# text, so the stamp ranks below the release it names while staying above
+# every release below that core - which is all a floor check compares.
 #
 # A comparable version is a semver core of at least major.minor, optionally
 # `v`-prefixed, with any prerelease/build metadata after it - what
@@ -22,20 +29,59 @@ VERSION_PATTERN := ^v?[0-9]+\.[0-9]+(\.[0-9]+)?(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*
 comparable_version = $(shell printf '%s' '$(1)' | grep -Eq '$(VERSION_PATTERN)' && echo yes)
 
 DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
-# Loud normalization for the derived value: outside a checkout, or in a
-# shallow/tagless clone where `git describe` can only report a commit, fall
-# back to the `dev` sentinel that `internal/update` already understands
-# rather than stamping a label that looks like a version and is not.  The
-# rule this guard establishes is that the version slot never carries a label
-# that looks like a version and is not, and a commit-ish produced by
-# `git describe` violates it in exactly the same way a hand-passed one does,
-# so refusing one while stamping the other would be inconsistent rather than
-# narrower.  The sentinel costs no traceability, because the commit id is
-# stamped independently in COMMIT and still appears in the version string's
-# own commit field: nothing traceable is lost by the fallback, only the false
-# appearance of a version.
-VERSION ?= $(if $(call comparable_version,$(DESCRIBED_VERSION)),$(DESCRIBED_VERSION),dev)
+# A checkout exactly at a release tag, with nothing dirty on top, is the
+# release build: `git describe` names the tag and only the tag, and that
+# verbatim tag is stamped.  Anything else - commits after the tag, a dirty
+# tree (`--dirty` suffixes describe and therefore no longer equals the
+# tag) - is a fork build and takes the fork stamp below.  The verbatim
+# path is only for tags carrying a comparable version number: this
+# repository itself carries non-version tags (`channels`,
+# `no-mistakes-abandoned/...`), and stamping one of those verbatim would
+# ship a label every minimum-version check reads as not installed - the
+# exact failure the guard exists to prevent - while bypassing the
+# hand-passed refusal, because the value came from the Makefile rather
+# than the environment.  A non-version exact tag therefore falls through
+# to the fork stamp like any other off-release build.
+EXACT_TAG := $(shell git describe --tags --exact-match 2>/dev/null)
+RELEASE_AT_HEAD := $(if $(filter $(EXACT_TAG),$(DESCRIBED_VERSION)),$(if $(call comparable_version,$(EXACT_TAG)),$(EXACT_TAG)))
+# Ranks release tags by the semver comparison `internal/update` uses:
+# numeric core segments zero-padded to fixed width, then a flag making a
+# release outrank any prerelease of the same core, then the prerelease -
+# everything after the first hyphen, split on dots - where each identifier
+# carries a flag ranking it as `comparePrereleaseIdentifier` does (numeric
+# below alphanumeric, numeric ones zero-padded so `rc.10` outranks `rc.2`)
+# and both flags sort below every identifier character, so an identifier
+# outranks any prefix of itself.  Only a comparable core
+# (`major.minor[.patch]`) enters the ranking; an empty ranking means the
+# clone knows no release.
+RANKS_SEMVER := awk 'BEGIN { FS = "-" } { core = $$1; sub(/^v/, "", core); n = split(core, c, "."); if (n < 2 || n > 3) next; key = ""; for (i = 1; i <= 3; i++) key = key sprintf("%016d", (i <= n ? c[i] + 0 : 0)); if (NF == 1) { print key "1 " $$0; next }; key = key "0"; pre = $$2; for (i = 3; i <= NF; i++) pre = pre "-" $$i; k = split(pre, p, "."); for (i = 1; i <= k; i++) key = key ((p[i] ~ /^[0-9]+$$/) ? "!" sprintf("%016d", p[i] + 0) : "\"" p[i]); print key " " $$0 }'
+# The newest release tag the clone knows is the upstream semantic version
+# this fork tracks (`v1.83.1` -> `1.83.1`).  Git's `--sort=-v:refname` and
+# coreutils `sort -V` both rank `v1.84.0-rc.1` above `v1.84.0`, so either
+# lets a prerelease outrank the release that superseded it; the tags are
+# therefore ranked by the semver ordering itself.  Only tags the version
+# pattern accepts enter the ranking, so anything ranked is comparable and
+# no second acceptance check is needed.  A clone whose tags arrive in any
+# other shape falls back to the release `git describe` found, stripped of
+# describe's own trailing `-<count>-g<sha>[-dirty]` but never of the tag's
+# own prerelease: a fork of `v1.77.0-rc.1` must not be told to call itself
+# the unreleased `v1.77.0`.
+NEWEST_RELEASE := $(patsubst v%,%,$(shell git tag --list 'v[0-9]*' '[0-9]*' 2>/dev/null | grep -E '$(VERSION_PATTERN)' | $(RANKS_SEMVER) | LC_ALL=C sort -r | head -n1 | awk '{print $$2}'))
+DESCRIBED_RELEASE := $(shell printf '%s' '$(DESCRIBED_VERSION)' | sed -E 's/-[0-9]+-g[0-9a-f]+(-dirty)?$$//; s/-dirty$$//')
+UPSTREAM_RELEASE := $(if $(NEWEST_RELEASE),$(NEWEST_RELEASE),$(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(patsubst v%,%,$(DESCRIBED_RELEASE))))
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
+FORK_STAMP := $(UPSTREAM_RELEASE)-fork-$(COMMIT)
+# Loud normalization for the derived value: outside a checkout, or in a
+# shallow/tagless clone where there is no release tag to name, the stamp's
+# core is empty and the whole label stops being comparable, so the build
+# falls back to the `dev` sentinel that `internal/update` already
+# understands rather than stamping a label that looks like a version and is
+# not.  The rule this guard establishes is that the version slot never
+# carries a label that looks like a version and is not.  The sentinel costs
+# no traceability, because the commit id is stamped independently in COMMIT
+# and still appears in the version string's own commit field: nothing
+# traceable is lost by the fallback, only the false appearance of a version.
+VERSION ?= $(if $(RELEASE_AT_HEAD),$(RELEASE_AT_HEAD),$(if $(call comparable_version,$(FORK_STAMP)),$(FORK_STAMP),dev))
 DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 
 # A hand-passed VERSION (command line or environment) gets no sentinel
@@ -49,21 +95,24 @@ ifneq ($(call comparable_version,$(VERSION)),yes)
 VERSION_REFUSED := yes
 endif
 endif
-# The suggestion is the release core the repository already knows plus the
-# commit as build metadata, never a prerelease suffix - the same shape the
-# refusal is teaching.  With no release to name (a tagless or shallow clone,
-# or outside a checkout) the core is the 0.0.0 placeholder rather than a
-# plausible release number: the message has to print something that passes
-# the guard, and a copy-pasted fabricated release would ship a binary
-# claiming a version it never came from.  Shipped anyway, 0.0.0 fails a floor
-# check instead of quietly passing one.  Only `git describe`'s own trailing
-# `-<count>-g<sha>[-dirty]` is stripped, never the tag's prerelease: a fork of
-# `v1.77.0-rc.1` must not be told to call itself the unreleased `v1.77.0`.
-DESCRIBED_RELEASE := $(shell printf '%s' '$(DESCRIBED_VERSION)' | sed -E 's/-[0-9]+-g[0-9a-f]+(-dirty)?$$//; s/-dirty$$//')
-FORK_RELEASE := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(DESCRIBED_RELEASE),v0.0.0)
-FORK_SUGGESTION := $(FORK_RELEASE)+fork.$(COMMIT)
-PLACEHOLDER_NOTE := $(if $(call comparable_version,$(DESCRIBED_RELEASE)),, The 0.0.0 core there is a placeholder because no release tag was found here: replace it with the release your fork is built from.)
-VERSION_REFUSAL := VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to use git describe.$(PLACEHOLDER_NOTE)
+# The suggestion a refusal prints is the fork stamp itself - the upstream
+# semantic version the repository knows plus the fork marker plus the
+# commit - so copying it out of the message reproduces exactly what an
+# unstamped default build would have derived.  With no release to name (a
+# tagless or shallow clone, or outside a checkout) the core is the 0.0.0
+# placeholder rather than a plausible release number: the message has to
+# print something that passes the guard, and a copy-pasted fabricated
+# release would ship a binary claiming a version it never came from.
+# Shipped anyway, 0.0.0 fails a floor check instead of quietly passing one.
+FORK_RELEASE := $(if $(call comparable_version,$(UPSTREAM_RELEASE)),$(UPSTREAM_RELEASE),0.0.0)
+FORK_SUGGESTION := $(FORK_RELEASE)-fork-$(COMMIT)
+PLACEHOLDER_NOTE := $(if $(filter 0.0.0,$(FORK_RELEASE)), The 0.0.0 core there is a placeholder because no release tag was found here: replace it with the release your fork is built from.,)
+# The refusal is exported rather than embedded in the recipe's shell text:
+# the recipe runs as one sh -c string, so a single-quoted argument is
+# terminated by the first apostrophe in either the message or the refused
+# VERSION itself, and the whole guidance dies as a shell syntax error.
+# Through the environment `printf` reads it verbatim, whatever it carries.
+export VERSION_REFUSAL := $(strip VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to stamp this build's default version.$(PLACEHOLDER_NOTE))
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com
 DEFAULT_UMAMI_WEBSITE_ID := f959e889-92f5-4121-8a1f-571b10861198
 DOTENV_UMAMI_HOST := $(shell [ -f .env ] && perl -ne 'next if /^\s*(?:\#|$$)/; s/^\s*export\s+//; next unless /^\s*NO_MISTAKES_UMAMI_HOST\s*=\s*(.*)$$/; $$v=$$1; $$v =~ s/^\s+|\s+$$//g; if ($$v =~ /^( ["\x27] )(.*)\1$$/x) { $$v=$$2; } else { $$v =~ s/\s+\#.*$$//; $$v =~ s/\s+$$//; } $$out=$$v; END { print $$out if defined $$out }' .env)
@@ -88,7 +137,7 @@ INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
 # stamping command line must not pretend a refused VERSION would build.
 version-guard:
 ifeq ($(VERSION_REFUSED),yes)
-	+@printf '%s\n' '$(VERSION_REFUSAL)' >&2; exit 1
+	+@printf '%s\n' "$$VERSION_REFUSAL" >&2; exit 1
 endif
 
 build: version-guard
