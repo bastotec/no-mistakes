@@ -183,12 +183,15 @@ func TestMakeBuildRefusesHandPassedVersionWithoutAComparableVersionNumber(t *tes
 	// A multi-segment core is uncomparable for the same reason: it looks
 	// like a version but `internal/update`'s parseVersion rejects it, so the
 	// guard must not accept what the version check cannot read.
-	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork", "1.2.3.4", "v2026.01.15.3", "1.2.3-rc.", "1.2.3-rc..1"} {
+	for _, version := range []string{"fork-7e84d0d", "7e84d0d", "dev", "fork", "1.2.3.4", "v2026.01.15.3", "1.2.3-rc.", "1.2.3-rc..1", "1.0-o'brien"} {
 		t.Run(version, func(t *testing.T) {
-			output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=" + version}, nil)
+			output := runMakeBuildExpectingRefusal(t, makePath, workDir, []string{"build", "VERSION=" + version}, nil)
 
 			if !strings.Contains(output, "carries no comparable version number") {
 				t.Fatalf("make build should refuse VERSION=%s with an explanation, got:\n%s", version, output)
+			}
+			if !strings.Contains(output, "Pass a comparable version such as VERSION=") || !strings.Contains(output, "or omit VERSION to stamp this build's default version") {
+				t.Fatalf("make build should suggest the fork stamp and the omit alternative to VERSION=%s, got:\n%s", version, output)
 			}
 			if strings.Contains(output, "/internal/buildinfo.Version="+version) {
 				t.Fatalf("make build should not stamp VERSION=%s, got:\n%s", version, output)
@@ -205,7 +208,7 @@ func TestMakeBuildRefusesUncomparableVersionFromTheEnvironment(t *testing.T) {
 	makePath := lookupMake(t)
 	workDir := writeTestMakeWorkspace(t)
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build"}, map[string]string{"VERSION": "fork-7e84d0d"})
+	output := runMakeBuildExpectingRefusal(t, makePath, workDir, []string{"build"}, map[string]string{"VERSION": "fork-7e84d0d"})
 
 	if !strings.Contains(output, "carries no comparable version number") {
 		t.Fatalf("make build should refuse an uncomparable VERSION from the environment, got:\n%s", output)
@@ -341,6 +344,86 @@ func TestMakeBuildDoesNotStampANonVersionExactTagVerbatim(t *testing.T) {
 	}
 }
 
+// The newest release the clone knows is ranked by the semver comparison
+// internal/update uses: a prerelease never outranks the release that
+// superseded it, no matter how git or coreutils would sort the refnames.
+// With both v1.84.0-rc.1 and v1.84.0 present, `git tag --sort=-v:refname`
+// and coreutils `sort -V` both hand back the rc first, so a build off a tag
+// used to stamp a version the clone's own release had superseded.
+func TestMakeBuildStampsTheReleaseAboveItsPrerelease(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0-rc.1")
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "the release")
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=1.84.0-fork-") {
+		t.Fatalf("make build should stamp the release a prerelease never outranks, got:\n%s", output)
+	}
+	if strings.Contains(output, "buildinfo.Version=1.84.0-rc.") {
+		t.Fatalf("make build must not stamp a prerelease its own release supersedes, got:\n%s", output)
+	}
+}
+
+// Semver ranks prerelease identifiers numerically (`rc.10` above `rc.2`),
+// so among prereleases of one core the ranking must follow semver too, not
+// lexicographic text order.
+func TestMakeBuildRanksPrereleaseIdentifiersNumerically(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0-rc.2")
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0-rc.10")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=1.84.0-rc.10-fork-") {
+		t.Fatalf("make build should rank rc.10 above rc.2 the way semver does, got:\n%s", output)
+	}
+}
+
+// A clone holding only a prerelease tag still knows a release: the fork
+// stamp names that prerelease, never a fabricated stable version.
+func TestMakeBuildUsesAPrereleaseOnlyClonesHighestPrerelease(t *testing.T) {
+	skipMakeBuildTestsOnWindows(t)
+
+	makePath := lookupMake(t)
+	gitPath, err := testgit.RealGit()
+	if err != nil {
+		t.Skip("real git not available")
+	}
+
+	workDir := writeTestMakeWorkspace(t)
+	commitTestMakeWorkspace(t, gitPath, workDir)
+	runScratchGit(t, gitPath, workDir, "tag", "v1.84.0-rc.1")
+	runScratchTagOnNewCommit(t, gitPath, workDir)
+
+	output := runMakeDryBuild(t, makePath, workDir, nil)
+
+	if !strings.Contains(output, "/internal/buildinfo.Version=1.84.0-rc.1-fork-") {
+		t.Fatalf("a clone that knows only a prerelease should stamp that prerelease, got:\n%s", output)
+	}
+}
+
 // With a real release known to the clone, a non-version exact tag takes the
 // fork stamp of that release rather than its own name: the release path is
 // reserved for comparable version tags, everything else identifies as this
@@ -395,7 +478,7 @@ func TestMakeBuildSuggestsAVersionItsOwnGuardAcceptsInATaglessCheckout(t *testin
 	workDir := writeTestMakeWorkspace(t)
 	commitTestMakeWorkspace(t, gitPath, workDir)
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
+	output := runMakeBuildExpectingRefusal(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
 	if !strings.HasPrefix(suggested, "0.0.0-fork-") {
@@ -429,7 +512,7 @@ func TestMakeBuildSuggestsTheKnownReleaseAsAForkStamp(t *testing.T) {
 	runScratchGit(t, gitPath, workDir, "tag", "v1.76.0")
 	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the tag")
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
+	output := runMakeBuildExpectingRefusal(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
 	if !strings.HasPrefix(suggested, "1.76.0-fork-") {
@@ -473,7 +556,7 @@ func TestMakeWithNoGoalBuildsAndCarriesTheGuard(t *testing.T) {
 		t.Fatalf("a bare make should build bin/no-mistakes, got:\n%s", built)
 	}
 
-	refused := runMakeDryBuildExpectingFailure(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
+	refused := runMakeBuildExpectingRefusal(t, makePath, workDir, nil, map[string]string{"VERSION": "fork-7e84d0d"})
 	if !strings.Contains(refused, "carries no comparable version number") {
 		t.Fatalf("a bare make should refuse an uncomparable VERSION, got:\n%s", refused)
 	}
@@ -495,7 +578,7 @@ func TestMakeBuildSuggestionKeepsAPrereleaseTagsIdentifier(t *testing.T) {
 	runScratchGit(t, gitPath, workDir, "tag", "v1.77.0-rc.1")
 	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the prerelease")
 
-	output := runMakeDryBuildExpectingFailure(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
+	output := runMakeBuildExpectingRefusal(t, makePath, workDir, []string{"build", "VERSION=fork-x"}, nil)
 
 	suggested := suggestedVersion(t, output)
 	if !strings.HasPrefix(suggested, "1.77.0-rc.1-fork-") {
@@ -545,6 +628,14 @@ func commitTestMakeWorkspace(t *testing.T, gitPath, workDir string) {
 	runScratchGit(t, gitPath, workDir, "init", "-q")
 	runScratchGit(t, gitPath, workDir, "add", "Makefile")
 	runScratchGit(t, gitPath, workDir, "commit", "-q", "-m", "makefile")
+}
+
+// runScratchTagOnNewCommit moves HEAD to a fresh empty commit so a test can
+// assert what an off-tag build stamps without disturbing tags already
+// placed on earlier commits.
+func runScratchTagOnNewCommit(t *testing.T, gitPath, workDir string) {
+	t.Helper()
+	runScratchGit(t, gitPath, workDir, "commit", "-q", "--allow-empty", "-m", "after the tagged commits")
 }
 
 // Make itself runs `git describe` from the scratch workspace, so the
@@ -646,14 +737,21 @@ func runMakeDryBuild(t *testing.T, makePath, workDir string, extraEnv map[string
 	return string(out)
 }
 
-func runMakeDryBuildExpectingFailure(t *testing.T, makePath, workDir string, makeArgs []string, extraEnv map[string]string) string {
+// The refusal is asserted on a real invocation: `make -n` only echoes the
+// guard's recipe line, where a quoting defect in it stays inert text, so a
+// dry run can pass a refusal that dies as a shell syntax error and never
+// prints its guidance. A real build exercises the recipe the way an
+// operator hits it.
+func runMakeBuildExpectingRefusal(t *testing.T, makePath, workDir string, makeArgs []string, extraEnv map[string]string) string {
 	t.Helper()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	args := append([]string{"-n"}, makeArgs...)
-	cmd := exec.CommandContext(ctx, makePath, args...)
+	if len(makeArgs) == 0 {
+		makeArgs = []string{"build"}
+	}
+	cmd := exec.CommandContext(ctx, makePath, makeArgs...)
 	cmd.Dir = workDir
 	cmd.Env = scratchEnv(t, "VERSION", "UMAMI_HOST", "UMAMI_WEBSITE_ID", "NO_MISTAKES_UMAMI_HOST", "NO_MISTAKES_UMAMI_WEBSITE_ID")
 	for key, value := range extraEnv {
@@ -661,7 +759,7 @@ func runMakeDryBuildExpectingFailure(t *testing.T, makePath, workDir string, mak
 	}
 	out, err := cmd.CombinedOutput()
 	if err == nil {
-		t.Fatalf("make -n %v should have failed, got:\n%s", makeArgs, out)
+		t.Fatalf("make %v should have refused, got:\n%s", makeArgs, out)
 	}
 	return string(out)
 }

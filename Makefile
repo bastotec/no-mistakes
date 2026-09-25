@@ -44,15 +44,28 @@ DESCRIBED_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null)
 # to the fork stamp like any other off-release build.
 EXACT_TAG := $(shell git describe --tags --exact-match 2>/dev/null)
 RELEASE_AT_HEAD := $(if $(filter $(EXACT_TAG),$(DESCRIBED_VERSION)),$(if $(call comparable_version,$(EXACT_TAG)),$(EXACT_TAG)))
+# Ranks `v<pattern>` tags by the semver comparison `internal/update` uses:
+# numeric core segments zero-padded to fixed width, then a flag making a
+# release outrank any prerelease of the same core, then prerelease
+# identifiers - numeric ones zero-padded so `rc.10` outranks `rc.2` - each
+# length-prefixed so a longer identifier list outranks a prefix of itself.
+# Only a comparable core (`major.minor[.patch]`) enters the ranking; an
+# empty ranking means the clone knows no release.
+RANKS_SEMVER := awk 'BEGIN { FS = "-" } { core = $$1; sub(/^v/, "", core); n = split(core, c, "."); if (n < 2 || n > 3) next; key = ""; for (i = 1; i <= 3; i++) key = key sprintf("%016d", (i <= n ? c[i] + 0 : 0)); key = key ((NF == 1) ? "1" : "0"); if (NF == 1) { print key " " $$0; next }; k = split($$2, p, "."); for (i = 1; i <= k; i++) { t = (p[i] ~ /^[0-9]+$$/) ? "0" sprintf("%016d", p[i] + 0) : "1" p[i]; key = key sprintf("%02d", length(t)) t } print key " " $$0 }'
 # The newest release tag the clone knows is the upstream semantic version
-# this fork tracks (`v1.83.1` -> `1.83.1`).  A clone whose tags arrive in
-# any other shape falls back to the release `git describe` found, stripped
-# of describe's own trailing `-<count>-g<sha>[-dirty]` but never of the
-# tag's own prerelease: a fork of `v1.77.0-rc.1` must not be told to call
-# itself the unreleased `v1.77.0`.
-NEWEST_RELEASE := $(patsubst v%,%,$(shell git tag --list 'v[0-9]*' --sort=-v:refname 2>/dev/null | head -n1))
+# this fork tracks (`v1.83.1` -> `1.83.1`).  Git's `--sort=-v:refname` and
+# coreutils `sort -V` both rank `v1.84.0-rc.1` above `v1.84.0`, so either
+# lets a prerelease outrank the release that superseded it; the tags are
+# therefore ranked by the semver ordering itself.  Only tags the version
+# pattern accepts enter the ranking, so anything ranked is comparable and
+# no second acceptance check is needed.  A clone whose tags arrive in any
+# other shape falls back to the release `git describe` found, stripped of
+# describe's own trailing `-<count>-g<sha>[-dirty]` but never of the tag's
+# own prerelease: a fork of `v1.77.0-rc.1` must not be told to call itself
+# the unreleased `v1.77.0`.
+NEWEST_RELEASE := $(patsubst v%,%,$(shell git tag --list 'v[0-9]*' 2>/dev/null | $(RANKS_SEMVER) | LC_ALL=C sort -r | head -n1 | awk '{print $$2}'))
 DESCRIBED_RELEASE := $(shell printf '%s' '$(DESCRIBED_VERSION)' | sed -E 's/-[0-9]+-g[0-9a-f]+(-dirty)?$$//; s/-dirty$$//')
-UPSTREAM_RELEASE := $(if $(call comparable_version,$(NEWEST_RELEASE)),$(NEWEST_RELEASE),$(patsubst v%,%,$(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(DESCRIBED_RELEASE))))
+UPSTREAM_RELEASE := $(if $(NEWEST_RELEASE),$(NEWEST_RELEASE),$(if $(call comparable_version,$(DESCRIBED_RELEASE)),$(patsubst v%,%,$(DESCRIBED_RELEASE))))
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo unknown)
 FORK_STAMP := $(UPSTREAM_RELEASE)-fork-$(COMMIT)
 # Loud normalization for the derived value: outside a checkout, or in a
@@ -91,7 +104,12 @@ endif
 FORK_RELEASE := $(if $(call comparable_version,$(UPSTREAM_RELEASE)),$(UPSTREAM_RELEASE),0.0.0)
 FORK_SUGGESTION := $(FORK_RELEASE)-fork-$(COMMIT)
 PLACEHOLDER_NOTE := $(if $(filter 0.0.0,$(FORK_RELEASE)), The 0.0.0 core there is a placeholder because no release tag was found here: replace it with the release your fork is built from.,)
-VERSION_REFUSAL := VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to stamp this build's default version.$(PLACEHOLDER_NOTE)
+# The refusal is exported rather than embedded in the recipe's shell text:
+# the recipe runs as one sh -c string, so a single-quoted argument is
+# terminated by the first apostrophe in either the message or the refused
+# VERSION itself, and the whole guidance dies as a shell syntax error.
+# Through the environment `printf` reads it verbatim, whatever it carries.
+export VERSION_REFUSAL := VERSION=$(VERSION) carries no comparable version number, so this build would report itself as not installed to every minimum-version check and invite an install over itself. Pass a comparable version such as VERSION=$(FORK_SUGGESTION), or omit VERSION to stamp this build's default version.$(PLACEHOLDER_NOTE)
 DEFAULT_UMAMI_HOST := https://a.kunchenguid.com
 DEFAULT_UMAMI_WEBSITE_ID := f959e889-92f5-4121-8a1f-571b10861198
 DOTENV_UMAMI_HOST := $(shell [ -f .env ] && perl -ne 'next if /^\s*(?:\#|$$)/; s/^\s*export\s+//; next unless /^\s*NO_MISTAKES_UMAMI_HOST\s*=\s*(.*)$$/; $$v=$$1; $$v =~ s/^\s+|\s+$$//g; if ($$v =~ /^( ["\x27] )(.*)\1$$/x) { $$v=$$2; } else { $$v =~ s/\s+\#.*$$//; $$v =~ s/\s+$$//; } $$out=$$v; END { print $$out if defined $$out }' .env)
@@ -116,7 +134,7 @@ INSTALL_BIN := $(shell go env GOPATH)/bin/no-mistakes
 # stamping command line must not pretend a refused VERSION would build.
 version-guard:
 ifeq ($(VERSION_REFUSED),yes)
-	+@printf '%s\n' '$(VERSION_REFUSAL)' >&2; exit 1
+	+@printf '%s\n' "$$VERSION_REFUSAL" >&2; exit 1
 endif
 
 build: version-guard
