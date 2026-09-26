@@ -45,6 +45,33 @@ func TestPRTemplateStructureRecognizesATXHeadings(t *testing.T) {
 	}
 }
 
+// A faithful agent echoes the template heading exactly as written, whitespace
+// included, so the guard must compare the trimmed forms it derived its own
+// structure lines from - not demand the agent normalize them.
+func TestPRTemplateStructureAcceptsVerbatimWhitespaceHeadings(t *testing.T) {
+	t.Parallel()
+	for name, template := range map[string]string{
+		"trailing space": "# Overview \n\nDescribe the change.\n",
+		"leading spaces": "   ## Summary\n\nDescribe the change.\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var translations []templateHeadingTranslation
+			var bodyLines []string
+			for _, raw := range strings.Split(template, "\n") {
+				if !prTemplateHeadingLine.MatchString(raw) {
+					continue
+				}
+				translations = append(translations, templateHeadingTranslation{Source: raw, English: raw})
+				bodyLines = append(bodyLines, raw)
+			}
+			body := strings.Join(bodyLines, "\n") + "\n\nFilled narrative.\n"
+			if err := validateTranslatedTemplateStructure(template, body, translations); err != nil {
+				t.Fatalf("verbatim whitespace heading refused: %v", err)
+			}
+		})
+	}
+}
+
 // Representative abbreviated shapes from the pinned Chatwoot, Forem and
 // OpenProject compatibility report; fake drafts test acceptance, not model quality.
 func TestPRTemplateDraftAllowsSubordinateCompletion(t *testing.T) {

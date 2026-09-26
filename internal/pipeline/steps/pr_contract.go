@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 )
 
 const prContentValidationPurpose = "pr-content-validation"
@@ -37,6 +38,8 @@ const prCreationSkill = prCreationSkillHeader + prCreationSkillPolicyClauses + p
 
 const prCreationSkillTemplate = prCreationSkillHeader + prCreationSkillInspectClause + prCreationSkillTemplateFormatClause + prCreationSkillEnglishClauses + "\n"
 
+const prCreationSkillTitle = prCreationSkillHeader + prCreationSkillEnglishClauses + "\n"
+
 var prContentValidationSchema = json.RawMessage(`{
  "type":"object","properties":{
   "content_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
@@ -55,7 +58,7 @@ type prContentValidation struct {
 
 func defaultSectionsWithoutIntent(body string, sctx *pipeline.StepContext) string {
 	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
-	section := "## Intent\n\n" + cleaned
+	section := safepath.RedactText("## Intent\n\n" + cleaned)
 	if cleaned == "" || !strings.HasPrefix(body, section) {
 		return body
 	}

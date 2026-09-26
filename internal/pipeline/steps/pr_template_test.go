@@ -609,6 +609,18 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 		if strings.Contains(opts.Prompt, sctx.Config.PR.TitleFormat) {
 			t.Fatal("prompt exposed configured title format")
 		}
+		for _, clause := range []string{
+			"Report prose-only or ambiguous body-format rules as unsupported",
+			"Inspect only the pinned PR-format policy revision named in the task",
+			"A committed Markdown pull-request template",
+		} {
+			if strings.Contains(opts.Prompt, clause) {
+				t.Errorf("title-only drafting prompt still carries the body-format clause %q", clause)
+			}
+		}
+		if !strings.Contains(opts.Prompt, "Write all natural-language title and body text in English") {
+			t.Error("title drafting prompt lost the English requirement")
+		}
 		data, _ := json.Marshal(map[string]string{"title": "add widget"})
 		return &agent.Result{Output: data}, nil
 	}

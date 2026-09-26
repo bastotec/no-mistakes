@@ -251,18 +251,19 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 	bodyIndex := 0
 	for i, source := range sources {
 		translation := translations[i]
-		if translation.Source != source {
+		if strings.TrimSpace(translation.Source) != strings.TrimSpace(source) {
 			return fmt.Errorf("agent changed or reordered a pr.template source heading; refusing publication")
 		}
+		english := strings.TrimSpace(translation.English)
 		translatedLines := templateStructureLines(translation.English)
-		if len(translatedLines) != 1 || translatedLines[0] != translation.English || headingLevel(source) != headingLevel(translation.English) {
+		if len(translatedLines) != 1 || translatedLines[0] != english || headingLevel(source) != headingLevel(english) {
 			return fmt.Errorf("agent returned an invalid English pr.template heading; refusing publication")
 		}
 		found := false
 		for bodyIndex < len(bodyHeadings) {
 			candidate := bodyHeadings[bodyIndex]
 			bodyIndex++
-			if candidate == translation.English {
+			if candidate == english {
 				found = true
 				break
 			}

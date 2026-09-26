@@ -1259,6 +1259,21 @@ func TestValidateFinalPRContentIntentProseHeadingsDoNotBreakDefaultOrder(t *test
 	}
 }
 
+func TestValidateFinalPRContentRedactedIntentStillStripsIntentSection(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	sctx.UserIntent = "Move /home/alex/go/pkg/mod into the vendor tree.\n\n## Testing\n\nManual verification."
+	body := prependIntentSection("## What Changed\n\n- add helper\n\n## Testing\n\nunit passed\n\n## Pipeline\n\ncomplete", sctx)
+	if got := redactPRContent(prContent{Body: body}).Body; got == body {
+		t.Fatalf("test intent path was not redacted; regression cannot exercise the published bytes:\n%s", got)
+	}
+	content := redactPRContent(prContent{Title: "feat: helper", Body: body})
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, "", strings.Repeat("a", 40), true); err != nil {
+		t.Fatalf("redacted intent broke default heading order validation: %v", err)
+	}
+}
+
 func TestPRBodyBudgetPromptSection(t *testing.T) {
 	t.Parallel()
 	if got := prBodyBudgetPromptSection(0); got != "" {

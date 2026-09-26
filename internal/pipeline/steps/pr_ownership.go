@@ -111,11 +111,7 @@ func wrapPRAppendix(appendix string) string {
 }
 
 func prTitleMatches(published, stored string) bool {
-	return stripDraftPRTitleMarker(stored) == stripDraftPRTitleMarker(published)
-}
-
-func stripDraftPRTitleMarker(title string) string {
-	return scm.StripDraftTitleMarker(title)
+	return scm.StripDraftTitleMarker(stored) == scm.StripDraftTitleMarker(published)
 }
 
 // composeOwnedPRContent uses the same publication redaction owner as ordinary

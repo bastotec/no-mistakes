@@ -632,7 +632,7 @@ Rules:
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, policySHA, sctx.Run.HeadSHA, baseBranch, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCreationSkill
+	prompt += prCreationSkillTitle
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
