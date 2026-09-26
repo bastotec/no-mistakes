@@ -263,6 +263,7 @@ Final diff paths and statuses:
 	if err := validateTranslatedTemplateStructure(template, content.Body, content.HeadingTranslations); err != nil {
 		return prContent{}, err
 	}
+	content.prContent.HeadingTranslations = append([]templateHeadingTranslation(nil), content.HeadingTranslations...)
 	return content.prContent, nil
 }
 

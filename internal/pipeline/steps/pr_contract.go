@@ -94,6 +94,38 @@ func prContentDigest(content prContent) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(content.Title+"\x00"+content.Body)))
 }
 
+func requiredTemplateHeadingTranslations(template string, translations []templateHeadingTranslation) []templateHeadingTranslation {
+	sources := templateStructureLines(template)
+	required := make([]templateHeadingTranslation, len(sources))
+	for i, source := range sources {
+		required[i] = templateHeadingTranslation{Source: source, English: source}
+		if i < len(translations) && strings.TrimSpace(translations[i].Source) == strings.TrimSpace(source) && strings.TrimSpace(translations[i].English) != "" {
+			required[i].English = strings.TrimSpace(translations[i].English)
+		}
+	}
+	return required
+}
+
+func validateFinalTemplateHeadings(body string, required []templateHeadingTranslation) error {
+	bodyHeadings := templateStructureLines(body)
+	bodyIndex := 0
+	for _, heading := range required {
+		found := false
+		for bodyIndex < len(bodyHeadings) {
+			candidate := bodyHeadings[bodyIndex]
+			bodyIndex++
+			if candidate == strings.TrimSpace(heading.English) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return fmt.Errorf("final PR body omitted or reordered a required template heading")
+		}
+	}
+	return nil
+}
+
 func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, runWritten prContent, template, baseSHA string, defaultFormat bool) error {
 	if strings.TrimSpace(content.Title) == "" || strings.TrimSpace(content.Body) == "" {
 		return fmt.Errorf("cannot validate empty pull-request title or body")
@@ -101,6 +133,12 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	// Callers pair the default writer or a non-empty template with a narrative
 	// this run drafted; every other call publishes only title plus appendix.
 	runWroteNarrative := defaultFormat || template != ""
+	requiredHeadings := requiredTemplateHeadingTranslations(template, runWritten.HeadingTranslations)
+	if template != "" {
+		if err := validateFinalTemplateHeadings(runWritten.Body, requiredHeadings); err != nil {
+			return err
+		}
+	}
 	if template == "" && defaultFormat {
 		if err := validateDefaultPRHeadingOrder(defaultSectionsWithoutIntent(content.Body, sctx)); err != nil {
 			return err
@@ -109,6 +147,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	digest := prContentDigest(runWritten)
 	contentJSON, _ := json.Marshal(runWritten)
 	templateJSON, _ := json.Marshal(template)
+	requiredHeadingsJSON, _ := json.Marshal(requiredHeadings)
 	skill := prCreationSkillHeader + prCreationSkillEnglishClauses
 	switch {
 	case template != "":
@@ -118,7 +157,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	}
 	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported."
 	if template != "" {
-		formatRule += " A template is supplied here: its required heading levels and order have already passed deterministic validation, including any declared English translations. Judge the remaining template semantics. Prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
+		formatRule += " A template is supplied here. required_heading_translations_json maps every source heading to the heading that must occur in the body; an unmapped source maps to itself. The mapped headings have passed deterministic level and order validation. Judge whether each English heading faithfully preserves its source meaning, retaining already-English source headings verbatim, plus the remaining template semantics. Prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
 	}
 	if !runWroteNarrative {
 		formatRule = "- format_compliant covers only prose this run wrote: the content below is only this run's title (empty when it wrote none) and its machine-generated no-mistakes evidence appendix, so there is no run-written body prose for a repository body-format rule to govern. Do not report prose-only or ambiguous body-format rules as issues; judge only English and fabrication in the run-written text."
@@ -136,8 +175,11 @@ The SHA-256 binds your verdict to the exact title and body below. Return it unch
 Committed template JSON string:
 %s
 
+required_heading_translations_json:
+%s
+
 Run-written PR content JSON:
-%s`, skill, baseSHA, digest, formatRule, templateJSON, contentJSON)
+%s`, skill, baseSHA, digest, formatRule, templateJSON, requiredHeadingsJSON, contentJSON)
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,

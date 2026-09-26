@@ -160,7 +160,7 @@ func TestPROwnershipUpdateMergesLatestAuthorEdits(t *testing.T) {
 		return nil
 	}}
 	sctx := &pipeline.StepContext{Ctx: context.Background()}
-	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), "", "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, content.scmContent(), "", "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if host.writes != 1 || !strings.Contains(host.body, "Human updated checkbox label") || !strings.HasSuffix(host.body, "Fixes test/other#9") || !strings.Contains(host.body, "New recorded fact.") {
@@ -205,7 +205,7 @@ func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 			case "size":
 				initial.Body = strings.Repeat("Author content\n", maxPullRequestBodyBytes)
 			}
-			err := updateOwnedPR(&pipeline.StepContext{Ctx: context.Background()}, host, &scm.PR{Number: "42"}, scm.PRContent(initial), "", "", appendix+"\nNew fact", 0, nil)
+			err := updateOwnedPR(&pipeline.StepContext{Ctx: context.Background()}, host, &scm.PR{Number: "42"}, initial.scmContent(), "", "", appendix+"\nNew fact", 0, nil)
 			if err == nil || host.writes != wantWrites {
 				t.Fatalf("err=%v, writes=%d want %d", err, host.writes, wantWrites)
 			}
@@ -236,7 +236,7 @@ func TestUpdateOwnedPRAcceptsForgeDraftTitleMarker(t *testing.T) {
 	content, appendix := ownedFixture(t)
 	host := &draftTitleStoreHost{title: "Draft: " + content.Title, body: content.Body}
 	sctx := &pipeline.StepContext{Ctx: context.Background()}
-	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), content.Title, "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, content.scmContent(), content.Title, "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
 		t.Fatalf("stored draft title marker reported divergence after the write: %v", err)
 	}
 	if !strings.Contains(host.body, "New recorded fact.") || host.title != "Draft: "+content.Title {

@@ -196,7 +196,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			}
 		}
 		if content.Body != current.Body || content.Title != "" {
-			if _, err := host.UpdatePR(sctx.Ctx, pr, scm.PRContent(content)); err != nil {
+			if _, err := host.UpdatePR(sctx.Ctx, pr, content.scmContent()); err != nil {
 				return fmt.Errorf("update templated PR: %w", err)
 			}
 		}

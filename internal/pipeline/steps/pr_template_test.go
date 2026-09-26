@@ -628,11 +628,9 @@ func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
 		t.Fatalf("translated body = %q, want %q", content.Body, body)
 	}
 	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if strings.Contains(opts.Prompt, "required_heading_sources_json") {
-			t.Fatal("final validator was told to require source-language headings")
-		}
-		if !strings.Contains(opts.Prompt, "including any declared English translations") {
-			t.Fatal("final validator was not told that translated headings passed deterministic validation")
+		if !strings.Contains(opts.Prompt, `"source":"# Resumo","english":"# Summary"`) ||
+			!strings.Contains(opts.Prompt, `"source":"# Testes","english":"# Testing"`) {
+			t.Fatal("final validator did not receive the approved heading translations")
 		}
 		digest, err := validationDigestFromPrompt(opts.Prompt)
 		if err != nil {
@@ -645,6 +643,27 @@ func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
 	}
 	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, template, sctx.Run.BaseSHA, false); err != nil {
 		t.Fatalf("translated template failed final validation: %v", err)
+	}
+}
+
+func TestPRTemplateFinalValidationRejectsMissingMappedHeading(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.validationFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("validator ran after the mapped heading was missing")
+		return nil, nil
+	}
+	content := prContent{
+		Title: "fix: describe the change",
+		Body:  "# Summary\n\nDescribe the change.",
+		HeadingTranslations: []templateHeadingTranslation{
+			{Source: "# Resumo", English: "# Summary"},
+			{Source: "# Testes", English: "# Testing"},
+		},
+	}
+	template := "# Resumo\n\nDescreva a mudança.\n\n# Testes\n"
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, template, sctx.Run.BaseSHA, false); err == nil {
+		t.Fatal("final validation accepted a body missing its mapped Testing heading")
 	}
 }
 
@@ -887,7 +906,7 @@ func TestPRStep_ConcurrentAuthorNarrativeDisplacedFromVerdictScope(t *testing.T)
 	}
 }
 
-func TestPRTemplateFinalVerdictReliesOnDrafterSideHeadingCheck(t *testing.T) {
+func TestPRTemplateFinalVerdictReceivesApprovedHeadingTranslations(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
 	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
@@ -904,8 +923,8 @@ func TestPRTemplateFinalVerdictReliesOnDrafterSideHeadingCheck(t *testing.T) {
 		return &agent.Result{Output: data}, nil
 	}
 	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if strings.Contains(opts.Prompt, "heading_translations") {
-			t.Error("final verdict prompt asked the validator to re-derive heading translations")
+		if !strings.Contains(opts.Prompt, "required_heading_translations_json") {
+			t.Error("final verdict prompt omitted the approved heading translations")
 		}
 		digest, err := validationDigestFromPrompt(opts.Prompt)
 		if err != nil {

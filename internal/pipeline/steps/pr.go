@@ -27,8 +27,13 @@ type PRStep struct {
 }
 
 type prContent struct {
-	Title string `json:"title"`
-	Body  string `json:"body"`
+	Title               string                       `json:"title"`
+	Body                string                       `json:"body"`
+	HeadingTranslations []templateHeadingTranslation `json:"-"`
+}
+
+func (c prContent) scmContent() scm.PRContent {
+	return scm.PRContent{Title: c.Title, Body: c.Body}
 }
 
 func decodePRDraftOutput(output []byte, dest any, failure string, refuseUnsupportedRules bool) error {
@@ -176,6 +181,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			}
 			var emptyNarrative string
 			var title string
+			var headingTranslations []templateHeadingTranslation
 			// An associated run appends its evidence and nothing else: the
 			// title and the description - including an empty one - belong to
 			// the pull request's author, not to this repository's template.
@@ -187,6 +193,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					}
 					emptyNarrative = neutralizeAttestationMarkers(draft.Body)
 					title = draft.Title
+					headingTranslations = draft.HeadingTranslations
 				} else if sctx.Config != nil && sctx.Config.PR.TitleFormat != "" {
 					title, err = s.draftConfiguredPRTitle(sctx, branch, publicationBaseBranch, baseSHA, policySHA)
 					if err != nil {
@@ -216,7 +223,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 				if narrative != "" {
 					validationTemplate = template
 				}
-				runWritten := prContent{Title: title, Body: strings.TrimSpace(narrative + "\n\n" + appendix)}
+				runWritten := prContent{Title: title, Body: strings.TrimSpace(narrative + "\n\n" + appendix), HeadingTranslations: headingTranslations}
 				return s.validateFinalPRContent(sctx, content, redactPRContent(runWritten), validationTemplate, policySHA, false)
 			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, validate); err != nil {
@@ -230,7 +237,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
 				return nil, err
 			}
-			updated, err = host.UpdatePR(ctx, existing, scm.PRContent(content))
+			updated, err = host.UpdatePR(ctx, existing, content.scmContent())
 			if err != nil {
 				return nil, fmt.Errorf("update pull request: %w", err)
 			}
@@ -249,7 +256,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	sctx.Log("creating pull request...")
-	created, err := host.CreatePR(ctx, branch, baseBranch, scm.PRContent(content))
+	created, err := host.CreatePR(ctx, branch, baseBranch, content.scmContent())
 	if err != nil {
 		return nil, err
 	}
@@ -501,10 +508,12 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 		if err != nil {
 			return prContent{}, err
 		}
+		translations := content.HeadingTranslations
 		content, err = composeOwnedPRContent(prOwnedBody{before: neutralizeAttestationMarkers(content.Body)}, content.Title, appendix, bodyLimit)
 		if err != nil {
 			return prContent{}, err
 		}
+		content.HeadingTranslations = translations
 		if err := s.validateFinalPRContent(sctx, content, content, template, policySHA, false); err != nil {
 			return prContent{}, err
 		}
