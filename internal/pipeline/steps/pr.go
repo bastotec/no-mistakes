@@ -540,7 +540,9 @@ func redactPRContent(content prContent) prContent {
 	content.Body = safepath.RedactText(content.Body)
 	content.HeadingTranslations = append([]templateHeadingTranslation(nil), content.HeadingTranslations...)
 	for i := range content.HeadingTranslations {
-		content.HeadingTranslations[i].English = safepath.RedactText(content.HeadingTranslations[i].English)
+		original := content.HeadingTranslations[i].English
+		content.HeadingTranslations[i].English = safepath.RedactText(original)
+		content.HeadingTranslations[i].PublicationRedacted = content.HeadingTranslations[i].English != original
 	}
 	return content
 }

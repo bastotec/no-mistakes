@@ -659,15 +659,18 @@ func TestPRTemplateHeadingTranslationsFollowPublicationRedaction(t *testing.T) {
 		}},
 	}
 	redacted := redactPRContent(draft)
-	if redacted.Body != "## Logs from ~/build\n\nCaptured output." || redacted.HeadingTranslations[0].English != "## Logs from ~/build" {
+	if redacted.Body != "## Logs from ~/build\n\nCaptured output." || redacted.HeadingTranslations[0].English != "## Logs from ~/build" || !redacted.HeadingTranslations[0].PublicationRedacted {
 		t.Fatalf("publication redaction did not keep the body and mapped heading synchronized: %+v", redacted)
 	}
 	if redacted.HeadingTranslations[0].Source != draft.HeadingTranslations[0].Source {
 		t.Fatal("publication redaction changed the source heading used for semantic validation")
 	}
 	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-		if !strings.Contains(opts.Prompt, `"source":"## Logs from /home/alex/build","english":"## Logs from ~/build"`) {
+		if !strings.Contains(opts.Prompt, `"source":"## Logs from /home/alex/build","english":"## Logs from ~/build","publication_redacted":true`) {
 			t.Fatalf("final validator received unsynchronized heading translations:\n%s", opts.Prompt)
+		}
+		if !strings.Contains(opts.Prompt, "that flag authorizes only the synchronized home-path redaction") {
+			t.Fatalf("final validator was not told why the mapped heading differs:\n%s", opts.Prompt)
 		}
 		digest, err := validationDigestFromPrompt(opts.Prompt)
 		if err != nil {
@@ -698,6 +701,37 @@ func TestPRTemplateHeadingTranslationsFollowPublicationRedaction(t *testing.T) {
 				t.Fatalf("%s rejected a redacted required heading: %v", mode, err)
 			}
 		})
+	}
+}
+
+func TestPRTemplateFinalValidationRejectsAlteredUnredactedHeading(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	content := prContent{
+		Title: "fix: describe validation",
+		Body:  "## Validation\n\nTargeted checks passed.",
+		HeadingTranslations: []templateHeadingTranslation{{
+			Source:  "## Testing",
+			English: "## Validation",
+		}},
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, `"source":"## Testing","english":"## Validation"`) || strings.Contains(opts.Prompt, `"publication_redacted":true`) {
+			t.Fatalf("final validator received the wrong unredacted heading contract:\n%s", opts.Prompt)
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest,
+			English:       true,
+			Issues:        []string{"already-English template heading was not retained verbatim"},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, "## Testing\n", sctx.Run.BaseSHA, false); err == nil || !strings.Contains(err.Error(), "not retained verbatim") {
+		t.Fatalf("final validation accepted an altered unredacted heading: %v", err)
 	}
 }
 

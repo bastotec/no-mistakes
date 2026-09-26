@@ -69,8 +69,9 @@ func conventionalPRTemplateDirectoriesFor(provider scm.Provider) []string {
 }
 
 type templateHeadingTranslation struct {
-	Source  string `json:"source"`
-	English string `json:"english"`
+	Source              string `json:"source"`
+	English             string `json:"english"`
+	PublicationRedacted bool   `json:"publication_redacted,omitempty"`
 }
 
 type templatePRContent struct {

@@ -101,6 +101,7 @@ func requiredTemplateHeadingTranslations(template string, translations []templat
 		required[i] = templateHeadingTranslation{Source: source, English: source}
 		if i < len(translations) && strings.TrimSpace(translations[i].Source) == strings.TrimSpace(source) && strings.TrimSpace(translations[i].English) != "" {
 			required[i].English = strings.TrimSpace(translations[i].English)
+			required[i].PublicationRedacted = translations[i].PublicationRedacted
 		}
 	}
 	return required
@@ -157,7 +158,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	}
 	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported."
 	if template != "" {
-		formatRule += " A template is supplied here. required_heading_translations_json maps every source heading to the heading that must occur in the body; an unmapped source maps to itself. The mapped headings have passed deterministic level and order validation. Judge whether each English heading faithfully preserves its source meaning, retaining already-English source headings verbatim, plus the remaining template semantics. Prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
+		formatRule += " A template is supplied here. required_heading_translations_json maps every source heading to the heading that must occur in the body; an unmapped source maps to itself. The mapped headings have passed deterministic level and order validation. Judge whether each English heading faithfully preserves its source meaning. Retain already-English source headings verbatim unless publication_redacted is true; that flag authorizes only the synchronized home-path redaction already reflected in the mapped heading, and no other wording change. Judge the remaining template semantics too. Prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
 	}
 	if !runWroteNarrative {
 		formatRule = "- format_compliant covers only prose this run wrote: the content below is only this run's title (empty when it wrote none) and its machine-generated no-mistakes evidence appendix, so there is no run-written body prose for a repository body-format rule to govern. Do not report prose-only or ambiguous body-format rules as issues; judge only English and fabrication in the run-written text."
