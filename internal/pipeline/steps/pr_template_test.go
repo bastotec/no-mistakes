@@ -366,6 +366,47 @@ func TestPRTemplateDiscoveryGiteaRootDefaults(t *testing.T) {
 	}
 }
 
+func TestPRTemplateDiscoveryForgeRecognizedLocations(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		provider scm.Provider
+		name     string
+	}{
+		{scm.ProviderGitea, ".gitea/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderGitea, ".gitea/pull_request_template.md"},
+		{scm.ProviderGitea, ".github/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderGitea, ".github/pull_request_template.md"},
+		{scm.ProviderForgejo, ".forgejo/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderForgejo, ".forgejo/pull_request_template.md"},
+		{scm.ProviderForgejo, ".gitea/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderForgejo, ".github/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderForgejo, ".github/pull_request_template.md"},
+	} {
+		tc := tc
+		t.Run(string(tc.provider)+"/"+tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(tc.name))), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "## Forge Summary\n"
+			if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(tc.name)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", tc.name)
+			gitCmd(t, dir, "commit", "-m", "add forge PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, tc.provider)
+			if err != nil || got != body {
+				t.Fatalf("%s template %q = %q, err %v", tc.provider, tc.name, got, err)
+			}
+		})
+	}
+}
+
 func TestPRTemplateDiscoveryIgnoresOptionalDirectoryTemplates(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)

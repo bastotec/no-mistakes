@@ -36,9 +36,14 @@ func conventionalPRTemplatesFor(provider scm.Provider) []string {
 		return []string{
 			"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
 			".gitea/PULL_REQUEST_TEMPLATE.md", ".gitea/pull_request_template.md",
+			".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
 		}
 	case scm.ProviderForgejo:
-		return []string{".forgejo/PULL_REQUEST_TEMPLATE.md", ".forgejo/pull_request_template.md"}
+		return []string{
+			".forgejo/PULL_REQUEST_TEMPLATE.md", ".forgejo/pull_request_template.md",
+			".gitea/PULL_REQUEST_TEMPLATE.md", ".gitea/pull_request_template.md",
+			".github/PULL_REQUEST_TEMPLATE.md", ".github/pull_request_template.md",
+		}
 	case scm.ProviderAzureDevOps:
 		return []string{
 			"PULL_REQUEST_TEMPLATE.md", "pull_request_template.md",
