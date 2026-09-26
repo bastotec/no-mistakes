@@ -109,7 +109,6 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	digest := prContentDigest(runWritten)
 	contentJSON, _ := json.Marshal(runWritten)
 	templateJSON, _ := json.Marshal(template)
-	headingSourcesJSON, _ := json.Marshal(templateStructureLines(template))
 	skill := prCreationSkillHeader + prCreationSkillEnglishClauses
 	switch {
 	case template != "":
@@ -117,9 +116,9 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	case runWroteNarrative:
 		skill = prCreationSkill
 	}
-	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty, with every heading from required_heading_sources_json present in order. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported."
+	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported."
 	if template != "" {
-		formatRule += " A template is supplied here: the verified template structure is the format contract, so prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
+		formatRule += " A template is supplied here: its required heading levels and order have already passed deterministic validation, including any declared English translations. Judge the remaining template semantics. Prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
 	}
 	if !runWroteNarrative {
 		formatRule = "- format_compliant covers only prose this run wrote: the content below is only this run's title (empty when it wrote none) and its machine-generated no-mistakes evidence appendix, so there is no run-written body prose for a repository body-format rule to govern. Do not report prose-only or ambiguous body-format rules as issues; judge only English and fabrication in the run-written text."
@@ -129,7 +128,6 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 The SHA-256 binds your verdict to the exact title and body below. Return it unchanged.
 - pr_format_policy_sha: %s
 - content_sha256: %s
-- required_heading_sources_json: %s
 - english is true only when every natural-language passage below is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, and machine metadata.
 - An empty title below means this run wrote no title; there is nothing to judge there.
 %s
@@ -139,7 +137,7 @@ Committed template JSON string:
 %s
 
 Run-written PR content JSON:
-%s`, skill, baseSHA, digest, headingSourcesJSON, formatRule, templateJSON, contentJSON)
+%s`, skill, baseSHA, digest, formatRule, templateJSON, contentJSON)
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,

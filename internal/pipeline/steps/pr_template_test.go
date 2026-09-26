@@ -231,9 +231,12 @@ func TestPRTemplatePublishesWhenDraftNotesOutsideProseRules(t *testing.T) {
 func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
-	name := "pull_request_template.md"
+	name := ".github/PULL_REQUEST_TEMPLATE/change.md"
 	gitCmd(t, dir, "checkout", "main")
 	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n\n## Rollback\n\nDescribe rollback.\n"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -407,12 +410,78 @@ func TestPRTemplateDiscoveryForgeRecognizedLocations(t *testing.T) {
 	}
 }
 
-func TestPRTemplateDiscoveryIgnoresOptionalDirectoryTemplates(t *testing.T) {
+func TestPRTemplateDiscoveryUsesSingleAutoAppliedDirectoryTemplate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		provider scm.Provider
+		name     string
+	}{
+		{scm.ProviderGitHub, "PULL_REQUEST_TEMPLATE/change.md"},
+		{scm.ProviderAzureDevOps, ".azuredevops/pullrequesttemplate/change.md"},
+	} {
+		tc := tc
+		t.Run(string(tc.provider)+"/"+tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(tc.name))), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "## Directory Template\n"
+			if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(tc.name)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", tc.name)
+			gitCmd(t, dir, "commit", "-m", "add directory PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, tc.provider)
+			if err != nil || got != body {
+				t.Fatalf("%s directory template %q = %q, err %v", tc.provider, tc.name, got, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateDiscoveryIgnoresMultiFileSelectorDirectory(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	for _, name := range []string{
+		".github/PULL_REQUEST_TEMPLATE/security.md",
+		".github/PULL_REQUEST_TEMPLATE/feature.md",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("## Selected Template\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", ".github")
+	gitCmd(t, dir, "commit", "-m", "add selectable PR templates")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+	got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || got != "" {
+		t.Fatalf("multi-file selector directory selected a template: %q, err %v", got, err)
+	}
+	sctx.Config.PR.Template = ".github/PULL_REQUEST_TEMPLATE/security.md"
+	sctx.Config.TrustedConfigSHA = policySHA
+	selected, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || selected != "## Selected Template\n" {
+		t.Fatalf("explicit optional template = %q, err %v", selected, err)
+	}
+}
+
+func TestPRTemplateDiscoveryIgnoresOtherProviderSelectorDirectories(t *testing.T) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
 	gitCmd(t, dir, "checkout", "main")
 	files := map[string]scm.Provider{
-		".github/PULL_REQUEST_TEMPLATE/security.md":   scm.ProviderGitHub,
 		".gitlab/merge_request_templates/Security.md": scm.ProviderGitLab,
 		".gitea/PULL_REQUEST_TEMPLATE/security.md":    scm.ProviderGitea,
 		".forgejo/PULL_REQUEST_TEMPLATE/security.md":  scm.ProviderForgejo,
@@ -425,7 +494,7 @@ func TestPRTemplateDiscoveryIgnoresOptionalDirectoryTemplates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	gitCmd(t, dir, "add", ".github", ".gitlab", ".gitea", ".forgejo")
+	gitCmd(t, dir, "add", ".gitlab", ".gitea", ".forgejo")
 	gitCmd(t, dir, "commit", "-m", "add optional PR templates")
 	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
 	gitCmd(t, dir, "checkout", "feature")
@@ -436,12 +505,6 @@ func TestPRTemplateDiscoveryIgnoresOptionalDirectoryTemplates(t *testing.T) {
 		if err != nil || got != "" {
 			t.Fatalf("optional template %q selected for %s: %q, err %v", name, provider, got, err)
 		}
-	}
-	sctx.Config.PR.Template = ".github/PULL_REQUEST_TEMPLATE/security.md"
-	sctx.Config.TrustedConfigSHA = policySHA
-	selected, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
-	if err != nil || selected != "## Security Review\n" {
-		t.Fatalf("explicit optional template = %q, err %v", selected, err)
 	}
 }
 
@@ -563,6 +626,25 @@ func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
 	}
 	if content.Body != body {
 		t.Fatalf("translated body = %q, want %q", content.Body, body)
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "required_heading_sources_json") {
+			t.Fatal("final validator was told to require source-language headings")
+		}
+		if !strings.Contains(opts.Prompt, "including any declared English translations") {
+			t.Fatal("final validator was not told that translated headings passed deterministic validation")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, template, sctx.Run.BaseSHA, false); err != nil {
+		t.Fatalf("translated template failed final validation: %v", err)
 	}
 }
 

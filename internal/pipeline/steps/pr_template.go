@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -56,6 +57,17 @@ func conventionalPRTemplatesFor(provider scm.Provider) []string {
 	}
 }
 
+func conventionalPRTemplateDirectoriesFor(provider scm.Provider) []string {
+	switch provider {
+	case scm.ProviderGitHub:
+		return []string{".github/PULL_REQUEST_TEMPLATE", "PULL_REQUEST_TEMPLATE"}
+	case scm.ProviderAzureDevOps:
+		return []string{".azuredevops/pullrequesttemplate"}
+	default:
+		return nil
+	}
+}
+
 type templateHeadingTranslation struct {
 	Source  string `json:"source"`
 	English string `json:"english"`
@@ -97,11 +109,13 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySH
 		return loadPRTemplate(ctx, sctx.WorkDir, policySHA, name)
 	}
 	candidates := conventionalPRTemplatesFor(provider)
-	if len(candidates) == 0 {
+	directories := conventionalPRTemplateDirectoriesFor(provider)
+	if len(candidates) == 0 && len(directories) == 0 {
 		return "", nil
 	}
 	args := []string{"ls-tree", "-r", "-z", "--name-only", policySHA, "--"}
 	args = append(args, candidates...)
+	args = append(args, directories...)
 	paths, err := git.RunRaw(ctx, sctx.WorkDir, args...)
 	if err != nil {
 		return "", fmt.Errorf("discover committed pull-request template: %w", err)
@@ -110,6 +124,7 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySH
 	for _, name := range candidates {
 		exact[name] = struct{}{}
 	}
+	directoryFiles := make(map[string][]string, len(directories))
 	var matches []string
 	for _, name := range strings.Split(strings.TrimSuffix(string(paths), "\x00"), "\x00") {
 		if name == "" {
@@ -117,6 +132,18 @@ func resolvePRTemplate(ctx context.Context, sctx *pipeline.StepContext, policySH
 		}
 		if _, ok := exact[name]; ok {
 			matches = append(matches, name)
+			continue
+		}
+		for _, directory := range directories {
+			relative, ok := strings.CutPrefix(name, directory+"/")
+			if ok && !strings.Contains(relative, "/") && strings.EqualFold(path.Ext(relative), ".md") {
+				directoryFiles[directory] = append(directoryFiles[directory], name)
+			}
+		}
+	}
+	for _, directory := range directories {
+		if files := directoryFiles[directory]; len(files) == 1 {
+			matches = append(matches, files[0])
 		}
 	}
 	if len(matches) == 0 {
