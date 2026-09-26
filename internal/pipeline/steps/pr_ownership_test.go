@@ -120,6 +120,8 @@ type ownershipRaceHost struct {
 	afterWriteTitle string
 }
 
+func (h *ownershipRaceHost) Provider() scm.Provider { return scm.ProviderGitHub }
+
 func (h *ownershipRaceHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
 	h.reads++
 	if h.read != nil {
@@ -215,9 +217,12 @@ func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 
 type draftTitleStoreHost struct {
 	scm.Host
-	title string
-	body  string
+	provider scm.Provider
+	title    string
+	body     string
 }
+
+func (h *draftTitleStoreHost) Provider() scm.Provider { return h.provider }
 
 func (h *draftTitleStoreHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
 	return scm.PRContent{Title: h.title, Body: h.body}, nil
@@ -231,16 +236,35 @@ func (h *draftTitleStoreHost) UpdatePR(_ context.Context, pr *scm.PR, content sc
 	return pr, nil
 }
 
-func TestUpdateOwnedPRAcceptsForgeDraftTitleMarker(t *testing.T) {
+func TestUpdateOwnedPRAcceptsGitLabDraftTitleMarker(t *testing.T) {
 	t.Parallel()
 	content, appendix := ownedFixture(t)
-	host := &draftTitleStoreHost{title: "Draft: " + content.Title, body: content.Body}
+	host := &draftTitleStoreHost{provider: scm.ProviderGitLab, title: "Draft: " + content.Title, body: content.Body}
 	sctx := &pipeline.StepContext{Ctx: context.Background()}
 	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, content.scmContent(), content.Title, "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
 		t.Fatalf("stored draft title marker reported divergence after the write: %v", err)
 	}
 	if !strings.Contains(host.body, "New recorded fact.") || host.title != "Draft: "+content.Title {
 		t.Fatalf("draft title update did not settle: title=%q body=%q", host.title, host.body)
+	}
+}
+
+func TestPRTitleMatchesDraftMarkersOnlyForGitLab(t *testing.T) {
+	t.Parallel()
+	const title = "fix: repair cache"
+	for _, provider := range []scm.Provider{
+		scm.ProviderGitHub,
+		scm.ProviderAzureDevOps,
+		scm.ProviderBitbucket,
+		scm.ProviderGitea,
+		scm.ProviderForgejo,
+	} {
+		if prTitleMatches(provider, title, "Draft: "+title) {
+			t.Errorf("%s accepted a GitLab title marker", provider)
+		}
+	}
+	if !prTitleMatches(scm.ProviderGitLab, title, "Draft: "+title) {
+		t.Fatal("GitLab draft title marker reported a divergence")
 	}
 }
 

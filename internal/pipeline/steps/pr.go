@@ -279,7 +279,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if err != nil {
 			return nil, fmt.Errorf("verify created templated PR: %w", err)
 		}
-		if !prTitleMatches(content.Title, actual.Title) || actual.Body != content.Body {
+		if !prTitleMatches(provider, content.Title, actual.Title) || actual.Body != content.Body {
 			return nil, fmt.Errorf("created PR title or body differs from the validated template content; refusing successful publication")
 		}
 	}
@@ -508,6 +508,7 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 		if err != nil {
 			return prContent{}, err
 		}
+		content = redactPRContent(content)
 		translations := content.HeadingTranslations
 		content, err = composeOwnedPRContent(prOwnedBody{before: neutralizeAttestationMarkers(content.Body)}, content.Title, appendix, bodyLimit)
 		if err != nil {
@@ -537,6 +538,10 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 func redactPRContent(content prContent) prContent {
 	content.Title = safepath.RedactText(content.Title)
 	content.Body = safepath.RedactText(content.Body)
+	content.HeadingTranslations = append([]templateHeadingTranslation(nil), content.HeadingTranslations...)
+	for i := range content.HeadingTranslations {
+		content.HeadingTranslations[i].English = safepath.RedactText(content.HeadingTranslations[i].English)
+	}
 	return content
 }
 

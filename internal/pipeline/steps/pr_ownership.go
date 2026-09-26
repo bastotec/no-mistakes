@@ -110,7 +110,10 @@ func wrapPRAppendix(appendix string) string {
 	return fmt.Sprintf("%s%x -->\n%s\n%s", prAppendixStart, sha256.Sum256([]byte(appendix)), appendix, prAppendixEnd)
 }
 
-func prTitleMatches(published, stored string) bool {
+func prTitleMatches(provider scm.Provider, published, stored string) bool {
+	if provider != scm.ProviderGitLab {
+		return stored == published
+	}
 	return scm.StripDraftTitleMarker(stored) == scm.StripDraftTitleMarker(published)
 }
 
@@ -204,7 +207,7 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return fmt.Errorf("verify templated PR update: %w", err)
 		}
-		if verified.Body != content.Body || !prTitleMatches(expectedTitle, verified.Title) {
+		if verified.Body != content.Body || !prTitleMatches(host.Provider(), expectedTitle, verified.Title) {
 			return fmt.Errorf("PR title or body changed or update did not settle; refusing to report successful publication")
 		}
 		return nil

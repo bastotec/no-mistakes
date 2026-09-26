@@ -646,6 +646,61 @@ func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
 	}
 }
 
+func TestPRTemplateHeadingTranslationsFollowPublicationRedaction(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	template := "## Logs from /home/alex/build\n"
+	draft := prContent{
+		Title: "fix: document logs",
+		Body:  "## Logs from /home/alex/build\n\nCaptured output.",
+		HeadingTranslations: []templateHeadingTranslation{{
+			Source:  "## Logs from /home/alex/build",
+			English: "## Logs from /home/alex/build",
+		}},
+	}
+	redacted := redactPRContent(draft)
+	if redacted.Body != "## Logs from ~/build\n\nCaptured output." || redacted.HeadingTranslations[0].English != "## Logs from ~/build" {
+		t.Fatalf("publication redaction did not keep the body and mapped heading synchronized: %+v", redacted)
+	}
+	if redacted.HeadingTranslations[0].Source != draft.HeadingTranslations[0].Source {
+		t.Fatal("publication redaction changed the source heading used for semantic validation")
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, `"source":"## Logs from /home/alex/build","english":"## Logs from ~/build"`) {
+			t.Fatalf("final validator received unsynchronized heading translations:\n%s", opts.Prompt)
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}})
+		return &agent.Result{Output: payload}, nil
+	}
+	_, appendix := ownedFixture(t)
+	for _, mode := range []string{"new template publication", "empty existing PR adoption"} {
+		t.Run(mode, func(t *testing.T) {
+			candidate, err := composeOwnedPRContent(prOwnedBody{before: redacted.Body}, redacted.Title, appendix, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runWritten := candidate
+			switch mode {
+			case "new template publication":
+				runWritten.HeadingTranslations = redacted.HeadingTranslations
+			case "empty existing PR adoption":
+				runWritten = redactPRContent(prContent{
+					Title:               draft.Title,
+					Body:                strings.TrimSpace(draft.Body + "\n\n" + appendix),
+					HeadingTranslations: draft.HeadingTranslations,
+				})
+			}
+			if err := (&PRStep{}).validateFinalPRContent(sctx, candidate, runWritten, template, sctx.Run.BaseSHA, false); err != nil {
+				t.Fatalf("%s rejected a redacted required heading: %v", mode, err)
+			}
+		})
+	}
+}
+
 func TestPRTemplateFinalValidationRejectsMissingMappedHeading(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
