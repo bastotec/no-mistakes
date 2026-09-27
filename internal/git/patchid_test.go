@@ -271,6 +271,12 @@ func TestComparePatchRetention_PartialRemovalIsUnretained(t *testing.T) {
 			},
 		},
 		{
+			name: "one of multiple same-file hunks restored",
+			remove: func(p *patchRepo) {
+				p.commit("feature.txt", "one-private\ntwo\nthree\nfour\nfive\nsix\n", "restore one private hunk")
+			},
+		},
+		{
 			name: "restoration combined with another same-path change",
 			remove: func(p *patchRepo) {
 				p.commit("feature.txt", "one\ntwo\nthree\nfour\nfive\nsix\ncombined-extra\n", "restore and extend required path")
@@ -286,14 +292,14 @@ func TestComparePatchRetention_PartialRemovalIsUnretained(t *testing.T) {
 			base = run(t, p.dir, "git", "rev-parse", "HEAD")
 
 			p.checkoutNew("private", base)
-			writeFile(t, filepath.Join(p.dir, "feature.txt"), "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+			writeFile(t, filepath.Join(p.dir, "feature.txt"), "one-private\ntwo\nthree\nfour-private\nfive\nsix\n")
 			writeFile(t, filepath.Join(p.dir, "second.txt"), "second-private\n")
 			run(t, p.dir, "git", "add", ".")
 			run(t, p.dir, "git", "commit", "-m", "private multi-path change")
 			privateHead := run(t, p.dir, "git", "rev-parse", "HEAD")
 
 			p.checkoutNew("live", base)
-			writeFile(t, filepath.Join(p.dir, "feature.txt"), "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+			writeFile(t, filepath.Join(p.dir, "feature.txt"), "one-private\ntwo\nthree\nfour-private\nfive\nsix\n")
 			writeFile(t, filepath.Join(p.dir, "second.txt"), "second-private\n")
 			run(t, p.dir, "git", "add", ".")
 			run(t, p.dir, "git", "commit", "-m", "replay private multi-path change")

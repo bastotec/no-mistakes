@@ -321,16 +321,19 @@ func patchContentRetained(ctx context.Context, dir string, matched patchCommit, 
 	if err != nil {
 		return false, false
 	}
-	for path := range matched.paths {
-		changed, err := RunRaw(ctx, dir, "diff", "--name-only", "-z", liveTree, withoutPatchTree, "--", path)
-		if err != nil {
-			return false, false
-		}
-		if string(changed) != path+"\x00" {
-			return false, true
-		}
+	patch, err := Run(ctx, dir, "diff", "--binary", "--no-ext-diff", withoutPatchTree, liveTree)
+	if err != nil {
+		return false, false
 	}
-	return true, true
+	identity, err := RunWithInput(ctx, dir, patch, "patch-id", "--stable")
+	if err != nil {
+		return false, false
+	}
+	fields := strings.Fields(identity)
+	if len(fields) != 2 {
+		return false, true
+	}
+	return fields[0] == matched.id, true
 }
 
 func sameLogicalPatch(ctx context.Context, dir string, required, matched patchCommit) (bool, bool) {
