@@ -358,6 +358,29 @@ func TestComparePatchRetention_ReplayedThenRevertedIsUnretained(t *testing.T) {
 	}
 }
 
+func TestComparePatchRetention_SamePatchShapeAtDifferentLocationIsUnretained(t *testing.T) {
+	p := newPatchRepo(t)
+	writeFile(t, filepath.Join(p.dir, "feature.txt"), "start\nblock\nold\nend\nmiddle\nstart\nblock\nold\nend\n")
+	run(t, p.dir, "git", "add", ".")
+	run(t, p.dir, "git", "commit", "-m", "duplicate blocks")
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "start\nblock\nnew\nend\nmiddle\nstart\nblock\nold\nend\n", "change first block")
+
+	p.checkoutNew("live", base)
+	p.commit("feature.txt", "start\nblock\nold\nend\nmiddle\nstart\nblock\nnew\nend\n", "change second block")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.RetainsAll() {
+		t.Fatalf("same-shaped edit at a different location read as retained: %+v", retention)
+	}
+}
+
 // TestComparePatchRetention_ConflictResolvedReplayStaysUnretained: a rebase
 // that resolved a conflict rewrote the patch itself, so patch identity cannot
 // tell it from a genuine loss - it must stay unretained (the run-owned

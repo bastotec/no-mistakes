@@ -94,7 +94,7 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 			result.Unretained = append(result.Unretained, patch.commit)
 			continue
 		}
-		retained, comparable := patchFootprintRetained(ctx, dir, livePatches[matchPosition].parent, livePatches[matchPosition].commit, liveHead, patch.paths)
+		retained, comparable := patchFootprintRetained(ctx, dir, patch, livePatches[matchPosition], liveHead)
 		if !comparable {
 			result.Comparable = false
 			result.Retained = nil
@@ -297,14 +297,18 @@ type diffFootprint struct {
 
 var zeroContextHunk = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+`)
 
-func patchFootprintRetained(ctx context.Context, dir, parent, matched, liveHead string, paths map[string]struct{}) (bool, bool) {
-	ordered := make([]string, 0, len(paths))
-	for path := range paths {
+func patchFootprintRetained(ctx context.Context, dir string, required, matched patchCommit, liveHead string) (bool, bool) {
+	replayed, ok := sameLogicalPatch(ctx, dir, required, matched)
+	if !ok || !replayed {
+		return false, ok
+	}
+	ordered := make([]string, 0, len(required.paths))
+	for path := range required.paths {
 		ordered = append(ordered, path)
 	}
 	sort.Strings(ordered)
 	for _, path := range ordered {
-		matchedPresent, ok := pathPresent(ctx, dir, matched, path)
+		matchedPresent, ok := pathPresent(ctx, dir, matched.commit, path)
 		if !ok {
 			return false, false
 		}
@@ -315,26 +319,38 @@ func patchFootprintRetained(ctx context.Context, dir, parent, matched, liveHead 
 		if matchedPresent && !livePresent {
 			return false, true
 		}
-		required, ok := changedFootprint(ctx, dir, parent, matched, path)
-		if !ok || len(required.lines)+len(required.insertions) == 0 {
+		footprint, ok := changedFootprint(ctx, dir, matched.parent, matched.commit, path)
+		if !ok || len(footprint.lines)+len(footprint.insertions) == 0 {
 			return false, false
 		}
-		final, ok := changedFootprint(ctx, dir, parent, liveHead, path)
+		final, ok := changedFootprint(ctx, dir, matched.parent, liveHead, path)
 		if !ok {
 			return false, false
 		}
-		for line := range required.lines {
+		for line := range footprint.lines {
 			if _, retained := final.lines[line]; !retained {
 				return false, true
 			}
 		}
-		for point := range required.insertions {
+		for point := range footprint.insertions {
 			if _, retained := final.insertions[point]; !retained {
 				return false, true
 			}
 		}
 	}
 	return true, true
+}
+
+func sameLogicalPatch(ctx context.Context, dir string, required, matched patchCommit) (bool, bool) {
+	mergedTree, err := Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", required.parent, matched.parent, required.commit)
+	if err != nil {
+		return false, false
+	}
+	matchedTree, err := Run(ctx, dir, "rev-parse", matched.commit+"^{tree}")
+	if err != nil {
+		return false, false
+	}
+	return mergedTree == matchedTree, true
 }
 
 func pathPresent(ctx context.Context, dir, commit, path string) (bool, bool) {
