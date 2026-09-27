@@ -3,6 +3,8 @@ package git
 import (
 	"context"
 	"fmt"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -96,7 +98,14 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 			result.Unretained = append(result.Unretained, patch.commit)
 			continue
 		}
-		retained, comparable := patchContentRetained(ctx, dir, livePatches[matchPosition], liveHead)
+		matched := livePatches[matchPosition]
+		retained, conflicted, comparable := patchContentRetained(ctx, dir, matched, liveHead)
+		if conflicted {
+			retained, comparable = requiredSuccessorRetainsPatch(ctx, dir, i, matchPositions, privatePatches, livePatches)
+			if !retained && comparable {
+				retained, comparable = patchEvolutionRetained(ctx, dir, matched, liveHead)
+			}
+		}
 		if !comparable {
 			result.Comparable = false
 			result.Retained = nil
@@ -312,28 +321,186 @@ func pathsOverlap(left, right map[string]struct{}) bool {
 	return false
 }
 
-func patchContentRetained(ctx context.Context, dir string, matched patchCommit, liveHead string) (bool, bool) {
+func patchContentRetained(ctx context.Context, dir string, matched patchCommit, liveHead string) (bool, bool, bool) {
 	withoutPatchTree, err := Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", matched.commit, liveHead, matched.parent)
 	if err != nil {
-		return false, true
+		return false, true, true
 	}
 	liveTree, err := Run(ctx, dir, "rev-parse", liveHead+"^{tree}")
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	patch, err := Run(ctx, dir, "diff", "--binary", "--no-ext-diff", withoutPatchTree, liveTree)
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	identity, err := RunWithInput(ctx, dir, patch, "patch-id", "--stable")
 	if err != nil {
-		return false, false
+		return false, false, false
 	}
 	fields := strings.Fields(identity)
 	if len(fields) != 2 {
-		return false, true
+		return false, false, true
 	}
-	return fields[0] == matched.id, true
+	return fields[0] == matched.id, false, true
+}
+
+func requiredSuccessorRetainsPatch(ctx context.Context, dir string, requiredIndex int, matchPositions []int, required, candidates []patchCommit) (bool, bool) {
+	matched := candidates[matchPositions[requiredIndex]]
+	for i := requiredIndex + 1; i < len(required); i++ {
+		if matchPositions[i] < 0 {
+			continue
+		}
+		successor := candidates[matchPositions[i]]
+		if !pathsOverlap(matched.paths, successor.paths) {
+			continue
+		}
+		retained, conflicted, comparable := patchContentRetained(ctx, dir, matched, successor.parent)
+		if !comparable {
+			return false, false
+		}
+		if !retained || conflicted {
+			continue
+		}
+		_, superseded, comparable := patchContentRetained(ctx, dir, matched, successor.commit)
+		if !comparable {
+			return false, false
+		}
+		if superseded {
+			return true, true
+		}
+	}
+	return false, true
+}
+
+type patchHunk struct {
+	oldStart int
+	oldCount int
+	removed  []string
+	added    []string
+}
+
+var patchHunkHeader = regexp.MustCompile(`^@@ -([0-9]+)(?:,([0-9]+))? \+[0-9]+(?:,[0-9]+)? @@`)
+
+func patchEvolutionRetained(ctx context.Context, dir string, matched patchCommit, liveHead string) (bool, bool) {
+	for path := range matched.paths {
+		requiredDiff, err := Run(ctx, dir, "diff", "--no-ext-diff", "--no-renames", "--unified=0", matched.parent, matched.commit, "--", path)
+		if err != nil {
+			return false, false
+		}
+		finalDiff, err := Run(ctx, dir, "diff", "--no-ext-diff", "--no-renames", "--unified=0", matched.parent, liveHead, "--", path)
+		if err != nil {
+			return false, false
+		}
+		requiredHunks, ok := parsePatchHunks(requiredDiff)
+		if !ok {
+			return false, true
+		}
+		finalHunks, ok := parsePatchHunks(finalDiff)
+		if !ok {
+			return false, true
+		}
+		for _, required := range requiredHunks {
+			retained := false
+			for _, final := range finalHunks {
+				if hunksOverlap(required, final) && hunkCarriesForward(required, final) {
+					retained = true
+					break
+				}
+			}
+			if !retained {
+				return false, true
+			}
+		}
+	}
+	return true, true
+}
+
+func parsePatchHunks(diff string) ([]patchHunk, bool) {
+	if strings.Contains(diff, "GIT binary patch") || strings.Contains(diff, "Binary files ") {
+		return nil, false
+	}
+	var hunks []patchHunk
+	current := -1
+	for _, line := range strings.Split(diff, "\n") {
+		if match := patchHunkHeader.FindStringSubmatch(line); match != nil {
+			oldStart, err := strconv.Atoi(match[1])
+			if err != nil {
+				return nil, false
+			}
+			oldCount := 1
+			if match[2] != "" {
+				oldCount, err = strconv.Atoi(match[2])
+				if err != nil {
+					return nil, false
+				}
+			}
+			hunks = append(hunks, patchHunk{oldStart: oldStart, oldCount: oldCount})
+			current = len(hunks) - 1
+			continue
+		}
+		if current < 0 || len(line) == 0 {
+			continue
+		}
+		switch line[0] {
+		case '-':
+			hunks[current].removed = append(hunks[current].removed, line[1:])
+		case '+':
+			hunks[current].added = append(hunks[current].added, line[1:])
+		}
+	}
+	return hunks, true
+}
+
+func hunksOverlap(left, right patchHunk) bool {
+	leftEnd := left.oldStart + max(left.oldCount, 1)
+	rightEnd := right.oldStart + max(right.oldCount, 1)
+	return left.oldStart < rightEnd && right.oldStart < leftEnd
+}
+
+func hunkCarriesForward(required, final patchHunk) bool {
+	if len(required.added) == 0 || len(final.added) == 0 {
+		return false
+	}
+	for _, requiredLine := range required.added {
+		carried := false
+		baselinePrefix := 0
+		baselineSuffix := 0
+		for _, oldLine := range required.removed {
+			baselinePrefix = max(baselinePrefix, commonPrefixLen(requiredLine, oldLine))
+			baselineSuffix = max(baselineSuffix, commonSuffixLen(requiredLine, oldLine))
+		}
+		for _, finalLine := range final.added {
+			if commonPrefixLen(requiredLine, finalLine) > baselinePrefix || commonSuffixLen(requiredLine, finalLine) > baselineSuffix {
+				carried = true
+				break
+			}
+		}
+		if !carried {
+			return false
+		}
+	}
+	return true
+}
+
+func commonPrefixLen(left, right string) int {
+	limit := min(len(left), len(right))
+	for i := 0; i < limit; i++ {
+		if left[i] != right[i] {
+			return i
+		}
+	}
+	return limit
+}
+
+func commonSuffixLen(left, right string) int {
+	limit := min(len(left), len(right))
+	for i := 0; i < limit; i++ {
+		if left[len(left)-1-i] != right[len(right)-1-i] {
+			return i
+		}
+	}
+	return limit
 }
 
 func sameLogicalPatch(ctx context.Context, dir string, required, matched patchCommit) (bool, bool) {

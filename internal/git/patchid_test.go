@@ -81,6 +81,50 @@ func TestComparePatchRetention_RebasedSeriesWithEquivalentPatches(t *testing.T) 
 	}
 }
 
+func TestComparePatchRetention_ReplayedThenFixedOnSameLineIsRetained(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change")
+
+	p.checkoutNew("live", base)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n", "fix replayed change")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retention.RetainsAll() {
+		t.Fatalf("forward same-line fix read as content loss: %+v", retention)
+	}
+}
+
+func TestComparePatchRetention_SuccessivePrivateEditsToSameHunkAreRetained(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	p.checkoutNew("private", base)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-middle\nfive\nsix\n", "first private change")
+	privateHead := p.commit("feature.txt", "one\ntwo\nthree\nfour-final\nfive\nsix\n", "second private change")
+
+	p.checkoutNew("live", base)
+	p.commit("upstream.txt", "upstream\n", "upstream advance")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-middle\nfive\nsix\n", "first private change replayed")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-final\nfive\nsix\n", "second private change replayed")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retention.RetainsAll() || len(retention.Retained) != 2 {
+		t.Fatalf("successive same-hunk edits read as content loss: %+v", retention)
+	}
+}
+
 func TestComparePatchRetention_ReplayedThenReplacedOnSameLineIsUnretained(t *testing.T) {
 	p := newPatchRepo(t)
 	base := run(t, p.dir, "git", "rev-parse", "HEAD")
