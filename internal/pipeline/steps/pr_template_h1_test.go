@@ -33,6 +33,39 @@ func TestPRTemplateStructureRequiresHeadingLevelsAndOrder(t *testing.T) {
 	}
 }
 
+func TestPRTemplateStructureIgnoresHTMLComments(t *testing.T) {
+	t.Parallel()
+	text := "# First\n<!--\n## Hidden\n```markdown\n# Hidden in a commented fence\n```\n-->\n## Second\n<!-- ## Hidden inline -->\n<!-- open\n### Hidden before close\n-->   ### Third\n<!-- unclosed\n#### Hidden forever\n"
+	want := []string{"# First", "## Second", "### Third"}
+	if got := templateStructureLines(text); !reflect.DeepEqual(got, want) {
+		t.Fatalf("visible headings = %q, want %q", got, want)
+	}
+
+	template := "## Required\n<!-- ## Optional example -->\n"
+	if err := validateTranslatedTemplateStructure(template, "## Required\nFilled.\n", identityHeadingTranslations(template)); err != nil {
+		t.Fatalf("commented-only extra heading became required: %v", err)
+	}
+}
+
+func TestPRTemplateDraftOmitsCommentedHeadings(t *testing.T) {
+	t.Parallel()
+	template := "# Overview\n<!--\n## Example rollout\nDo not publish this example.\n-->\n## Testing\n"
+	body := "# Overview\n\nFilled summary.\n\n## Testing\n\nPassed.\n"
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(templateDraft("feat: fill template", body, template))
+		return &agent.Result{Output: data}, nil
+	}
+
+	got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, template)
+	if err != nil {
+		t.Fatalf("draft without commented heading rejected: %v", err)
+	}
+	if got.Body != body || strings.Contains(got.Body, "Example rollout") {
+		t.Fatalf("commented heading was published: %q", got.Body)
+	}
+}
+
 func TestPRTemplateStructureRecognizesATXHeadings(t *testing.T) {
 	t.Parallel()
 	text := "# One\n  # Two ###\n#\n#\tTabbed\n## Two hashes\n### Three hashes\n#hashtag\n    # Indented code\n\t# Tab code\n> # Quoted\n- # List\nSetext\n======\n```markdown\n# Fenced\n```\n~~~\n# Tilde fenced\n~~~\n"

@@ -315,20 +315,49 @@ func headingLevel(line string) int {
 func templateStructureLines(text string) []string {
 	var lines []string
 	var fence markdownFence
+	inComment := false
 	for _, raw := range strings.Split(text, "\n") {
-		wasFenced := fence.marker != 0
-		fence.consume(raw)
-		if wasFenced || fence.marker != 0 {
+		if fence.marker != 0 {
+			fence.consume(raw)
 			continue
 		}
-		line := strings.TrimSpace(raw)
+		visible := markdownOutsideHTMLComments(raw, &inComment)
+		fence.consume(visible)
+		if fence.marker != 0 {
+			continue
+		}
+		line := strings.TrimSpace(visible)
 		// Match the raw indentation: four spaces/tabs are code, not headings.
 		// Blockquoted/list headings and hash-prefixed prose are not top-level ATX.
-		if prTemplateHeadingLine.MatchString(raw) {
+		if prTemplateHeadingLine.MatchString(visible) {
 			lines = append(lines, line)
 		}
 	}
 	return lines
+}
+
+func markdownOutsideHTMLComments(line string, inComment *bool) string {
+	var visible strings.Builder
+	for len(line) > 0 {
+		if *inComment {
+			end := strings.Index(line, "-->")
+			if end < 0 {
+				return visible.String()
+			}
+			line = line[end+3:]
+			*inComment = false
+			continue
+		}
+		start := strings.Index(line, "<!--")
+		if start < 0 {
+			visible.WriteString(line)
+			break
+		}
+		visible.WriteString(line[:start])
+		line = line[start+4:]
+		*inComment = true
+	}
+	return visible.String()
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
