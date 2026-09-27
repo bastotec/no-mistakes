@@ -163,12 +163,16 @@ type patchCommit struct {
 }
 
 func privatePatchSeries(ctx context.Context, dir string, commits []string) ([]patchCommit, map[string]struct{}, bool) {
+	inspected, ok := inspectPatchCommits(ctx, dir, commits)
+	if !ok {
+		return nil, nil, false
+	}
 	patches := make([]patchCommit, 0, len(commits))
 	requiredPaths := make(map[string]struct{})
 	seen := make(map[string]struct{}, len(commits))
 	for i := len(commits) - 1; i >= 0; i-- {
-		patch, ordinary, empty := inspectPatchCommit(ctx, dir, commits[i])
-		if !ordinary || empty || patch.id == "" {
+		patch := inspected[i]
+		if patch.parent == "" || len(patch.paths) == 0 || patch.id == "" {
 			return nil, nil, false
 		}
 		if _, duplicate := seen[patch.id]; duplicate {
@@ -184,13 +188,17 @@ func privatePatchSeries(ctx context.Context, dir string, commits []string) ([]pa
 }
 
 func livePatchSeries(ctx context.Context, dir string, commits []string, requiredPaths map[string]struct{}) ([]patchCommit, bool) {
+	inspected, ok := inspectPatchCommits(ctx, dir, commits)
+	if !ok {
+		return nil, false
+	}
 	patches := make([]patchCommit, 0, len(commits))
 	for i := len(commits) - 1; i >= 0; i-- {
-		patch, ordinary, empty := inspectPatchCommit(ctx, dir, commits[i])
-		if empty {
+		patch := inspected[i]
+		if patch.parent != "" && len(patch.paths) == 0 {
 			continue
 		}
-		if !ordinary || patch.id == "" {
+		if patch.parent == "" || patch.id == "" {
 			if pathsOverlap(patch.paths, requiredPaths) {
 				return nil, false
 			}
@@ -201,57 +209,76 @@ func livePatchSeries(ctx context.Context, dir string, commits []string, required
 	return patches, true
 }
 
-func inspectPatchCommit(ctx context.Context, dir, commit string) (patchCommit, bool, bool) {
-	patch := patchCommit{commit: commit}
-	parents, err := Run(ctx, dir, "rev-list", "--parents", "-n", "1", commit)
-	if err != nil {
-		return patch, false, false
+func inspectPatchCommits(ctx context.Context, dir string, commits []string) ([]patchCommit, bool) {
+	if len(commits) == 0 {
+		return nil, true
 	}
-	fields := strings.Fields(parents)
-	paths, ok := commitChangedPaths(ctx, dir, commit)
-	if !ok {
-		return patch, false, false
-	}
-	patch.paths = paths
-	if len(fields) != 2 {
-		return patch, false, false
-	}
-	patch.parent = fields[1]
-	forward, err := RunRaw(ctx, dir, "diff", "--no-ext-diff", "--binary", patch.parent, commit)
-	if err != nil {
-		return patch, true, false
-	}
-	if len(forward) == 0 {
-		return patch, true, true
-	}
-	patch.id = stablePatchID(ctx, dir, forward)
-	return patch, true, false
-}
-
-func stablePatchID(ctx context.Context, dir string, diff []byte) string {
-	out, err := RunWithInput(ctx, dir, string(diff), "patch-id", "--stable")
-	if err != nil {
-		return ""
-	}
-	fields := strings.Fields(out)
-	if len(fields) == 0 {
-		return ""
-	}
-	return fields[0]
-}
-
-func commitChangedPaths(ctx context.Context, dir, commit string) (map[string]struct{}, bool) {
-	out, err := RunRaw(ctx, dir, "diff-tree", "--no-commit-id", "--name-only", "-r", "-z", "--root", "-m", commit)
+	input := strings.Join(commits, "\n") + "\n"
+	metadata, err := RunWithInput(ctx, dir, input, "log", "--stdin", "--no-walk=unsorted", "-m", "--format=%x1e%H%x00%P", "-z", "--name-only")
 	if err != nil {
 		return nil, false
 	}
-	paths := make(map[string]struct{})
-	for _, path := range strings.Split(string(out), "\x00") {
-		if path != "" {
-			paths[path] = struct{}{}
+	byCommit := make(map[string]patchCommit, len(commits))
+	for _, record := range strings.Split(metadata, "\x1e") {
+		if record == "" {
+			continue
 		}
+		fields := strings.Split(record, "\x00")
+		if len(fields) < 2 {
+			return nil, false
+		}
+		commit := fields[0]
+		patch := byCommit[commit]
+		patch.commit = commit
+		parents := strings.Fields(fields[1])
+		if len(parents) == 1 {
+			patch.parent = parents[0]
+		}
+		if patch.paths == nil {
+			patch.paths = make(map[string]struct{})
+		}
+		for i, path := range fields[2:] {
+			if i == 0 {
+				path = strings.TrimPrefix(path, "\n")
+			}
+			if path != "" {
+				patch.paths[path] = struct{}{}
+			}
+		}
+		byCommit[commit] = patch
 	}
-	return paths, true
+	patches, err := RunWithInput(ctx, dir, input, "log", "--stdin", "--no-walk=unsorted", "--root", "--format=commit %H", "-p", "--binary", "--no-ext-diff")
+	if err != nil {
+		return nil, false
+	}
+	ids, err := RunWithInput(ctx, dir, patches, "patch-id", "--stable")
+	if err != nil {
+		return nil, false
+	}
+	for _, line := range strings.Split(ids, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if len(fields) != 2 {
+			return nil, false
+		}
+		patch, exists := byCommit[fields[1]]
+		if !exists || patch.id != "" {
+			return nil, false
+		}
+		patch.id = fields[0]
+		byCommit[fields[1]] = patch
+	}
+	result := make([]patchCommit, len(commits))
+	for i, commit := range commits {
+		patch, exists := byCommit[commit]
+		if !exists {
+			return nil, false
+		}
+		result[i] = patch
+	}
+	return result, true
 }
 
 func pathsOverlap(left, right map[string]struct{}) bool {
@@ -277,6 +304,17 @@ func patchFootprintRetained(ctx context.Context, dir, parent, matched, liveHead 
 	}
 	sort.Strings(ordered)
 	for _, path := range ordered {
+		matchedPresent, ok := pathPresent(ctx, dir, matched, path)
+		if !ok {
+			return false, false
+		}
+		livePresent, ok := pathPresent(ctx, dir, liveHead, path)
+		if !ok {
+			return false, false
+		}
+		if matchedPresent && !livePresent {
+			return false, true
+		}
 		required, ok := changedFootprint(ctx, dir, parent, matched, path)
 		if !ok || len(required.lines)+len(required.insertions) == 0 {
 			return false, false
@@ -297,6 +335,14 @@ func patchFootprintRetained(ctx context.Context, dir, parent, matched, liveHead 
 		}
 	}
 	return true, true
+}
+
+func pathPresent(ctx context.Context, dir, commit, path string) (bool, bool) {
+	out, err := RunRaw(ctx, dir, "ls-tree", "-z", "--name-only", commit, "--", path)
+	if err != nil {
+		return false, false
+	}
+	return string(out) == path+"\x00", true
 }
 
 func changedFootprint(ctx context.Context, dir, left, right, path string) (diffFootprint, bool) {

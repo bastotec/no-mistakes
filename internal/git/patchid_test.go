@@ -317,6 +317,27 @@ func TestComparePatchRetention_PartialRemovalIsUnretained(t *testing.T) {
 	}
 }
 
+func TestComparePatchRetention_ReplayedThenDeletedIsUnretained(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change")
+
+	p.checkoutNew("live", base)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
+	run(t, p.dir, "git", "rm", "feature.txt")
+	run(t, p.dir, "git", "commit", "-m", "delete replayed file")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.RetainsAll() || len(retention.Unretained) != 1 || retention.Unretained[0] != privateHead {
+		t.Fatalf("deleted replay read as retained: %+v", retention)
+	}
+}
+
 func TestComparePatchRetention_ReplayedThenRevertedIsUnretained(t *testing.T) {
 	p := newPatchRepo(t)
 	base := run(t, p.dir, "git", "rev-parse", "HEAD")
