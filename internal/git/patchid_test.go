@@ -81,12 +81,7 @@ func TestComparePatchRetention_RebasedSeriesWithEquivalentPatches(t *testing.T) 
 	}
 }
 
-// TestComparePatchRetention_ReplayedThenSupersededPatchIsRetained pins the
-// boundary whole-tree survival cannot prove: the live side replays the private
-// patch and then a later live commit supersedes the same lines (a pipeline
-// fix). The 3-way merge conflicts by construction, but the private change was
-// carried, so patch identity must reconcile it.
-func TestComparePatchRetention_ReplayedThenSupersededPatchIsRetained(t *testing.T) {
+func TestComparePatchRetention_ReplayedThenReplacedOnSameLineIsUnretained(t *testing.T) {
 	p := newPatchRepo(t)
 	base := run(t, p.dir, "git", "rev-parse", "HEAD")
 
@@ -96,15 +91,15 @@ func TestComparePatchRetention_ReplayedThenSupersededPatchIsRetained(t *testing.
 	p.checkoutNew("live", base)
 	p.commit("upstream.txt", "upstream advance\n", "upstream advance")
 	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
-	p.commit("feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n", "pipeline fix supersedes the line")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour plus unrelated-suffix\nfive\nsix\n", "restore and extend the same line")
 	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
 
 	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !retention.RetainsAll() {
-		t.Fatalf("replayed-then-superseded patch not retained: %+v", retention)
+	if retention.RetainsAll() {
+		t.Fatalf("same-line replacement read as retained: %+v", retention)
 	}
 }
 
@@ -202,7 +197,6 @@ func TestComparePatchRetention_UnrelatedLiveStructureAndExtrasDoNotPoisonReplay(
 	run(t, p.dir, "git", "commit", "-m", "remove extra patch")
 	p.commit("extra.txt", "duplicate extra\n", "extra patch two")
 	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
-	p.commit("feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n", "later same-hunk fix")
 	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
 	if liveBeforeMerge == "" {
 		t.Fatal("fixture produced no pre-merge head")
@@ -378,6 +372,30 @@ func TestComparePatchRetention_SamePatchShapeAtDifferentLocationIsUnretained(t *
 	}
 	if retention.RetainsAll() {
 		t.Fatalf("same-shaped edit at a different location read as retained: %+v", retention)
+	}
+}
+
+func TestComparePatchRetention_DuplicateShapeFiltersToLogicalReplay(t *testing.T) {
+	p := newPatchRepo(t)
+	writeFile(t, filepath.Join(p.dir, "feature.txt"), "start\nblock\nold\nend\nmiddle\nstart\nblock\nold\nend\n")
+	run(t, p.dir, "git", "add", ".")
+	run(t, p.dir, "git", "commit", "-m", "duplicate blocks")
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "start\nblock\nnew\nend\nmiddle\nstart\nblock\nold\nend\n", "change first block")
+
+	p.checkoutNew("live", base)
+	p.commit("feature.txt", "start\nblock\nold\nend\nmiddle\nstart\nblock\nnew\nend\n", "change second block")
+	p.commit("feature.txt", "start\nblock\nnew\nend\nmiddle\nstart\nblock\nnew\nend\n", "replay first block")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retention.RetainsAll() {
+		t.Fatalf("logical replay remained ambiguous with unrelated duplicate: %+v", retention)
 	}
 }
 

@@ -108,9 +108,9 @@ rewrite - a rebase or an adopted preserved head - produces under different
 commit SHAs. The two proofs are alternatives, never additionally required of
 each other: patch ids drift across a rebase whose base
 moved the context lines around a private hunk even when the replay is clean
-and the final content identical (survival covers those), while a patch
-replayed and then superseded by later live work cannot survive the three-way
-merge (patch identity covers those). Patch identity itself is asymmetric and
+and the final content identical (survival covers those), while patch identity
+can prove an exact replay even when unrelated live-only history makes the
+whole-tree merge unsuitable. Patch identity itself is asymmetric and
 fail-closed: the private range must contain only ordinary, non-empty, uniquely
 identified patches, while unrelated candidate-side merges, empty commits, and
 duplicate extra patches do not poison the proof. Every required patch must map

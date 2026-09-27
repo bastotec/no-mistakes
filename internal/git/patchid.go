@@ -3,9 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"sort"
-	"strconv"
 	"strings"
 )
 
@@ -80,6 +77,11 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 		result.Unretained = privateOnly
 		return result, nil
 	}
+	livePatches, ok = logicallyMatchingPatches(ctx, dir, privatePatches, livePatches)
+	if !ok {
+		result.Unretained = privateOnly
+		return result, nil
+	}
 
 	matchPositions, unique := uniqueOrderedPatchMapping(privatePatches, livePatches)
 	if !unique {
@@ -94,7 +96,7 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 			result.Unretained = append(result.Unretained, patch.commit)
 			continue
 		}
-		retained, comparable := patchFootprintRetained(ctx, dir, patch, livePatches[matchPosition], liveHead)
+		retained, comparable := patchContentRetained(ctx, dir, livePatches[matchPosition], liveHead)
 		if !comparable {
 			result.Comparable = false
 			result.Retained = nil
@@ -108,6 +110,26 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 		}
 	}
 	return result, nil
+}
+
+func logicallyMatchingPatches(ctx context.Context, dir string, required, candidates []patchCommit) ([]patchCommit, bool) {
+	filtered := append([]patchCommit(nil), candidates...)
+	for i := range filtered {
+		for _, patch := range required {
+			if filtered[i].id != patch.id {
+				continue
+			}
+			matches, ok := sameLogicalPatch(ctx, dir, patch, filtered[i])
+			if !ok {
+				return nil, false
+			}
+			if !matches {
+				filtered[i].id = ""
+			}
+			break
+		}
+	}
+	return filtered, true
 }
 
 func uniqueOrderedPatchMapping(required, candidates []patchCommit) ([]int, bool) {
@@ -290,52 +312,22 @@ func pathsOverlap(left, right map[string]struct{}) bool {
 	return false
 }
 
-type diffFootprint struct {
-	lines      map[int]struct{}
-	insertions map[int]struct{}
-}
-
-var zeroContextHunk = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+`)
-
-func patchFootprintRetained(ctx context.Context, dir string, required, matched patchCommit, liveHead string) (bool, bool) {
-	replayed, ok := sameLogicalPatch(ctx, dir, required, matched)
-	if !ok || !replayed {
-		return false, ok
+func patchContentRetained(ctx context.Context, dir string, matched patchCommit, liveHead string) (bool, bool) {
+	withoutPatchTree, err := Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", matched.commit, liveHead, matched.parent)
+	if err != nil {
+		return false, true
 	}
-	ordered := make([]string, 0, len(required.paths))
-	for path := range required.paths {
-		ordered = append(ordered, path)
+	liveTree, err := Run(ctx, dir, "rev-parse", liveHead+"^{tree}")
+	if err != nil {
+		return false, false
 	}
-	sort.Strings(ordered)
-	for _, path := range ordered {
-		matchedPresent, ok := pathPresent(ctx, dir, matched.commit, path)
-		if !ok {
+	for path := range matched.paths {
+		changed, err := RunRaw(ctx, dir, "diff", "--name-only", "-z", liveTree, withoutPatchTree, "--", path)
+		if err != nil {
 			return false, false
 		}
-		livePresent, ok := pathPresent(ctx, dir, liveHead, path)
-		if !ok {
-			return false, false
-		}
-		if matchedPresent && !livePresent {
+		if string(changed) != path+"\x00" {
 			return false, true
-		}
-		footprint, ok := changedFootprint(ctx, dir, matched.parent, matched.commit, path)
-		if !ok || len(footprint.lines)+len(footprint.insertions) == 0 {
-			return false, false
-		}
-		final, ok := changedFootprint(ctx, dir, matched.parent, liveHead, path)
-		if !ok {
-			return false, false
-		}
-		for line := range footprint.lines {
-			if _, retained := final.lines[line]; !retained {
-				return false, true
-			}
-		}
-		for point := range footprint.insertions {
-			if _, retained := final.insertions[point]; !retained {
-				return false, true
-			}
 		}
 	}
 	return true, true
@@ -351,47 +343,6 @@ func sameLogicalPatch(ctx context.Context, dir string, required, matched patchCo
 		return false, false
 	}
 	return mergedTree == matchedTree, true
-}
-
-func pathPresent(ctx context.Context, dir, commit, path string) (bool, bool) {
-	out, err := RunRaw(ctx, dir, "ls-tree", "-z", "--name-only", commit, "--", path)
-	if err != nil {
-		return false, false
-	}
-	return string(out) == path+"\x00", true
-}
-
-func changedFootprint(ctx context.Context, dir, left, right, path string) (diffFootprint, bool) {
-	footprint := diffFootprint{lines: make(map[int]struct{}), insertions: make(map[int]struct{})}
-	out, err := RunRaw(ctx, dir, "diff", "--no-ext-diff", "--no-renames", "--unified=0", left, right, "--", path)
-	if err != nil {
-		return footprint, false
-	}
-	for _, line := range strings.Split(string(out), "\n") {
-		match := zeroContextHunk.FindStringSubmatch(line)
-		if match == nil {
-			continue
-		}
-		start, err := strconv.Atoi(match[1])
-		if err != nil {
-			return footprint, false
-		}
-		count := 1
-		if match[2] != "" {
-			count, err = strconv.Atoi(match[2])
-			if err != nil {
-				return footprint, false
-			}
-		}
-		if count == 0 {
-			footprint.insertions[start] = struct{}{}
-			continue
-		}
-		for changedLine := start; changedLine < start+count; changedLine++ {
-			footprint.lines[changedLine] = struct{}{}
-		}
-	}
-	return footprint, true
 }
 
 // exclusiveCommits lists the commits reachable only from head, excluding
