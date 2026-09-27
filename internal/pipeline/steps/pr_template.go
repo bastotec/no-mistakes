@@ -280,19 +280,19 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 	bodyIndex := 0
 	for i, source := range sources {
 		translation := translations[i]
-		if strings.TrimSpace(translation.Source) != strings.TrimSpace(source) {
+		if canonicalTemplateHeading(translation.Source) != canonicalTemplateHeading(source) {
 			return fmt.Errorf("agent changed or reordered a pr.template source heading; refusing publication")
 		}
-		english := strings.TrimSpace(translation.English)
+		english := canonicalTemplateHeading(translation.English)
 		translatedLines := templateStructureLines(translation.English)
-		if len(translatedLines) != 1 || translatedLines[0] != english || headingLevel(source) != headingLevel(english) {
+		if len(translatedLines) != 1 || canonicalTemplateHeading(translatedLines[0]) != english || headingLevel(source) != headingLevel(english) {
 			return fmt.Errorf("agent returned an invalid English pr.template heading; refusing publication")
 		}
 		found := false
 		for bodyIndex < len(bodyHeadings) {
 			candidate := bodyHeadings[bodyIndex]
 			bodyIndex++
-			if candidate == english {
+			if canonicalTemplateHeading(candidate) == english {
 				found = true
 				break
 			}
@@ -302,6 +302,10 @@ func validateTranslatedTemplateStructure(template, body string, translations []t
 		}
 	}
 	return nil
+}
+
+func canonicalTemplateHeading(line string) string {
+	return strings.TrimSpace(line)
 }
 
 func headingLevel(line string) int {
@@ -321,16 +325,16 @@ func templateStructureLines(text string) []string {
 			fence.consume(raw)
 			continue
 		}
+		startedInComment := inComment
 		visible := markdownOutsideHTMLComments(raw, &inComment)
 		fence.consume(visible)
-		if fence.marker != 0 {
+		if fence.marker != 0 || startedInComment {
 			continue
 		}
-		line := strings.TrimSpace(visible)
 		// Match the raw indentation: four spaces/tabs are code, not headings.
 		// Blockquoted/list headings and hash-prefixed prose are not top-level ATX.
-		if prTemplateHeadingLine.MatchString(visible) {
-			lines = append(lines, line)
+		if prTemplateHeadingLine.MatchString(raw) {
+			lines = append(lines, raw)
 		}
 	}
 	return lines

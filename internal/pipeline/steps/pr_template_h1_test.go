@@ -35,7 +35,7 @@ func TestPRTemplateStructureRequiresHeadingLevelsAndOrder(t *testing.T) {
 
 func TestPRTemplateStructureIgnoresHTMLComments(t *testing.T) {
 	t.Parallel()
-	text := "# First\n<!--\n## Hidden\n```markdown\n# Hidden in a commented fence\n```\n-->\n## Second\n<!-- ## Hidden inline -->\n<!-- open\n### Hidden before close\n-->   ### Third\n<!-- unclosed\n#### Hidden forever\n"
+	text := "# First\n<!--\n## Hidden\n```markdown\n# Hidden in a commented fence\n```\n-->\n## Second\n<!-- ## Hidden inline -->\n<!-- open\n### Hidden before close\n-->\n### Third\n<!-- unclosed\n#### Hidden forever\n"
 	want := []string{"# First", "## Second", "### Third"}
 	if got := templateStructureLines(text); !reflect.DeepEqual(got, want) {
 		t.Fatalf("visible headings = %q, want %q", got, want)
@@ -44,6 +44,27 @@ func TestPRTemplateStructureIgnoresHTMLComments(t *testing.T) {
 	template := "## Required\n<!-- ## Optional example -->\n"
 	if err := validateTranslatedTemplateStructure(template, "## Required\nFilled.\n", identityHeadingTranslations(template)); err != nil {
 		t.Fatalf("commented-only extra heading became required: %v", err)
+	}
+}
+
+func TestPRTemplateStructurePreservesInlineCommentHeadingIdentity(t *testing.T) {
+	t.Parallel()
+	template := "## Summary <!-- keep concise -->\n<!--\n### Hidden example\n-->\n## Testing\n"
+	body := "## Summary <!-- keep concise -->\n\nFixed the issue.\n\n## Testing\n\nPassed.\n"
+	translations := identityHeadingTranslations(template)
+
+	if got := translations[0].Source; got != "## Summary <!-- keep concise -->" {
+		t.Fatalf("source heading = %q", got)
+	}
+	if err := validateTranslatedTemplateStructure(template, body, translations); err != nil {
+		t.Fatalf("inline-comment heading rejected: %v", err)
+	}
+	required := requiredTemplateHeadingTranslations(template, translations)
+	if len(required) != 2 || required[0] != translations[0] {
+		t.Fatalf("required headings = %#v", required)
+	}
+	if err := validateFinalTemplateHeadings(body, required); err != nil {
+		t.Fatalf("final heading validation rejected inline comment: %v", err)
 	}
 }
 
@@ -69,7 +90,7 @@ func TestPRTemplateDraftOmitsCommentedHeadings(t *testing.T) {
 func TestPRTemplateStructureRecognizesATXHeadings(t *testing.T) {
 	t.Parallel()
 	text := "# One\n  # Two ###\n#\n#\tTabbed\n## Two hashes\n### Three hashes\n#hashtag\n    # Indented code\n\t# Tab code\n> # Quoted\n- # List\nSetext\n======\n```markdown\n# Fenced\n```\n~~~\n# Tilde fenced\n~~~\n"
-	want := []string{"# One", "# Two ###", "#", "#\tTabbed", "## Two hashes", "### Three hashes"}
+	want := []string{"# One", "  # Two ###", "#", "#\tTabbed", "## Two hashes", "### Three hashes"}
 	if got := templateStructureLines(text); !reflect.DeepEqual(got, want) {
 		t.Fatalf("H1s = %q, want %q", got, want)
 	}

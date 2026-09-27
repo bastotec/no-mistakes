@@ -99,8 +99,8 @@ func requiredTemplateHeadingTranslations(template string, translations []templat
 	required := make([]templateHeadingTranslation, len(sources))
 	for i, source := range sources {
 		required[i] = templateHeadingTranslation{Source: source, English: source}
-		if i < len(translations) && strings.TrimSpace(translations[i].Source) == strings.TrimSpace(source) && strings.TrimSpace(translations[i].English) != "" {
-			required[i].English = strings.TrimSpace(translations[i].English)
+		if i < len(translations) && canonicalTemplateHeading(translations[i].Source) == canonicalTemplateHeading(source) && canonicalTemplateHeading(translations[i].English) != "" {
+			required[i].English = canonicalTemplateHeading(translations[i].English)
 			required[i].PublicationRedacted = translations[i].PublicationRedacted
 		}
 	}
@@ -115,7 +115,7 @@ func validateFinalTemplateHeadings(body string, required []templateHeadingTransl
 		for bodyIndex < len(bodyHeadings) {
 			candidate := bodyHeadings[bodyIndex]
 			bodyIndex++
-			if candidate == strings.TrimSpace(heading.English) {
+			if canonicalTemplateHeading(candidate) == canonicalTemplateHeading(heading.English) {
 				found = true
 				break
 			}
