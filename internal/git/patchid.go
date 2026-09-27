@@ -90,17 +90,35 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 	}
 
 	result.Comparable = true
+	allMatched := true
+	for _, matchPosition := range matchPositions {
+		if matchPosition < 0 {
+			allMatched = false
+			break
+		}
+	}
+	if allMatched {
+		retained, comparable := patchSeriesContentRetained(ctx, dir, privatePatches, liveHead)
+		if !comparable {
+			result.Comparable = false
+			result.Unretained = privateOnly
+			return result, nil
+		}
+		if retained {
+			result.Retained = privateOnly
+		} else {
+			result.Unretained = privateOnly
+		}
+		return result, nil
+	}
+
 	for i, patch := range privatePatches {
 		matchPosition := matchPositions[i]
 		if matchPosition < 0 {
 			result.Unretained = append(result.Unretained, patch.commit)
 			continue
 		}
-		matched := livePatches[matchPosition]
-		retained, conflicted, comparable := patchContentRetained(ctx, dir, matched, liveHead)
-		if conflicted {
-			retained, comparable = requiredSuccessorRetainsPatch(ctx, dir, i, matchPositions, privatePatches, livePatches)
-		}
+		retained, _, comparable := patchContentRetained(ctx, dir, livePatches[matchPosition], liveHead)
 		if !comparable {
 			result.Comparable = false
 			result.Retained = nil
@@ -340,32 +358,46 @@ func patchContentRetained(ctx context.Context, dir string, matched patchCommit, 
 	return fields[0] == matched.id, false, true
 }
 
-func requiredSuccessorRetainsPatch(ctx context.Context, dir string, requiredIndex int, matchPositions []int, required, candidates []patchCommit) (bool, bool) {
-	matched := candidates[matchPositions[requiredIndex]]
-	for i := requiredIndex + 1; i < len(required); i++ {
-		if matchPositions[i] < 0 {
-			continue
-		}
-		successor := candidates[matchPositions[i]]
-		if !pathsOverlap(matched.paths, successor.paths) {
-			continue
-		}
-		retained, conflicted, comparable := patchContentRetained(ctx, dir, matched, successor.parent)
-		if !comparable {
-			return false, false
-		}
-		if !retained || conflicted {
-			continue
-		}
-		_, superseded, comparable := patchContentRetained(ctx, dir, matched, successor.commit)
-		if !comparable {
-			return false, false
-		}
-		if superseded {
-			return true, true
-		}
+func patchSeriesContentRetained(ctx context.Context, dir string, required []patchCommit, liveHead string) (bool, bool) {
+	first := required[0]
+	last := required[len(required)-1]
+	withoutSeriesTree, err := Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", last.commit, liveHead, first.parent)
+	if err != nil {
+		return false, true
 	}
-	return false, true
+	liveTree, err := Run(ctx, dir, "rev-parse", liveHead+"^{tree}")
+	if err != nil {
+		return false, false
+	}
+	remainingPatch, err := Run(ctx, dir, "diff", "--binary", "--no-ext-diff", withoutSeriesTree, liveTree)
+	if err != nil {
+		return false, false
+	}
+	remainingID, ok := patchID(ctx, dir, remainingPatch)
+	if !ok {
+		return false, true
+	}
+	requiredPatch, err := Run(ctx, dir, "diff", "--binary", "--no-ext-diff", first.parent, last.commit)
+	if err != nil {
+		return false, false
+	}
+	requiredID, ok := patchID(ctx, dir, requiredPatch)
+	if !ok {
+		return false, true
+	}
+	return remainingID == requiredID, true
+}
+
+func patchID(ctx context.Context, dir, patch string) (string, bool) {
+	identity, err := RunWithInput(ctx, dir, patch, "patch-id", "--stable")
+	if err != nil {
+		return "", false
+	}
+	fields := strings.Fields(identity)
+	if len(fields) != 2 {
+		return "", false
+	}
+	return fields[0], true
 }
 
 func sameLogicalPatch(ctx context.Context, dir string, required, matched patchCommit) (bool, bool) {

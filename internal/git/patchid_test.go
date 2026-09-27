@@ -147,6 +147,29 @@ func TestComparePatchRetention_SuccessivePrivateEditsToSameHunkAreRetained(t *te
 	}
 }
 
+func TestComparePatchRetention_SuccessorDoesNotMaskPartialPredecessorLoss(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	p.checkoutNew("private", base)
+	p.commit("feature.txt", "one-private\ntwo\nthree\nfour-private\nfive\nsix\n", "private multi-hunk change")
+	privateHead := p.commit("feature.txt", "one-final\ntwo\nthree\nfour-private\nfive\nsix\n", "private successor")
+
+	p.checkoutNew("live", base)
+	p.commit("feature.txt", "one-private\ntwo\nthree\nfour-private\nfive\nsix\n", "replay multi-hunk change")
+	p.commit("feature.txt", "one-final\ntwo\nthree\nfour-private\nfive\nsix\n", "replay successor")
+	p.commit("feature.txt", "one-final\ntwo\nthree\nfour\nfive\nsix\n", "remove untouched predecessor hunk")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.RetainsAll() {
+		t.Fatalf("successor masked partial predecessor loss: %+v", retention)
+	}
+}
+
 func TestComparePatchRetention_ReplayedThenReplacedOnSameLineIsUnretained(t *testing.T) {
 	p := newPatchRepo(t)
 	base := run(t, p.dir, "git", "rev-parse", "HEAD")
