@@ -1455,8 +1455,8 @@ func TestResolveRerunHeadAdoptedPreservedHeadBeatsStaleGateBranch(t *testing.T) 
 	gitCmd(t, "", "init", "--bare", gate)
 	gitCmd(t, work, "push", gate, submitted+":refs/heads/feature/recover")
 
-	// The adopted preserved head: the same operator change replayed under new
-	// SHAs, then superseded in place by a pipeline fix.
+	// The adopted preserved head replays the same operator change under new
+	// SHAs.
 	gitCmd(t, work, "checkout", "-b", "preserved", base)
 	if err := os.WriteFile(filepath.Join(work, "upstream.txt"), []byte("upstream advance\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1468,10 +1468,6 @@ func TestResolveRerunHeadAdoptedPreservedHeadBeatsStaleGateBranch(t *testing.T) 
 	}
 	gitCmd(t, work, "add", "work.txt")
 	gitCmd(t, work, "commit", "-m", "operator work replayed")
-	if err := os.WriteFile(filepath.Join(work, "work.txt"), []byte("operator work fixed\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, work, "commit", "-am", "pipeline fix supersedes the operator line")
 	preserved := gitOutput(t, work, "rev-parse", "HEAD")
 
 	run := &db.Run{ID: "run-1", Branch: "feature/recover", Status: types.RunFailed, HeadSHA: preserved, SubmittedHeadSHA: &submitted}

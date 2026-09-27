@@ -284,18 +284,15 @@ func isRunOwnedHead(head string, owned []string) bool {
 //     (git.ComparePatchRetention). This is what reconciles the equivalent
 //     changes supported custody operations produce: a rebase or an
 //     adopt-preserved-head rewrites commit SHAs while carrying the same
-//     patches forward, and a later pipeline fix may supersede those same
-//     hunks, which makes the 3-way merge conflict BY CONSTRUCTION even though
-//     no change is missing.
+//     patches forward.
 //
 // Neither proof is additionally required of the other: patch ids drift when a
 // rebase moves context lines around a private hunk even when the replay is
-// clean and the final content identical (proof 1 covers those), while a
-// replayed-then-superseded patch cannot survive the 3-way merge (proof 2
-// covers those). Patch identity itself fails closed - a merge or root commit,
-// an empty commit, a patch-id computation failure, or an ambiguous duplicate
-// patch declines the comparison - so a genuinely absent change is never
-// reconciled by it. A patch-equivalent commit whose content was then discarded
+// clean and the final content identical (proof 1 covers those). Patch identity
+// itself fails closed - a merge or root commit, an empty commit, a patch-id
+// computation failure, an ambiguous duplicate patch, or a later change to a
+// required patch's footprint declines the comparison - so a genuinely absent
+// change is never reconciled by it. A patch-equivalent commit whose content
 // (an `-s ours` twin) still fails: the discard is a merge commit in the live
 // range, which patch identity declines, and its live file matches the merge
 // base, so the 3-way merge does not reproduce the live tree - the change is

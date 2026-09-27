@@ -51,8 +51,7 @@ func newSupersededFixture(t *testing.T) *supersededFixture {
 	mustRun(t, work, "commit", "-m", "operator work")
 	olderSHA := mustRun(t, work, "rev-parse", "HEAD")
 
-	// The newer run's pushed head: the same change replayed under new SHAs
-	// and then superseded in place by the pipeline's own fix.
+	// The newer run's pushed head replays the same change under new SHAs.
 	mustRun(t, work, "checkout", "-b", "pushed", base)
 	mustWrite(t, filepath.Join(work, "upstream.txt"), "upstream advance\n")
 	mustRun(t, work, "add", "upstream.txt")
@@ -60,8 +59,6 @@ func newSupersededFixture(t *testing.T) *supersededFixture {
 	mustWrite(t, filepath.Join(work, "feature.txt"), "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
 	mustRun(t, work, "add", "feature.txt")
 	mustRun(t, work, "commit", "-m", "operator work replayed")
-	mustWrite(t, filepath.Join(work, "feature.txt"), "one\ntwo\nthree\nfour-fixed\nfive\nsix\n")
-	mustRun(t, work, "commit", "-am", "pipeline fix supersedes the operator line")
 	pushed := mustRun(t, work, "rev-parse", "HEAD")
 
 	mustRun(t, "", "init", "--bare", gate)
@@ -93,9 +90,9 @@ func newSupersededFixture(t *testing.T) *supersededFixture {
 
 // TestSupersededUnpublishedRunAcceptsPatchEquivalentRebasedPush pins the
 // content-identity half of the supersession proof: a newer push that rebased
-// the older preserved head's changes under new SHAs (and then superseded them
-// with its own fix) retains that head's work even though it contains none of
-// its commit objects, so the older run stops being authoritative.
+// the older preserved head's changes under new SHAs retains that head's work
+// even though it contains none of its commit objects, so the older run stops
+// being authoritative.
 func TestSupersededUnpublishedRunAcceptsPatchEquivalentRebasedPush(t *testing.T) {
 	f := newSupersededFixture(t)
 	if _, ancErr := gitpkg.Run(f.ctx, f.gate, "merge-base", "--is-ancestor", f.olderSHA, f.pushed); ancErr == nil {

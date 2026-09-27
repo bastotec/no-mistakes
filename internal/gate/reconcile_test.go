@@ -705,11 +705,8 @@ func TestReconcileStaleBranchAcceptsPatchEquivalentRebasedSeries(t *testing.T) {
 // TestReconcileStaleBranchAcceptsAdoptedPreservedHead covers the post-adoption
 // wall: a supported adopt-preserved-head custody return leaves the private
 // mirror at the pre-adoption lineage while the caller's branch sits on the
-// adopted preserved head - the same changes replayed under new SHAs and then
-// superseded in place by the pipeline's own fix commit. The mechanical 3-way
-// conflicts BY CONSTRUCTION there (both sides rewrote the same line), so only
-// patch identity can reconcile it, and the mirror must accept the adoption
-// rather than demand SHA containment.
+// adopted preserved head with the same changes replayed under new SHAs. Patch
+// identity permits the mirror to accept the adoption without SHA containment.
 func TestReconcileStaleBranchAcceptsAdoptedPreservedHead(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -728,8 +725,8 @@ func TestReconcileStaleBranchAcceptsAdoptedPreservedHead(t *testing.T) {
 	reconcileGit(t, work, "commit", "-m", "operator work")
 	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
 
-	// The adopted preserved head: the same operator change replayed onto the
-	// advanced base, then a pipeline fix commit supersedes that same line.
+	// The adopted preserved head replays the same operator change onto the
+	// advanced base.
 	reconcileGit(t, work, "checkout", "-b", "preserved", base)
 	writeReconcileFile(t, work, "upstream.txt", "upstream advance\n")
 	reconcileGit(t, work, "add", "-A")
@@ -737,19 +734,7 @@ func TestReconcileStaleBranchAcceptsAdoptedPreservedHead(t *testing.T) {
 	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
 	reconcileGit(t, work, "add", "-A")
 	reconcileGit(t, work, "commit", "-m", "operator work replayed")
-	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n")
-	reconcileGit(t, work, "add", "-A")
-	reconcileGit(t, work, "commit", "-m", "pipeline fix supersedes the operator line")
 	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
-
-	// Fixture guard: the whole-tree survival proof must genuinely fail here -
-	// both sides rewrote the same line differently - so this test exercises
-	// patch-identity retention and not the older merge-tree proof.
-	merged, mergeErr := reconcileGitErr(t, work, "merge-tree", "--write-tree", liveHead, privateHead)
-	liveTree := reconcileGit(t, work, "rev-parse", liveHead+"^{tree}")
-	if mergeErr == nil && merged == liveTree {
-		t.Fatal("fixture: whole-tree survival unexpectedly proves the adopted shape; add a stronger supersession")
-	}
 
 	gateDir := filepath.Join(t.TempDir(), "gate.git")
 	reconcileGit(t, "", "init", "--bare", gateDir)
@@ -769,10 +754,10 @@ func TestReconcileStaleBranchAcceptsAdoptedPreservedHead(t *testing.T) {
 }
 
 // TestReconcileStaleBranchRefusesContentLossBesideReplayedPatches is the true
-// content loss that must still refuse: one private change is replayed (and
-// even superseded) in the live head, but a second private change is dropped
-// entirely. Patch identity accounts for the replayed one and names only the
-// genuinely absent commit at risk; nothing is reconciled away.
+// content loss that must still refuse: one private change is replayed, but a
+// second private change is dropped entirely. Patch identity accounts for the
+// replayed change and names only the genuinely absent commit at risk; nothing
+// is reconciled away.
 func TestReconcileStaleBranchRefusesContentLossBesideReplayedPatches(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
@@ -801,9 +786,6 @@ func TestReconcileStaleBranchRefusesContentLossBesideReplayedPatches(t *testing.
 	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
 	reconcileGit(t, work, "add", "-A")
 	reconcileGit(t, work, "commit", "-m", "replayed private change replayed")
-	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n")
-	reconcileGit(t, work, "add", "-A")
-	reconcileGit(t, work, "commit", "-m", "pipeline fix supersedes the operator line")
 	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
 
 	gateDir := filepath.Join(t.TempDir(), "gate.git")

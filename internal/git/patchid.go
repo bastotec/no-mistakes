@@ -3,8 +3,6 @@ package git
 import (
 	"context"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 )
 
@@ -102,9 +100,6 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 		retained, conflicted, comparable := patchContentRetained(ctx, dir, matched, liveHead)
 		if conflicted {
 			retained, comparable = requiredSuccessorRetainsPatch(ctx, dir, i, matchPositions, privatePatches, livePatches)
-			if !retained && comparable {
-				retained, comparable = patchEvolutionRetained(ctx, dir, matched, liveHead)
-			}
 		}
 		if !comparable {
 			result.Comparable = false
@@ -371,136 +366,6 @@ func requiredSuccessorRetainsPatch(ctx context.Context, dir string, requiredInde
 		}
 	}
 	return false, true
-}
-
-type patchHunk struct {
-	oldStart int
-	oldCount int
-	removed  []string
-	added    []string
-}
-
-var patchHunkHeader = regexp.MustCompile(`^@@ -([0-9]+)(?:,([0-9]+))? \+[0-9]+(?:,[0-9]+)? @@`)
-
-func patchEvolutionRetained(ctx context.Context, dir string, matched patchCommit, liveHead string) (bool, bool) {
-	for path := range matched.paths {
-		requiredDiff, err := Run(ctx, dir, "diff", "--no-ext-diff", "--no-renames", "--unified=0", matched.parent, matched.commit, "--", path)
-		if err != nil {
-			return false, false
-		}
-		finalDiff, err := Run(ctx, dir, "diff", "--no-ext-diff", "--no-renames", "--unified=0", matched.parent, liveHead, "--", path)
-		if err != nil {
-			return false, false
-		}
-		requiredHunks, ok := parsePatchHunks(requiredDiff)
-		if !ok {
-			return false, true
-		}
-		finalHunks, ok := parsePatchHunks(finalDiff)
-		if !ok {
-			return false, true
-		}
-		for _, required := range requiredHunks {
-			retained := false
-			for _, final := range finalHunks {
-				if hunksOverlap(required, final) && hunkCarriesForward(required, final) {
-					retained = true
-					break
-				}
-			}
-			if !retained {
-				return false, true
-			}
-		}
-	}
-	return true, true
-}
-
-func parsePatchHunks(diff string) ([]patchHunk, bool) {
-	if strings.Contains(diff, "GIT binary patch") || strings.Contains(diff, "Binary files ") {
-		return nil, false
-	}
-	var hunks []patchHunk
-	current := -1
-	for _, line := range strings.Split(diff, "\n") {
-		if match := patchHunkHeader.FindStringSubmatch(line); match != nil {
-			oldStart, err := strconv.Atoi(match[1])
-			if err != nil {
-				return nil, false
-			}
-			oldCount := 1
-			if match[2] != "" {
-				oldCount, err = strconv.Atoi(match[2])
-				if err != nil {
-					return nil, false
-				}
-			}
-			hunks = append(hunks, patchHunk{oldStart: oldStart, oldCount: oldCount})
-			current = len(hunks) - 1
-			continue
-		}
-		if current < 0 || len(line) == 0 {
-			continue
-		}
-		switch line[0] {
-		case '-':
-			hunks[current].removed = append(hunks[current].removed, line[1:])
-		case '+':
-			hunks[current].added = append(hunks[current].added, line[1:])
-		}
-	}
-	return hunks, true
-}
-
-func hunksOverlap(left, right patchHunk) bool {
-	leftEnd := left.oldStart + max(left.oldCount, 1)
-	rightEnd := right.oldStart + max(right.oldCount, 1)
-	return left.oldStart < rightEnd && right.oldStart < leftEnd
-}
-
-func hunkCarriesForward(required, final patchHunk) bool {
-	if len(required.added) == 0 || len(final.added) == 0 {
-		return false
-	}
-	for _, requiredLine := range required.added {
-		carried := false
-		baselinePrefix := 0
-		baselineSuffix := 0
-		for _, oldLine := range required.removed {
-			baselinePrefix = max(baselinePrefix, commonPrefixLen(requiredLine, oldLine))
-			baselineSuffix = max(baselineSuffix, commonSuffixLen(requiredLine, oldLine))
-		}
-		for _, finalLine := range final.added {
-			if commonPrefixLen(requiredLine, finalLine) > baselinePrefix || commonSuffixLen(requiredLine, finalLine) > baselineSuffix {
-				carried = true
-				break
-			}
-		}
-		if !carried {
-			return false
-		}
-	}
-	return true
-}
-
-func commonPrefixLen(left, right string) int {
-	limit := min(len(left), len(right))
-	for i := 0; i < limit; i++ {
-		if left[i] != right[i] {
-			return i
-		}
-	}
-	return limit
-}
-
-func commonSuffixLen(left, right string) int {
-	limit := min(len(left), len(right))
-	for i := 0; i < limit; i++ {
-		if left[len(left)-1-i] != right[len(right)-1-i] {
-			return i
-		}
-	}
-	return limit
 }
 
 func sameLogicalPatch(ctx context.Context, dir string, required, matched patchCommit) (bool, bool) {

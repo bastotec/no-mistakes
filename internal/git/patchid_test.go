@@ -81,7 +81,7 @@ func TestComparePatchRetention_RebasedSeriesWithEquivalentPatches(t *testing.T) 
 	}
 }
 
-func TestComparePatchRetention_ReplayedThenFixedOnSameLineIsRetained(t *testing.T) {
+func TestComparePatchRetention_ReplayedThenChangedOnSameLineIsUnretained(t *testing.T) {
 	p := newPatchRepo(t)
 	base := run(t, p.dir, "git", "rev-parse", "HEAD")
 
@@ -90,15 +90,37 @@ func TestComparePatchRetention_ReplayedThenFixedOnSameLineIsRetained(t *testing.
 
 	p.checkoutNew("live", base)
 	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
-	p.commit("feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n", "fix replayed change")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n", "change replayed value")
 	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
 
 	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !retention.RetainsAll() {
-		t.Fatalf("forward same-line fix read as content loss: %+v", retention)
+	if retention.RetainsAll() {
+		t.Fatalf("arbitrary same-line replacement read as retained: %+v", retention)
+	}
+}
+
+func TestComparePatchRetention_ReplayedThenStatusValueChangesIsUnretained(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+	base = p.commit("status.txt", "status=off\n", "add status")
+
+	p.checkoutNew("private", base)
+	privateHead := p.commit("status.txt", "status=enabled\n", "enable status")
+
+	p.checkoutNew("live", base)
+	p.commit("status.txt", "status=enabled\n", "enable status replayed")
+	p.commit("status.txt", "status=error\n", "replace enabled status")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.RetainsAll() {
+		t.Fatalf("replacement sharing a prefix read as retained: %+v", retention)
 	}
 }
 
