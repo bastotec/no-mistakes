@@ -2017,8 +2017,10 @@ func exactPushedBinding(repo *db.Repo, run *db.Run, branch string) bool {
 // supersededUnpublishedRun proves the narrow rerun relationship needed to
 // ignore an older terminal unpublished head during branch selection. The gate
 // is read-only evidence: its exact branch head must equal the newer push
-// binding, and Git must prove the older preserved head is its ancestor. Any
-// missing or conflicting evidence leaves the older run authoritative.
+// binding, and Git must prove the older preserved head's changes are retained
+// there - by ancestry (the exact commits are contained) or by patch identity
+// (the same changes were replayed under rewritten SHAs, as a rebase does).
+// Any missing or conflicting evidence leaves the older run authoritative.
 func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db.Run, branch string) bool {
 	if older == nil || newer == nil || !terminalRunStatus(older.Status) || !unpublishedPipelineHead(older) ||
 		!samePushTargetBinding(older, newer) || strings.TrimSpace(s.GateDir) == "" || older.HeadSHA == "" || newer.LastPushedSHA == nil {
@@ -2029,7 +2031,11 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 	if err != nil || gateHead != pushed {
 		return false
 	}
-	return isAncestor(ctx, s.GateDir, older.HeadSHA, pushed)
+	if isAncestor(ctx, s.GateDir, older.HeadSHA, pushed) {
+		return true
+	}
+	retention, retentionErr := git.ComparePatchRetention(ctx, s.GateDir, pushed, older.HeadSHA)
+	return retentionErr == nil && retention.RetainsAll()
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {

@@ -96,15 +96,27 @@ work unchanged.
 ### Private mirror reconciliation
 
 A rebase can leave the gate branch on an older history that rejects the next
-ordinary push. Reconciliation compares exact commit heads and whole-tree
-survival; commit messages are not evidence. Survival means a clean
+ordinary push. Reconciliation compares exact commit heads and two independent
+content proofs - whole-tree survival and patch-identity retention; commit
+messages are not evidence. Survival means a clean
 three-way merge of the private head into the live head whose resulting tree
 equals the live tree, so changes discarded by a merge or revert are not
-counted as surviving content. Per-file `git patch-id --stable` identity is
-no longer additionally required: patch ids drift across a rebase whose base
+counted as surviving content. Patch-identity retention means every
+private-only commit's stable `git patch-id` is replayed exactly once among the
+live-only commits: this is what reconciles the equivalent changes a supported
+rewrite - a rebase or an adopted preserved head - produces under different
+commit SHAs. The two proofs are alternatives, never additionally required of
+each other: patch ids drift across a rebase whose base
 moved the context lines around a private hunk even when the replay is clean
-and the final content identical, which used to refuse such rebases as
-at-risk. If survival cannot be proven, the private-only range is reported
+and the final content identical (survival covers those), while a patch
+replayed and then superseded by later live work cannot survive the three-way
+merge (patch identity covers those). Patch identity itself fails closed -
+merge or root commits, empty commits, patch-id computation failures, and
+ambiguous duplicate patches decline the comparison - so a genuinely absent
+change is never reconciled by it. The same patch-identity comparison backs
+the custody decisions that used to require SHA containment (rerun head
+selection and terminal-run supersession). If neither proof holds, the
+unaccounted private-only range is reported
 as at risk.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a

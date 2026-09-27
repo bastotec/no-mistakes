@@ -1007,8 +1007,13 @@ func receiptForRun(run *db.Run, created bool) (ipc.LaunchReceipt, error) {
 // runs without one infer intent afresh. The selected run's PR URL is inherited
 // when that PR is not already merged or closed, so a later --base-branch
 // retarget can prove it is moving the same still-open review object.
-// A supplied clean caller head must match the selected head before any run
-// starts or is superseded. It never changes head selection.
+// A supplied clean caller head must be retained by the selected head before
+// any run starts or is superseded: exactly (the caller sits on it), or by Git
+// patch identity when the two lineages are a legitimate content-preserving
+// rewrite of each other (a rebase, an adopted preserved head). A caller head
+// whose changes are not all in the selection - new work, or a rewrite patch
+// identity cannot account for - is refused, and it never changes head
+// selection.
 func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRunID string, skipSteps []types.StepName, intent, prBaseBranch, callerHeadSHA string) (string, error) {
 	repo, err := m.db.GetRepo(repoID)
 	if err != nil {
@@ -1019,6 +1024,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	}
 
 	gateDir := m.paths.RepoDir(repo.ID)
+	stageCallerHeadForComparison(ctx, gateDir, repo.WorkingPath, callerHeadSHA)
 	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
@@ -1046,11 +1052,11 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if latestForBranch == nil {
 		return "", fmt.Errorf("no previous run for branch %s", branch)
 	}
-	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch)
+	headSHA, err := resolveRerunHead(ctx, gateDir, branch, latestForBranch, callerHeadSHA)
 	if err != nil {
 		return "", err
 	}
-	if callerHeadSHA != "" && callerHeadSHA != headSHA {
+	if callerHeadSHA != "" && callerHeadSHA != headSHA && !selectionRetainsHead(ctx, gateDir, headSHA, callerHeadSHA) {
 		return "", fmt.Errorf("refusing rerun: selected head %s differs from clean local head %s; inspect `no-mistakes axi status` and reconcile custody before using `no-mistakes axi run` to submit the local head", headSHA, callerHeadSHA)
 	}
 	selectedRun := latestForBranch
@@ -1117,13 +1123,27 @@ func inheritablePRURL(run *db.Run) string {
 	return strings.TrimSpace(*run.PRURL)
 }
 
-func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run) (string, error) {
+func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, callerHeadSHA string) (string, error) {
 	gateHead, err := git.Run(ctx, gateDir, "rev-parse", "refs/heads/"+branch+"^{commit}")
 	if err != nil {
 		return "", fmt.Errorf("resolve gate head: %w", err)
 	}
-	if latest == nil || !latest.Status.Terminal() || latest.CustodyReturnedAt != nil || latest.HeadSHA == gateHead {
+	if latest == nil || !latest.Status.Terminal() || latest.HeadSHA == gateHead {
 		return gateHead, nil
+	}
+	if latest.CustodyReturnedAt != nil {
+		// Custody is back with the operator. The gate branch is the head to
+		// resume only while it still carries the caller's own head: keep-local
+		// returns compare-and-swap it there exactly. A custody return that
+		// ADOPTED the preserved head leaves the gate at the superseded lineage
+		// while the caller sits on the recorded head, and selecting that stale
+		// gate head resumes the OPPOSITE head of the divergence. So when the
+		// gate head does not retain the caller's changes - exactly or by Git
+		// patch identity - fall through and resolve the preserved head
+		// instead. An unknown caller keeps today's gate-head selection.
+		if callerHeadSHA == "" || selectionRetainsHead(ctx, gateDir, gateHead, callerHeadSHA) {
+			return gateHead, nil
+		}
 	}
 	published := ""
 	if latest.LastPushedSHA != nil {
@@ -1156,6 +1176,52 @@ func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Ru
 		return preserved, nil
 	}
 	return "", fmt.Errorf("refusing rerun from stale gate head %s: terminal run %s recorded unpublished head %s, but that head is unavailable; inspect with `no-mistakes axi status` and reconcile custody first", gateHead, latest.ID, latest.HeadSHA)
+}
+
+// selectionRetainsHead reports whether head candidate already carries every
+// change of head carried: exactly (the same commit object), or by Git patch
+// identity when a supported custody operation rewrote the lineage (a rebase,
+// an adopted preserved head) and every carried change reappears among the
+// candidate's own commits. It is the content-identity form of the containment
+// proof these decisions used to take from SHA equality, and it fails closed:
+// a comparison patch identity cannot account for (a merge or root commit, an
+// empty commit, a patch-id computation failure, an ambiguous duplicate patch)
+// is not retention, so a genuinely lost change is never read as present.
+//
+// The comparison runs in the private gate, which holds every candidate head
+// these selections resolve; stageCallerHeadForComparison imports the caller's
+// head there first, because a caller-side rewrite lives only in the invoking
+// worktree.
+func selectionRetainsHead(ctx context.Context, dir, candidate, carried string) bool {
+	candidate = strings.TrimSpace(candidate)
+	carried = strings.TrimSpace(carried)
+	if candidate == "" || carried == "" {
+		return false
+	}
+	if candidate == carried {
+		return true
+	}
+	retention, err := git.ComparePatchRetention(ctx, dir, candidate, carried)
+	return err == nil && retention.RetainsAll()
+}
+
+// stageCallerHeadForComparison imports the caller's exact head commit into the
+// private gate so patch-identity comparisons can see both lineages. It is the
+// same staging ReconcileStaleBranch performs before comparing a live head
+// against the mirror, with the same verification: the fetched object must be
+// the exact expected commit. It mutates no caller-owned ref (FetchRemoteRef
+// uses and removes its own temporary ref), and a failure here is not an error
+// to the caller - the comparisons simply cannot prove retention and refuse.
+func stageCallerHeadForComparison(ctx context.Context, gateDir, workingPath, callerHeadSHA string) {
+	callerHeadSHA = strings.TrimSpace(callerHeadSHA)
+	workingPath = strings.TrimSpace(workingPath)
+	if callerHeadSHA == "" || workingPath == "" || strings.TrimSpace(gateDir) == "" {
+		return
+	}
+	if _, err := git.Run(ctx, gateDir, "cat-file", "-e", callerHeadSHA+"^{commit}"); err == nil {
+		return
+	}
+	_ = git.FetchRemoteRef(ctx, gateDir, workingPath, callerHeadSHA, callerHeadSHA)
 }
 
 // fetchRunDefaultBranch fetches the trusted branch from the refreshed
