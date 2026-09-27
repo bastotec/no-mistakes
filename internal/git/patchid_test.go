@@ -140,75 +140,125 @@ func TestComparePatchRetention_TrueContentLossIsUnretained(t *testing.T) {
 	}
 }
 
-// TestComparePatchRetention_FailsClosedOnUnprovableRanges: merge commits,
-// empty commits, and ambiguous duplicate patches decline the whole comparison
-// and report every private commit unretained, so no structural gap can read as
-// retention.
-func TestComparePatchRetention_FailsClosedOnUnprovableRanges(t *testing.T) {
-	for _, tc := range []struct {
-		name  string
-		shape string
-	}{
-		{name: "merge commit in live range", shape: "merge"},
-		{name: "empty commit in private range", shape: "empty-private"},
-		{name: "empty commit in live range", shape: "empty-live"},
-		{name: "duplicate patch identity in live range", shape: "dup-live"},
-		{name: "duplicate patch identity in private range", shape: "dup-private"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
+func TestComparePatchRetention_PrivateRangeRemainsStrict(t *testing.T) {
+	for _, shape := range []string{"merge", "empty", "duplicate"} {
+		t.Run(shape, func(t *testing.T) {
 			p := newPatchRepo(t)
 			base := run(t, p.dir, "git", "rev-parse", "HEAD")
-
 			p.checkoutNew("private", base)
 			p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change")
-			privateHead := ""
-			switch tc.shape {
-			case "empty-private":
+			switch shape {
+			case "merge":
+				privateTip := run(t, p.dir, "git", "rev-parse", "HEAD")
+				p.checkoutNew("private-side", base)
+				p.commit("side.txt", "side\n", "private side work")
+				p.checkout("private")
+				p.commit("main.txt", "main\n", "private main work")
+				run(t, p.dir, "git", "merge", "--no-ff", "-m", "private merge", "private-side")
+				if privateTip == "" {
+					t.Fatal("fixture produced no private tip")
+				}
+			case "empty":
 				run(t, p.dir, "git", "commit", "--allow-empty", "-m", "empty private commit")
-				privateHead = run(t, p.dir, "git", "rev-parse", "HEAD")
-			case "dup-private":
+			case "duplicate":
 				p.commit("dup.txt", "dup\n", "duplicate one")
 				run(t, p.dir, "git", "rm", "dup.txt")
 				run(t, p.dir, "git", "commit", "-m", "drop duplicate")
 				p.commit("dup.txt", "dup\n", "duplicate two")
-				privateHead = run(t, p.dir, "git", "rev-parse", "HEAD")
-			default:
-				p.commit("second.txt", "second\n", "second private change")
-				privateHead = run(t, p.dir, "git", "rev-parse", "HEAD")
 			}
+			privateHead := run(t, p.dir, "git", "rev-parse", "HEAD")
 
 			p.checkoutNew("live", base)
 			p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
-			switch tc.shape {
-			case "merge":
-				p.checkoutNew("side", base)
-				p.commit("side.txt", "side\n", "side work")
-				p.checkout("live")
-				run(t, p.dir, "git", "merge", "--no-ff", "-m", "merge side", "side")
-			case "empty-live":
-				run(t, p.dir, "git", "commit", "--allow-empty", "-m", "empty live commit")
-			case "dup-live":
-				p.commit("dup.txt", "dup\n", "duplicate one")
-				run(t, p.dir, "git", "rm", "dup.txt")
-				run(t, p.dir, "git", "commit", "-m", "drop duplicate")
-				p.commit("dup.txt", "dup\n", "duplicate two")
-			}
 			liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
 
 			retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if retention.Comparable {
-				t.Fatalf("structural gap read as comparable: %+v", retention)
-			}
-			if retention.RetainsAll() || len(retention.Retained) != 0 {
-				t.Fatalf("declined comparison reported retention: %+v", retention)
-			}
-			if len(retention.Unretained) == 0 {
-				t.Fatalf("declined comparison left nothing unretained: %+v", retention)
+			if retention.Comparable || retention.RetainsAll() || len(retention.Retained) != 0 {
+				t.Fatalf("strict private range read as comparable: %+v", retention)
 			}
 		})
+	}
+}
+
+func TestComparePatchRetention_UnrelatedLiveStructureAndExtrasDoNotPoisonReplay(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change")
+
+	p.checkoutNew("live", base)
+	p.commit("upstream.txt", "upstream\n", "upstream main")
+	liveBeforeMerge := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("upstream-side", base)
+	p.commit("side.txt", "side\n", "upstream side")
+	p.checkout("live")
+	run(t, p.dir, "git", "merge", "--no-ff", "-m", "unrelated upstream merge", "upstream-side")
+	run(t, p.dir, "git", "commit", "--allow-empty", "-m", "live empty metadata")
+	p.commit("extra.txt", "duplicate extra\n", "extra patch one")
+	run(t, p.dir, "git", "rm", "extra.txt")
+	run(t, p.dir, "git", "commit", "-m", "remove extra patch")
+	p.commit("extra.txt", "duplicate extra\n", "extra patch two")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-fixed\nfive\nsix\n", "later same-hunk fix")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+	if liveBeforeMerge == "" {
+		t.Fatal("fixture produced no pre-merge head")
+	}
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retention.RetainsAll() {
+		t.Fatalf("unrelated live history poisoned equivalent replay: %+v", retention)
+	}
+}
+
+func TestComparePatchRetention_LiveStructuralOverlapFailsClosed(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change")
+
+	p.checkoutNew("live", base)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
+	mergeBase := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("live-side", mergeBase)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-side\nfive\nsix\n", "side changes required path")
+	p.checkout("live")
+	p.commit("main.txt", "main\n", "force merge")
+	run(t, p.dir, "git", "merge", "--no-ff", "-m", "overlapping merge", "live-side")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.Comparable || retention.RetainsAll() {
+		t.Fatalf("overlapping structural commit read as comparable: %+v", retention)
+	}
+}
+
+func TestComparePatchRetention_ReplayedThenRevertedIsUnretained(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("private", base)
+	privateHead := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change")
+
+	p.checkoutNew("live", base)
+	replay := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private change replayed")
+	run(t, p.dir, "git", "revert", "--no-edit", replay)
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if retention.RetainsAll() || len(retention.Unretained) != 1 || retention.Unretained[0] != privateHead {
+		t.Fatalf("reverted replay read as retained: %+v", retention)
 	}
 }
 

@@ -110,10 +110,13 @@ each other: patch ids drift across a rebase whose base
 moved the context lines around a private hunk even when the replay is clean
 and the final content identical (survival covers those), while a patch
 replayed and then superseded by later live work cannot survive the three-way
-merge (patch identity covers those). Patch identity itself fails closed -
-merge or root commits, empty commits, patch-id computation failures, and
-ambiguous duplicate patches decline the comparison - so a genuinely absent
-change is never reconciled by it. The same patch-identity comparison backs
+merge (patch identity covers those). Patch identity itself is asymmetric and
+fail-closed: the private range must contain only ordinary, non-empty, uniquely
+identified patches, while unrelated candidate-side merges, empty commits, and
+duplicate extra patches do not poison the proof. Every required patch must map
+uniquely in private-history order; a structural candidate commit touching a
+required path, an absent patch, or a later reversal refuses reconciliation. The
+same patch-identity comparison backs
 the custody decisions that used to require SHA containment (rerun head
 selection and terminal-run supersession). If neither proof holds, the
 unaccounted private-only range is reported
