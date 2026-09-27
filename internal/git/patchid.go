@@ -3,7 +3,9 @@ package git
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -79,50 +81,25 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 		return result, nil
 	}
 
-	positions := make(map[string][]int, len(livePatches))
-	for i, patch := range livePatches {
-		positions[patch.id] = append(positions[patch.id], i)
-	}
-	lastPosition := -1
-	for _, patch := range privatePatches {
-		matches := positions[patch.id]
-		if len(matches) > 1 {
-			result.Unretained = privateOnly
-			return result, nil
-		}
-		if len(matches) == 1 {
-			if matches[0] <= lastPosition {
-				result.Unretained = privateOnly
-				return result, nil
-			}
-			lastPosition = matches[0]
-		}
+	matchPositions, unique := uniqueOrderedPatchMapping(privatePatches, livePatches)
+	if !unique {
+		result.Unretained = privateOnly
+		return result, nil
 	}
 
 	result.Comparable = true
-	for _, patch := range privatePatches {
-		matches := positions[patch.id]
-		if len(matches) == 0 {
+	for i, patch := range privatePatches {
+		matchPosition := matchPositions[i]
+		if matchPosition < 0 {
 			result.Unretained = append(result.Unretained, patch.commit)
 			continue
 		}
-		matchPosition := matches[0]
-		retained := true
-		for _, later := range livePatches[matchPosition+1:] {
-			if later.id == patch.reverseID {
-				retained = false
-				break
-			}
-		}
-		if retained {
-			equal, comparable := pathsEqual(ctx, dir, livePatches[matchPosition].parent, liveHead, patch.paths)
-			if !comparable {
-				result.Comparable = false
-				result.Retained = nil
-				result.Unretained = privateOnly
-				return result, nil
-			}
-			retained = !equal
+		retained, comparable := patchFootprintRetained(ctx, dir, livePatches[matchPosition].parent, livePatches[matchPosition].commit, liveHead, patch.paths)
+		if !comparable {
+			result.Comparable = false
+			result.Retained = nil
+			result.Unretained = privateOnly
+			return result, nil
 		}
 		if retained {
 			result.Retained = append(result.Retained, patch.commit)
@@ -133,12 +110,56 @@ func ComparePatchRetention(ctx context.Context, dir, liveHead, privateHead strin
 	return result, nil
 }
 
+func uniqueOrderedPatchMapping(required, candidates []patchCommit) ([]int, bool) {
+	type mappingResult struct {
+		matched int
+		ways    int
+		mapping []int
+	}
+	type state struct {
+		requiredIndex  int
+		candidateIndex int
+	}
+	memo := make(map[state]mappingResult)
+	var search func(int, int) mappingResult
+	search = func(requiredIndex, candidateIndex int) mappingResult {
+		if requiredIndex == len(required) {
+			return mappingResult{ways: 1}
+		}
+		key := state{requiredIndex: requiredIndex, candidateIndex: candidateIndex}
+		if cached, ok := memo[key]; ok {
+			return cached
+		}
+		best := search(requiredIndex+1, candidateIndex)
+		best.mapping = append([]int{-1}, best.mapping...)
+		for i := candidateIndex; i < len(candidates); i++ {
+			if candidates[i].id != required[requiredIndex].id {
+				continue
+			}
+			candidate := search(requiredIndex+1, i+1)
+			candidate.matched++
+			candidate.mapping = append([]int{i}, candidate.mapping...)
+			if candidate.matched > best.matched {
+				best = candidate
+			} else if candidate.matched == best.matched {
+				best.ways += candidate.ways
+				if best.ways > 2 {
+					best.ways = 2
+				}
+			}
+		}
+		memo[key] = best
+		return best
+	}
+	best := search(0, 0)
+	return best.mapping, best.ways == 1
+}
+
 type patchCommit struct {
-	commit    string
-	parent    string
-	id        string
-	reverseID string
-	paths     map[string]struct{}
+	commit string
+	parent string
+	id     string
+	paths  map[string]struct{}
 }
 
 func privatePatchSeries(ctx context.Context, dir string, commits []string) ([]patchCommit, map[string]struct{}, bool) {
@@ -147,7 +168,7 @@ func privatePatchSeries(ctx context.Context, dir string, commits []string) ([]pa
 	seen := make(map[string]struct{}, len(commits))
 	for i := len(commits) - 1; i >= 0; i-- {
 		patch, ordinary, empty := inspectPatchCommit(ctx, dir, commits[i])
-		if !ordinary || empty || patch.id == "" || patch.reverseID == "" {
+		if !ordinary || empty || patch.id == "" {
 			return nil, nil, false
 		}
 		if _, duplicate := seen[patch.id]; duplicate {
@@ -204,10 +225,6 @@ func inspectPatchCommit(ctx context.Context, dir, commit string) (patchCommit, b
 		return patch, true, true
 	}
 	patch.id = stablePatchID(ctx, dir, forward)
-	reverse, err := RunRaw(ctx, dir, "diff", "--no-ext-diff", "--binary", commit, patch.parent)
-	if err == nil {
-		patch.reverseID = stablePatchID(ctx, dir, reverse)
-	}
 	return patch, true, false
 }
 
@@ -246,19 +263,73 @@ func pathsOverlap(left, right map[string]struct{}) bool {
 	return false
 }
 
-func pathsEqual(ctx context.Context, dir, left, right string, paths map[string]struct{}) (bool, bool) {
+type diffFootprint struct {
+	lines      map[int]struct{}
+	insertions map[int]struct{}
+}
+
+var zeroContextHunk = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+`)
+
+func patchFootprintRetained(ctx context.Context, dir, parent, matched, liveHead string, paths map[string]struct{}) (bool, bool) {
 	ordered := make([]string, 0, len(paths))
 	for path := range paths {
 		ordered = append(ordered, path)
 	}
 	sort.Strings(ordered)
-	args := []string{"diff", "--no-ext-diff", "--binary", left, right, "--"}
-	args = append(args, ordered...)
-	out, err := RunRaw(ctx, dir, args...)
-	if err != nil {
-		return false, false
+	for _, path := range ordered {
+		required, ok := changedFootprint(ctx, dir, parent, matched, path)
+		if !ok || len(required.lines)+len(required.insertions) == 0 {
+			return false, false
+		}
+		final, ok := changedFootprint(ctx, dir, parent, liveHead, path)
+		if !ok {
+			return false, false
+		}
+		for line := range required.lines {
+			if _, retained := final.lines[line]; !retained {
+				return false, true
+			}
+		}
+		for point := range required.insertions {
+			if _, retained := final.insertions[point]; !retained {
+				return false, true
+			}
+		}
 	}
-	return len(out) == 0, true
+	return true, true
+}
+
+func changedFootprint(ctx context.Context, dir, left, right, path string) (diffFootprint, bool) {
+	footprint := diffFootprint{lines: make(map[int]struct{}), insertions: make(map[int]struct{})}
+	out, err := RunRaw(ctx, dir, "diff", "--no-ext-diff", "--no-renames", "--unified=0", left, right, "--", path)
+	if err != nil {
+		return footprint, false
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		match := zeroContextHunk.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		start, err := strconv.Atoi(match[1])
+		if err != nil {
+			return footprint, false
+		}
+		count := 1
+		if match[2] != "" {
+			count, err = strconv.Atoi(match[2])
+			if err != nil {
+				return footprint, false
+			}
+		}
+		if count == 0 {
+			footprint.insertions[start] = struct{}{}
+			continue
+		}
+		for changedLine := start; changedLine < start+count; changedLine++ {
+			footprint.lines[changedLine] = struct{}{}
+		}
+	}
+	return footprint, true
 }
 
 // exclusiveCommits lists the commits reachable only from head, excluding

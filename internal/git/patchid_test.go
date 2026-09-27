@@ -242,6 +242,81 @@ func TestComparePatchRetention_LiveStructuralOverlapFailsClosed(t *testing.T) {
 	}
 }
 
+func TestComparePatchRetention_OrderedDuplicateExtraIsUnambiguous(t *testing.T) {
+	p := newPatchRepo(t)
+	base := run(t, p.dir, "git", "rev-parse", "HEAD")
+	p.checkoutNew("private", base)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "private P")
+	privateHead := p.commit("required-q.txt", "q\n", "private Q")
+
+	p.checkoutNew("live", base)
+	firstP := p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "replay P")
+	p.commit("required-q.txt", "q\n", "replay Q")
+	run(t, p.dir, "git", "revert", "--no-edit", firstP)
+	p.commit("feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n", "duplicate extra P")
+	liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+	retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !retention.RetainsAll() {
+		t.Fatalf("ordered unique mapping rejected duplicate extra: %+v", retention)
+	}
+}
+
+func TestComparePatchRetention_PartialRemovalIsUnretained(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		remove func(*patchRepo)
+	}{
+		{
+			name: "one of multiple files restored",
+			remove: func(p *patchRepo) {
+				p.commit("second.txt", "second-base\n", "restore one private path")
+			},
+		},
+		{
+			name: "restoration combined with another same-path change",
+			remove: func(p *patchRepo) {
+				p.commit("feature.txt", "one\ntwo\nthree\nfour\nfive\nsix\ncombined-extra\n", "restore and extend required path")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			p := newPatchRepo(t)
+			base := run(t, p.dir, "git", "rev-parse", "HEAD")
+			writeFile(t, filepath.Join(p.dir, "second.txt"), "second-base\n")
+			run(t, p.dir, "git", "add", ".")
+			run(t, p.dir, "git", "commit", "-m", "extend base")
+			base = run(t, p.dir, "git", "rev-parse", "HEAD")
+
+			p.checkoutNew("private", base)
+			writeFile(t, filepath.Join(p.dir, "feature.txt"), "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+			writeFile(t, filepath.Join(p.dir, "second.txt"), "second-private\n")
+			run(t, p.dir, "git", "add", ".")
+			run(t, p.dir, "git", "commit", "-m", "private multi-path change")
+			privateHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+			p.checkoutNew("live", base)
+			writeFile(t, filepath.Join(p.dir, "feature.txt"), "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+			writeFile(t, filepath.Join(p.dir, "second.txt"), "second-private\n")
+			run(t, p.dir, "git", "add", ".")
+			run(t, p.dir, "git", "commit", "-m", "replay private multi-path change")
+			test.remove(p)
+			liveHead := run(t, p.dir, "git", "rev-parse", "HEAD")
+
+			retention, err := ComparePatchRetention(context.Background(), p.dir, liveHead, privateHead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if retention.RetainsAll() {
+				t.Fatalf("partially removed replay read as retained: %+v", retention)
+			}
+		})
+	}
+}
+
 func TestComparePatchRetention_ReplayedThenRevertedIsUnretained(t *testing.T) {
 	p := newPatchRepo(t)
 	base := run(t, p.dir, "git", "rev-parse", "HEAD")
