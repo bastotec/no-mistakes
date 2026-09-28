@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -152,4 +154,105 @@ func TestRerunRefusalDoesNotSupersedeActiveRun(t *testing.T) {
 		t.Fatalf("caller refs changed: before=%s after=%s", callerRefs, got)
 	}
 	t.Logf("original run_id=%s remains %s; persisted runs=%d; caller and gate refs unchanged", active.ID, active.Status, len(runs))
+}
+
+// TestRerunAcceptsCallerHeadRewrittenWithEquivalentPatches pins the
+// content-identity half of the caller-head comparison: a supported rewrite
+// (here a message-only amend of the selected commit; a rebase behaves the
+// same way) leaves the caller on a different SHA that carries exactly the
+// selected head's changes, so the rerun must resume that selected head
+// instead of refusing on SHA inequality.
+func TestRerunAcceptsCallerHeadRewrittenWithEquivalentPatches(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
+	repo, submitted := setupTestGitRepo(t, p, d, "rerun-equivalent-head-repo")
+	prior, err := d.InsertRun(repo.ID, "main", submitted, submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "rewrite.txt"), []byte("pipeline rewrite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", "rewrite.txt")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "pipeline rewrite")
+	selected := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", "gate", selected+":"+custody.RecoveryRef(prior.ID))
+	if err := d.UpdateRunStatusWithVerifiedHead(prior.ID, types.RunFailed, selected); err != nil {
+		t.Fatal(err)
+	}
+	// A content-preserving rewrite of the selected commit under a new SHA.
+	gitCmd(t, repo.WorkingPath, "commit", "--amend", "-m", "caller-side rewrite of the same change")
+	callerHead := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	if callerHead == selected {
+		t.Fatal("fixture: the caller head must differ from the selected head by SHA")
+	}
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.RerunResult
+	if err := client.Call(ipc.MethodRerun, map[string]string{
+		"repo_id": repo.ID, "branch": "main", "caller_head_sha": callerHead,
+	}, &result); err != nil {
+		t.Fatalf("content-equivalent caller head refused: %v", err)
+	}
+	run := waitForRunTerminalState(t, d, result.RunID)
+	if run.SubmittedHeadSHA == nil || *run.SubmittedHeadSHA != selected || run.Status != types.RunCompleted {
+		t.Fatalf("rerun did not complete at the selected head %s: %+v", selected, run)
+	}
+}
+
+// TestRerunRefusesCallerHeadWithWorkTheSelectionLacks is the true content
+// loss on the rerun side: the clean caller head carries a change the selected
+// head does not, so patch identity cannot account for the caller's lineage and
+// the rerun must refuse exactly as a SHA mismatch does - validating the
+// selection would leave the caller's work unpublished and unvalidated.
+func TestRerunRefusesCallerHeadWithWorkTheSelectionLacks(t *testing.T) {
+	step := &mockPassStep{name: types.StepReview}
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{step} })
+	repo, submitted := setupTestGitRepo(t, p, d, "rerun-lost-work-repo")
+	prior, err := d.InsertRun(repo.ID, "main", submitted, submitted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "rewrite.txt"), []byte("pipeline rewrite\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", "rewrite.txt")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "pipeline rewrite")
+	selected := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	gitCmd(t, repo.WorkingPath, "push", "gate", selected+":"+custody.RecoveryRef(prior.ID))
+	if err := d.UpdateRunStatusWithVerifiedHead(prior.ID, types.RunFailed, selected); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "caller-only.txt"), []byte("caller-only work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", "caller-only.txt")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "caller-only work")
+	callerHead := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.RerunResult
+	err = client.Call(ipc.MethodRerun, map[string]string{
+		"repo_id": repo.ID, "branch": "main", "caller_head_sha": callerHead,
+	}, &result)
+	if err == nil {
+		t.Fatalf("rerun started %s at selected head %s despite caller work %s the selection lacks", result.RunID, selected, callerHead)
+	}
+	for _, want := range []string{selected, callerHead, "no-mistakes axi status", "no-mistakes axi run"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("refusal %q missing %q", err, want)
+		}
+	}
+	runs, err := d.GetRunsByRepo(repo.ID)
+	if err != nil || len(runs) != 1 || step.execCnt.Load() != 0 {
+		t.Fatalf("refused rerun performed work: runs=%d executions=%d err=%v", len(runs), step.execCnt.Load(), err)
+	}
 }

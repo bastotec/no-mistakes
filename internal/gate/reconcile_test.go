@@ -312,6 +312,20 @@ func reconcileGit(t *testing.T, dir string, args ...string) string {
 	return strings.TrimSpace(string(out))
 }
 
+// reconcileGitErr is reconcileGit for the fixture's own negative guards: it
+// reports failure instead of ending the test.
+func reconcileGitErr(t *testing.T, dir string, args ...string) (string, error) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@example.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@example.com",
+	)
+	out, err := cmd.CombinedOutput()
+	return strings.TrimSpace(string(out)), err
+}
+
 func TestReconcileStaleBranchIncludesPatchesHiddenByMergeSimplification(t *testing.T) {
 	t.Parallel()
 	work := initReconcileRepo(t)
@@ -627,5 +641,171 @@ func TestReconcileStaleBranchRefusesPatchesDiscardedByOursMerge(t *testing.T) {
 				t.Fatalf("discarded content was archived for deletion: %s", got)
 			}
 		})
+	}
+}
+
+// TestReconcileStaleBranchAcceptsPatchEquivalentRebasedSeries covers the
+// supported custody shape where a rebase rewrites every private SHA while
+// replaying the same patches: the mirror's old commits are no ancestors of the
+// live head, yet nothing was lost, so the reconciliation must proceed and the
+// live head must enter through an ordinary push.
+func TestReconcileStaleBranchAcceptsPatchEquivalentRebasedSeries(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work := initReconcileRepo(t)
+	base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "shared file")
+	base = reconcileGit(t, work, "rev-parse", "HEAD")
+
+	reconcileGit(t, work, "checkout", "-b", "private", base)
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "first private change")
+	writeReconcileFile(t, work, "extra.txt", "extra\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "second private change")
+	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	reconcileGit(t, work, "checkout", "-b", "live", base)
+	writeReconcileFile(t, work, "upstream.txt", "upstream advance\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "upstream advance")
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "first private change replayed")
+	writeReconcileFile(t, work, "extra.txt", "extra\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "second private change replayed")
+	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	if _, ancErr := reconcileGitErr(t, work, "merge-base", "--is-ancestor", privateHead, liveHead); ancErr == nil {
+		t.Fatal("fixture: private head must not be an ancestor of the rebased live head")
+	}
+
+	gateDir := filepath.Join(t.TempDir(), "gate.git")
+	reconcileGit(t, "", "init", "--bare", gateDir)
+	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+
+	result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err != nil || !result.Reconciled {
+		t.Fatalf("patch-equivalent rebase refused: result=%+v err=%v", result, err)
+	}
+	if got := reconcileGit(t, gateDir, "rev-parse", result.ArchivedTag+"^{commit}"); got != privateHead {
+		t.Fatalf("archive tag points at %s, want %s", got, privateHead)
+	}
+	reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature/reconcile")
+	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != liveHead {
+		t.Fatalf("ordinary push reached %s, want %s", got, liveHead)
+	}
+}
+
+// TestReconcileStaleBranchAcceptsAdoptedPreservedHead covers the post-adoption
+// wall: a supported adopt-preserved-head custody return leaves the private
+// mirror at the pre-adoption lineage while the caller's branch sits on the
+// adopted preserved head with the same changes replayed under new SHAs. Patch
+// identity permits the mirror to accept the adoption without SHA containment.
+func TestReconcileStaleBranchAcceptsAdoptedPreservedHead(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work := initReconcileRepo(t)
+	base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "shared file")
+	base = reconcileGit(t, work, "rev-parse", "HEAD")
+
+	// The pre-adoption lineage the mirror still holds.
+	reconcileGit(t, work, "checkout", "-b", "private", base)
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "operator work")
+	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	// The adopted preserved head replays the same operator change onto the
+	// advanced base.
+	reconcileGit(t, work, "checkout", "-b", "preserved", base)
+	writeReconcileFile(t, work, "upstream.txt", "upstream advance\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "upstream advance")
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "operator work replayed")
+	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	gateDir := filepath.Join(t.TempDir(), "gate.git")
+	reconcileGit(t, "", "init", "--bare", gateDir)
+	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+
+	result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err != nil || !result.Reconciled {
+		t.Fatalf("adopted preserved head refused by the mirror: result=%+v err=%v", result, err)
+	}
+	if got := reconcileGit(t, gateDir, "rev-parse", result.ArchivedTag+"^{commit}"); got != privateHead {
+		t.Fatalf("archive tag points at %s, want %s", got, privateHead)
+	}
+	reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature/reconcile")
+	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != liveHead {
+		t.Fatalf("ordinary push reached %s, want %s", got, liveHead)
+	}
+}
+
+// TestReconcileStaleBranchRefusesContentLossBesideReplayedPatches is the true
+// content loss that must still refuse: one private change is replayed, but a
+// second private change is dropped entirely. Patch identity accounts for the
+// replayed change and names only the genuinely absent commit at risk; nothing
+// is reconciled away.
+func TestReconcileStaleBranchRefusesContentLossBesideReplayedPatches(t *testing.T) {
+	t.Parallel()
+	ctx := context.Background()
+	work := initReconcileRepo(t)
+	base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "shared file")
+	base = reconcileGit(t, work, "rev-parse", "HEAD")
+
+	reconcileGit(t, work, "checkout", "-b", "private", base)
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "replayed private change")
+	writeReconcileFile(t, work, "dropped.txt", "dropped work\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "dropped private change")
+	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+	dropped := privateHead
+
+	reconcileGit(t, work, "checkout", "-b", "live", base)
+	writeReconcileFile(t, work, "upstream.txt", "upstream advance\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "upstream advance")
+	writeReconcileFile(t, work, "feature.txt", "one\ntwo\nthree\nfour-priv\nfive\nsix\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "replayed private change replayed")
+	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	gateDir := filepath.Join(t.TempDir(), "gate.git")
+	reconcileGit(t, "", "init", "--bare", gateDir)
+	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+
+	result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+	if err == nil || result.Reconciled {
+		t.Fatalf("dropped private change reconciled instead of refused: result=%+v err=%v", result, err)
+	}
+	if !strings.Contains(err.Error(), dropped) || !strings.Contains(err.Error(), "dropped private change") {
+		t.Fatalf("refusal did not name the genuinely absent commit: %v", err)
+	}
+	if strings.Contains(err.Error(), "replayed private change replayed") {
+		t.Fatalf("refusal listed a patch-replayed commit as at risk: %v", err)
+	}
+	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
+		t.Fatalf("refusal moved private ref: %s", got)
+	}
+	if got := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); got != "" {
+		t.Fatalf("refusal archived content: %s", got)
 	}
 }

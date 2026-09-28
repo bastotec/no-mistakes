@@ -47,11 +47,15 @@ func ReconcileStaleBranch(ctx context.Context, gateDir, workDir, branch, liveHea
 // through an ordinary push. It mutates no ref: outside the run-owned
 // exception, an unproven private head is refused before publication.
 //
-// Rewritten histories require final tree survival (a mechanical 3-way of the
-// private head with the live head reproduces the live tree). runOwnedHead is
-// a policy exception, not containment evidence: callers must supply only
-// heads the pipeline durably recorded for this run, and fresh submissions
-// must leave it empty. The contract and rationale are owned by
+// Rewritten histories require a content proof: either final tree survival (a
+// mechanical 3-way of the private head with the live head reproduces the live
+// tree) or patch-identity retention (every private-only change is replayed
+// exactly once among the live-only commits), so a supported rewrite - a rebase
+// or an adopted preserved head - reconciles while a genuinely absent change
+// still refuses. runOwnedHead is a policy exception, not containment
+// evidence: callers must supply only heads the pipeline durably recorded for
+// this run, and fresh submissions must leave it empty. The contract and
+// rationale are owned by
 // docs/src/content/docs/concepts/gate-model.md (Private mirror reconciliation).
 func PlanStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch, liveHead, runOwnedHead string) (StaleBranchPlan, error) {
 	return planStaleBranchReconciliation(ctx, gateDir, workDir, branch, liveHead, []string{runOwnedHead}, false)
@@ -266,29 +270,43 @@ func isRunOwnedHead(head string, owned []string) bool {
 // privateCommitsAbsentFromLive names private-only commits whose content is
 // absent from the live head, or the entire private-only range when survival
 // cannot be proven. The private-only range is computed once to bound the
-// at-risk listing; survival itself is settled by the single merge-tree
-// comparison of the two heads, so a rebased live head carrying the whole
-// default branch since the merge base never costs a per-commit scan of that
-// history.
+// at-risk listing; survival itself is settled by the content comparisons of
+// the two heads, so a rebased live head carrying the whole default branch
+// since the merge base never costs a per-commit scan of that history.
 //
-// One proof can clear the private side: final-tree survival - a mechanical
-// 3-way of liveHead with privateHead completes and reproduces the live tree
-// exactly (merging the private head back in would change nothing). Per-file
-// patch identity is not additionally required: patch ids drift across a
-// rebase whose base moved the context lines around a private hunk even when
-// the replay is clean and the final content identical.
+// Two independent content proofs can clear the private side:
 //
-// A mirror whose mechanical 3-way conflicts or differs from the live tree
-// fails closed with the whole private-only range named at risk. A rebase
-// that conflict-resolved the same hunks the live side moved genuinely
-// produces that conflict with no content missing - that staleness is not
-// provable from content, which is why the pipeline refreshes its own mirror
-// after every integration (refreshGateMirrorAfterIntegration) and why
-// publication extends the Decision 41-A exception to the head this run
-// durably recorded as its own last publication (PlanMirrorPublicationReconciliation).
-// A patch-equivalent commit whose content was then discarded (an `-s ours`
-// twin) still fails: its live file matches the merge base, so the change is
+//  1. Final-tree survival - a mechanical 3-way of liveHead with privateHead
+//     completes and reproduces the live tree exactly (merging the private head
+//     back in would change nothing).
+//  2. Patch-identity retention - every private-only commit's stable Git patch
+//     identity is replayed exactly once among the live-only commits
+//     (git.ComparePatchRetention). This is what reconciles the equivalent
+//     changes supported custody operations produce: a rebase or an
+//     adopt-preserved-head rewrites commit SHAs while carrying the same
+//     patches forward.
+//
+// Neither proof is additionally required of the other: patch ids drift when a
+// rebase moves context lines around a private hunk even when the replay is
+// clean and the final content identical (proof 1 covers those). Patch identity
+// itself fails closed - a merge or root commit, an empty commit, a patch-id
+// computation failure, an ambiguous duplicate patch, or a later change to a
+// required patch's footprint declines the comparison - so a genuinely absent
+// change is never reconciled by it. A patch-equivalent commit whose content
+// (an `-s ours` twin) still fails: the discard is a merge commit in the live
+// range, which patch identity declines, and its live file matches the merge
+// base, so the 3-way merge does not reproduce the live tree - the change is
 // provably absent.
+//
+// A mirror whose mechanical 3-way conflicts or differs from the live tree and
+// whose patches are unaccounted for fails closed with the unretained
+// private-only range named at risk. A rebase that conflict-resolved the same
+// hunks the live side moved genuinely produces both failures with no content
+// missing - that staleness is not provable from content, which is why the
+// pipeline refreshes its own mirror after every integration
+// (refreshGateMirrorAfterIntegration) and why publication extends the Decision
+// 41-A exception to the head this run durably recorded as its own last
+// publication (PlanMirrorPublicationReconciliation).
 func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privateHead string) ([]string, error) {
 	privateOnly, err := commitList(ctx, repoDir, "--right-only", liveHead+"..."+privateHead)
 	if err != nil {
@@ -309,6 +327,14 @@ func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privat
 			// content can be absent.
 			return nil, nil
 		}
+	}
+	retention, retentionErr := git.ComparePatchRetention(ctx, repoDir, liveHead, privateHead)
+	if retentionErr == nil && retention.Comparable {
+		// Patch-identity retention: the live history already replays every
+		// private change exactly once, possibly under rewritten SHAs and
+		// superseded by later live work. Only the unaccounted commits are at
+		// risk.
+		return retention.Unretained, nil
 	}
 	return privateOnly, nil
 }

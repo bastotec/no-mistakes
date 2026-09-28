@@ -1042,7 +1042,7 @@ func TestResolveRerunHeadUsesPreservedTerminalHeadInsteadOfStaleGateBranch(t *te
 	run.TerminalHeadVerifiedAt = &now
 	gitCmd(t, work, "push", gate, preserved+":refs/no-mistakes/recover/"+run.ID)
 
-	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run)
+	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1054,7 +1054,7 @@ func TestResolveRerunHeadUsesPreservedTerminalHeadInsteadOfStaleGateBranch(t *te
 	}
 
 	gitCmd(t, gate, "update-ref", custody.RecoveryRef(run.ID), submitted)
-	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run); err == nil {
+	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run, ""); err == nil {
 		t.Fatal("rerun accepted a mismatched recovery ref")
 	}
 	if got := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); got != submitted {
@@ -1063,7 +1063,7 @@ func TestResolveRerunHeadUsesPreservedTerminalHeadInsteadOfStaleGateBranch(t *te
 
 	blob := gitOutput(t, gate, "hash-object", "-w", filepath.Join(work, "file.txt"))
 	gitCmd(t, gate, "update-ref", custody.RecoveryRef(run.ID), blob)
-	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run); err == nil {
+	if _, err := resolveRerunHead(context.Background(), gate, run.Branch, run, ""); err == nil {
 		t.Fatal("rerun accepted an unpeelable recovery ref")
 	}
 	if got := gitOutput(t, gate, "rev-parse", custody.RecoveryRef(run.ID)); got != blob {
@@ -1096,7 +1096,7 @@ func TestResolveRerunHeadUsesAdvancedGateWhenSubmittedHeadWasTerminal(t *testing
 	now := int64(1)
 	run := &db.Run{ID: "run-1", Branch: "feature/recover", Status: types.RunFailed, HeadSHA: submitted, SubmittedHeadSHA: &submitted, TerminalHeadVerifiedAt: &now}
 
-	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run)
+	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1418,4 +1418,129 @@ func logLaunchEvidence(t *testing.T, label string, value any) {
 		t.Fatal(err)
 	}
 	t.Logf("launch-evidence %s: %s", label, encoded)
+}
+
+// TestResolveRerunHeadAdoptedPreservedHeadBeatsStaleGateBranch pins the
+// post-adoption selection: a custody return that adopted the preserved head
+// moves the caller's branch to it while the private mirror stays at the
+// pre-adoption lineage. Rerun must resume the adopted - recorded - head
+// rather than the opposite head of the divergence, and it does so by content
+// identity (the gate head no longer carries the caller's changes), not by
+// SHA containment. An unknown caller keeps the historical gate-head choice.
+func TestResolveRerunHeadAdoptedPreservedHeadBeatsStaleGateBranch(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	gate := filepath.Join(root, "gate.git")
+	gitCmd(t, "", "init", work)
+	gitCmd(t, work, "config", "user.email", "test@test.com")
+	gitCmd(t, work, "config", "user.name", "Test")
+
+	if err := os.WriteFile(filepath.Join(work, "feature.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "feature.txt")
+	gitCmd(t, work, "commit", "-m", "base")
+	base := gitOutput(t, work, "rev-parse", "HEAD")
+
+	// The pre-adoption lineage: the operator's own commit, still held by the
+	// private mirror after the adoption moved the branch past it.
+	if err := os.WriteFile(filepath.Join(work, "work.txt"), []byte("operator work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "work.txt")
+	gitCmd(t, work, "commit", "-m", "operator work")
+	submitted := gitOutput(t, work, "rev-parse", "HEAD")
+
+	gitCmd(t, "", "init", "--bare", gate)
+	gitCmd(t, work, "push", gate, submitted+":refs/heads/feature/recover")
+
+	// The adopted preserved head replays the same operator change under new
+	// SHAs.
+	gitCmd(t, work, "checkout", "-b", "preserved", base)
+	if err := os.WriteFile(filepath.Join(work, "upstream.txt"), []byte("upstream advance\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "upstream.txt")
+	gitCmd(t, work, "commit", "-m", "upstream advance")
+	if err := os.WriteFile(filepath.Join(work, "work.txt"), []byte("operator work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "work.txt")
+	gitCmd(t, work, "commit", "-m", "operator work replayed")
+	preserved := gitOutput(t, work, "rev-parse", "HEAD")
+
+	run := &db.Run{ID: "run-1", Branch: "feature/recover", Status: types.RunFailed, HeadSHA: preserved, SubmittedHeadSHA: &submitted}
+	now := int64(1)
+	run.TerminalHeadVerifiedAt = &now
+	run.CustodyReturnedAt = &now
+	gitCmd(t, work, "push", gate, preserved+":"+custody.RecoveryRef(run.ID))
+
+	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run, preserved)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != preserved {
+		t.Fatalf("rerun head = %s, want adopted preserved head %s (stale gate head %s must not win)", head, preserved, submitted)
+	}
+	if gateHead := gitOutput(t, gate, "rev-parse", "refs/heads/feature/recover"); gateHead != submitted {
+		t.Fatalf("rerun resolution moved gate branch = %s, want %s", gateHead, submitted)
+	}
+
+	// An unknown caller keeps the historical gate-head selection: nothing
+	// proves which lineage the caller sits on.
+	head, err = resolveRerunHead(context.Background(), gate, run.Branch, run, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != submitted {
+		t.Fatalf("caller-less rerun head = %s, want gate head %s", head, submitted)
+	}
+}
+
+// TestResolveRerunHeadKeepLocalCustodyReturnKeepsTheGateHead pins the other
+// custody-return shape: --keep-local compare-and-swaps the gate branch to the
+// caller's kept head and deliberately discards the recorded head's work, so
+// the gate head stays the head rerun resumes even though it retains nothing
+// of the recorded head.
+func TestResolveRerunHeadKeepLocalCustodyReturnKeepsTheGateHead(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	work := filepath.Join(root, "work")
+	gate := filepath.Join(root, "gate.git")
+	gitCmd(t, "", "init", work)
+	gitCmd(t, work, "config", "user.email", "test@test.com")
+	gitCmd(t, work, "config", "user.name", "Test")
+
+	if err := os.WriteFile(filepath.Join(work, "feature.txt"), []byte("base\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "feature.txt")
+	gitCmd(t, work, "commit", "-m", "base")
+	kept := gitOutput(t, work, "rev-parse", "HEAD")
+	gitCmd(t, "", "init", "--bare", gate)
+	gitCmd(t, work, "push", gate, kept+":refs/heads/feature/recover")
+
+	// A recorded pipeline head the keep-local return discarded: new work the
+	// kept head does not carry at all.
+	if err := os.WriteFile(filepath.Join(work, "discarded.txt"), []byte("discarded pipeline work\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "discarded.txt")
+	gitCmd(t, work, "commit", "-m", "discarded pipeline work")
+	preserved := gitOutput(t, work, "rev-parse", "HEAD")
+
+	run := &db.Run{ID: "run-1", Branch: "feature/recover", Status: types.RunFailed, HeadSHA: preserved, SubmittedHeadSHA: &kept}
+	now := int64(1)
+	run.TerminalHeadVerifiedAt = &now
+	run.CustodyReturnedAt = &now
+	gitCmd(t, work, "push", gate, preserved+":"+custody.RecoveryRef(run.ID))
+
+	head, err := resolveRerunHead(context.Background(), gate, run.Branch, run, kept)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != kept {
+		t.Fatalf("rerun head = %s, want keep-local gate head %s", head, kept)
+	}
 }
