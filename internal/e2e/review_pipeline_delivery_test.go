@@ -60,7 +60,7 @@ func writePipelineOwnedPRScenario(t *testing.T) string {
       verdict: go
       artifacts: []
       title: "feat: open PR A"
-      body: "## Summary\nOpen PR A unmerged"
+      body: "## What Changed\n- Open PR A unmerged"
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write scenario: %v", err)

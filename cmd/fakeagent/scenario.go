@@ -117,7 +117,7 @@ func defaultScenario() *Scenario {
 				}},
 				"verdict": "go",
 				"title":   "feat: fakeagent change",
-				"body":    "## Summary\nfakeagent canned PR body",
+				"body":    "## What Changed\n- fakeagent canned PR body",
 			},
 		}},
 	}
@@ -129,10 +129,46 @@ func defaultScenario() *Scenario {
 func (s *Scenario) Match(prompt string) Action {
 	for _, a := range s.Actions {
 		if a.Match == "" || strings.Contains(prompt, a.Match) {
-			return a
+			return a.withPromptDefaults(prompt)
 		}
 	}
 	return Action{Text: "no matching scenario"}
+}
+
+// withPromptDefaults supplies values that a generally-successful canned
+// response cannot know until it sees the prompt. Explicit scenario values
+// always win, so failure scenarios can still exercise each refusal.
+func (a Action) withPromptDefaults(prompt string) Action {
+	if a.Structured == nil || a.StructuredRaw != "" {
+		return a
+	}
+	structured := make(map[string]any, len(a.Structured)+4)
+	for key, value := range a.Structured {
+		structured[key] = value
+	}
+	if strings.Contains(prompt, "unsupported_rules") {
+		if _, ok := structured["unsupported_rules"]; !ok {
+			structured["unsupported_rules"] = []any{}
+		}
+	}
+	const digestPrefix = "- content_sha256: "
+	if start := strings.Index(prompt, digestPrefix); start >= 0 {
+		digest := strings.TrimSpace(strings.SplitN(prompt[start+len(digestPrefix):], "\n", 2)[0])
+		if _, ok := structured["content_sha256"]; !ok {
+			structured["content_sha256"] = digest
+		}
+		if _, ok := structured["english"]; !ok {
+			structured["english"] = true
+		}
+		if _, ok := structured["format_compliant"]; !ok {
+			structured["format_compliant"] = true
+		}
+		if _, ok := structured["issues"]; !ok {
+			structured["issues"] = []any{}
+		}
+	}
+	a.Structured = structured
+	return a
 }
 
 // applyEdits mutates files under CWD (which is the worktree no-mistakes

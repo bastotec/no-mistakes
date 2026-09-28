@@ -46,6 +46,42 @@ func TestActionStructuredJSONUsesRawPayload(t *testing.T) {
 	}
 }
 
+func TestScenarioMatchCompletesSuccessfulPRResponsesFromPrompt(t *testing.T) {
+	scenario := &Scenario{Actions: []Action{{Structured: map[string]any{"title": "fix: example"}}}}
+
+	draft := scenario.Match("Put prose-only rules in unsupported_rules.")
+	if rules, ok := draft.Structured["unsupported_rules"].([]any); !ok || len(rules) != 0 {
+		t.Fatalf("unsupported_rules = %#v, want empty array", draft.Structured["unsupported_rules"])
+	}
+
+	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	verdict := scenario.Match("Validate final content.\n- content_sha256: " + digest + "\n")
+	if verdict.Structured["content_sha256"] != digest || verdict.Structured["english"] != true || verdict.Structured["format_compliant"] != true {
+		t.Fatalf("validation response = %#v, want prompt-bound successful verdict", verdict.Structured)
+	}
+	if issues, ok := verdict.Structured["issues"].([]any); !ok || len(issues) != 0 {
+		t.Fatalf("issues = %#v, want empty array", verdict.Structured["issues"])
+	}
+}
+
+func TestScenarioMatchPreservesExplicitPRFailureResponse(t *testing.T) {
+	scenario := &Scenario{Actions: []Action{{Structured: map[string]any{
+		"content_sha256":    "deliberately-unbound",
+		"english":           false,
+		"format_compliant":  false,
+		"issues":            []any{"not English"},
+		"unsupported_rules": []any{"unsupported policy"},
+	}}}}
+
+	action := scenario.Match("unsupported_rules\n- content_sha256: 0123456789abcdef\n")
+	if action.Structured["content_sha256"] != "deliberately-unbound" || action.Structured["english"] != false || action.Structured["format_compliant"] != false {
+		t.Fatalf("explicit failure response was overwritten: %#v", action.Structured)
+	}
+	if got := action.Structured["unsupported_rules"].([]any); len(got) != 1 {
+		t.Fatalf("unsupported_rules = %#v, want explicit declaration", got)
+	}
+}
+
 func TestApplyActionStagesFiles(t *testing.T) {
 	dir := t.TempDir()
 	gitCmd := func(args ...string) string {
