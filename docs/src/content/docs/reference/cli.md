@@ -332,7 +332,7 @@ The ordinary worktree mutation is either a strict fast-forward of the invoking c
 When a clean local branch and the pipeline-pushed head are diverged but the local unique work is content-equivalent to work already represented in the live pipeline head, `sync` reports `safety: safe_equivalent_advance`, anchors the pre-sync head under `refs/no-mistakes/sync-anchor/<run>`, and moves to the pipeline head with reset semantics.
 Genuine divergence still reports `safety: blocked_diverged` and changes nothing during ordinary synchronization.
 Under `--recover`, the possible worktree mutation is a strict fast-forward to the preserved pipeline head, or an adoption of a preserved head proven to carry every local change, both after relation-specific preservation checks. The bound-archive exception described below never changes the worktree at all.
-When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that an older terminal run's unpublished preserved head is its ancestor, branch synchronization selects the newer binding; missing gate evidence, non-ancestor heads, or different or ambiguous target provenance remain blocked.
+When the local gate branch is exactly at a newer same-branch pushed binding and Git proves that it retains an older terminal run's unpublished changes—either by containing the recorded commits or by an unambiguous ordered replay of their patch identities—branch synchronization selects the newer binding. Missing gate evidence, unretained or ambiguous changes, and different or ambiguous target provenance remain blocked.
 Fork configurations verify the configured fork URL and exact feature ref rather than assuming `origin`.
 Dirty, in-progress, ahead, genuinely diverged, detached, wrong-branch, offline, changed-target, rewritten, deleted, legacy, or retired states fail closed without destructive recovery.
 Run `axi sync` only when structured output offers `next_action.code: sync`; process any blocked state instead of substituting reset, stash, merge, rebase, force, or branch replacement.
@@ -460,14 +460,19 @@ no-mistakes rerun --intent "the revised user goal"
 Starts a new pipeline run from the current gate branch, except when the latest
 terminal run has a verified unpublished head whose custody has not been
 returned: rerun then uses that preserved terminal head even if the gate branch
-is stale. The command refuses instead of falling back to the gate branch when
-the run-specific recovery ref is conflicting, invalid, or the recorded head is
-unavailable. Use `no-mistakes axi status` and reconcile custody first in that
-case.
-When invoked from a clean worktree, `rerun` also refuses if that worktree's HEAD
-differs from the selected gate or preserved head, before starting or superseding
-any run. The error names both full commit SHAs;
-inspect `no-mistakes axi status` and follow its custody guidance, then use
+is stale. After an adopt-preserved-head custody return, a known clean caller
+whose changes the stale gate head does not retain also lets rerun select the
+recorded preserved head instead of resuming the opposite lineage. The command
+refuses instead of falling back to the gate branch when the run-specific
+recovery ref is conflicting, invalid, or the recorded head is unavailable. Use
+`no-mistakes axi status` and reconcile custody first in that case.
+When invoked from a clean worktree, `rerun` also requires the selected gate or
+preserved head to retain every change in that worktree's HEAD. Exact shared
+history satisfies the check, as does an unambiguous ordered replay under new
+commit SHAs proven by Git patch identity. New, missing, reversed, structurally
+ambiguous, or otherwise unprovable changes refuse before starting or
+superseding any run. The error names both full commit SHAs; inspect
+`no-mistakes axi status` and follow its custody guidance, then use
 `no-mistakes axi run` to submit local commits. The refusal leaves both branches
 unchanged; rerun never replaces its selected head with the caller's head.
 The same check applies to `axi run`'s rerun fallback after an up-to-date push.

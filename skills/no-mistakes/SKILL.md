@@ -245,14 +245,19 @@ Run the pipeline and decide on its findings as they come up:
      never mid-run to circumvent a gate. Do not leave the user at a `failed`
      outcome without either retrying or explaining what blocks it.
 
-`no-mistakes rerun` keeps its existing head selection: the gate head, or the
-latest terminal run's verified unpublished preserved head while custody remains
-outstanding. If a known clean caller `HEAD` differs from that selected head,
-it refuses before starting or superseding any run and reports both full SHAs.
-It never substitutes the caller head or moves either branch to make them match.
-On refusal, inspect `no-mistakes axi status` and follow the custody guidance
-below. Dirty callers and callers without clean-head evidence retain existing
-selection behavior.
+`no-mistakes rerun` normally selects the gate head, or the latest
+terminal run's verified unpublished preserved head while custody remains
+outstanding. After an adopt-preserved-head custody return, it also selects that
+recorded preserved head when a known clean caller's changes are not retained by
+the stale gate head, avoiding the opposite lineage. A known clean caller may
+differ from the selection only when Git proves that the selected head retains
+every caller change, by shared history or by unambiguous patch identity under
+rewritten SHAs; otherwise rerun refuses before starting or superseding any run
+and reports both full SHAs. It never substitutes the caller head or moves either
+branch to make them match. On refusal, inspect
+`no-mistakes axi status` and follow the custody guidance below. Dirty
+callers and callers without clean-head evidence retain existing selection
+behavior.
 
 Before any post-pipeline local commit or fresh run, read the structured `branch_sync` object returned by AXI home, status, or a drive result.
 Only when its `next_action.code` is `sync`, run `no-mistakes axi sync` first.
