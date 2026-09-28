@@ -110,6 +110,13 @@ func wrapPRAppendix(appendix string) string {
 	return fmt.Sprintf("%s%x -->\n%s\n%s", prAppendixStart, sha256.Sum256([]byte(appendix)), appendix, prAppendixEnd)
 }
 
+func prTitleMatches(provider scm.Provider, published, stored string) bool {
+	if provider != scm.ProviderGitLab {
+		return stored == published
+	}
+	return scm.StripDraftTitleMarker(stored) == scm.StripDraftTitleMarker(published)
+}
+
 // composeOwnedPRContent uses the same publication redaction owner as ordinary
 // drafting, BEFORE stamping the byte-integrity guard. No clamp or heading-based
 // stripper may run here: if author text and all recorded evidence cannot fit,
@@ -149,7 +156,10 @@ func validateOwnedPRBudget(body string, bodyLimit int) error {
 // This is NOT compare-and-swap: providers expose full-body writes. Detected
 // pre-write edits are merged from their latest version (bounded); a write error
 // or post-write divergence fails without replaying a potentially applied write.
-func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initial scm.PRContent, title, emptyNarrative, appendix string, bodyLimit int) error {
+// The validate callback receives the narrative actually composed into the
+// candidate, so a concurrent author edit that displaces a drafted narrative
+// also removes it from the verdict scope.
+func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initial scm.PRContent, title, emptyNarrative, appendix string, bodyLimit int, validate func(prContent, string) error) error {
 	reader, ok := host.(scm.PRContentReader)
 	if !ok {
 		return fmt.Errorf("provider cannot read PR content; author-safe template updates are unsupported")
@@ -160,8 +170,10 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return err
 		}
+		appliedNarrative := ""
 		if current.Body == "" && !parts.managed {
 			parts.before = emptyNarrative
+			appliedNarrative = emptyNarrative
 		}
 		content, err := composeOwnedPRContent(parts, title, appendix, bodyLimit)
 		if err != nil {
@@ -171,12 +183,23 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return fmt.Errorf("re-read PR before template update: %w", err)
 		}
-		if latest.Body != current.Body {
+		if latest.Body != current.Body || latest.Title != current.Title {
 			current = latest
 			continue
 		}
+		expectedTitle := content.Title
+		if expectedTitle == "" {
+			expectedTitle = current.Title
+		}
+		if validate != nil {
+			candidate := content
+			candidate.Title = expectedTitle
+			if err := validate(candidate, appliedNarrative); err != nil {
+				return err
+			}
+		}
 		if content.Body != current.Body || content.Title != "" {
-			if _, err := host.UpdatePR(sctx.Ctx, pr, scm.PRContent(content)); err != nil {
+			if _, err := host.UpdatePR(sctx.Ctx, pr, content.scmContent()); err != nil {
 				return fmt.Errorf("update templated PR: %w", err)
 			}
 		}
@@ -184,8 +207,8 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 		if err != nil {
 			return fmt.Errorf("verify templated PR update: %w", err)
 		}
-		if verified.Body != content.Body {
-			return fmt.Errorf("PR body changed or update did not settle; refusing to report successful publication")
+		if verified.Body != content.Body || !prTitleMatches(host.Provider(), expectedTitle, verified.Title) {
+			return fmt.Errorf("PR title or body changed or update did not settle; refusing to report successful publication")
 		}
 		return nil
 	}

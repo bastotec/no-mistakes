@@ -10,36 +10,119 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
 
-func TestPRTemplateStructureRequiresH1TextAndOrder(t *testing.T) {
+func TestPRTemplateStructureRequiresHeadingLevelsAndOrder(t *testing.T) {
 	t.Parallel()
 	template := "# Summary\n## Details\n# Validation\n"
 	for name, body := range map[string]string{
-		"missing":   "# Summary\nDetails",
-		"changed":   "# Summary\n# Tests",
-		"reordered": "# Validation\n# Summary",
-		"demoted":   "## Summary\n# Validation",
-		"fenced":    "```markdown\n# Summary\n# Validation\n```",
+		"missing":          "# Summary\nDetails",
+		"changed":          "# Summary\n# Tests",
+		"wrong identities": "# Overview\n## Rollout\n# Validation",
+		"reordered":        "# Validation\n# Summary",
+		"demoted":          "## Summary\n# Validation",
+		"fenced":           "```markdown\n# Summary\n# Validation\n```",
 	} {
 		t.Run(name, func(t *testing.T) {
-			if err := validateTemplateStructure(template, body); err == nil {
+			if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err == nil {
 				t.Fatal("invalid H1 structure accepted")
 			}
 		})
 	}
-	if err := validateTemplateStructure(template, "# Extra\n# Summary\nFilled.\n# Validation\nDone."); err != nil {
-		t.Fatal(err)
+	body := "# Summary\nFilled.\n## Reviewer Notes\nAuthor addition.\n## Details\n# Validation\nDone."
+	if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
+		t.Fatalf("additional author heading rejected: %v", err)
 	}
 }
 
-func TestPRTemplateStructureRecognizesOnlyTopLevelATXH1(t *testing.T) {
+func TestPRTemplateStructureIgnoresHTMLComments(t *testing.T) {
+	t.Parallel()
+	text := "# First\n<!--\n## Hidden\n```markdown\n# Hidden in a commented fence\n```\n-->\n## Second\n<!-- ## Hidden inline -->\n<!-- open\n### Hidden before close\n-->\n### Third\n<!-- unclosed\n#### Hidden forever\n"
+	want := []string{"# First", "## Second", "### Third"}
+	if got := templateStructureLines(text); !reflect.DeepEqual(got, want) {
+		t.Fatalf("visible headings = %q, want %q", got, want)
+	}
+
+	template := "## Required\n<!-- ## Optional example -->\n"
+	if err := validateTranslatedTemplateStructure(template, "## Required\nFilled.\n", identityHeadingTranslations(template)); err != nil {
+		t.Fatalf("commented-only extra heading became required: %v", err)
+	}
+}
+
+func TestPRTemplateStructurePreservesInlineCommentHeadingIdentity(t *testing.T) {
+	t.Parallel()
+	template := "## Summary <!-- keep concise -->\n<!--\n### Hidden example\n-->\n## Testing\n"
+	body := "## Summary <!-- keep concise -->\n\nFixed the issue.\n\n## Testing\n\nPassed.\n"
+	translations := identityHeadingTranslations(template)
+
+	if got := translations[0].Source; got != "## Summary <!-- keep concise -->" {
+		t.Fatalf("source heading = %q", got)
+	}
+	if err := validateTranslatedTemplateStructure(template, body, translations); err != nil {
+		t.Fatalf("inline-comment heading rejected: %v", err)
+	}
+	required := requiredTemplateHeadingTranslations(template, translations)
+	if len(required) != 2 || required[0] != translations[0] {
+		t.Fatalf("required headings = %#v", required)
+	}
+	if err := validateFinalTemplateHeadings(body, required); err != nil {
+		t.Fatalf("final heading validation rejected inline comment: %v", err)
+	}
+}
+
+func TestPRTemplateDraftOmitsCommentedHeadings(t *testing.T) {
+	t.Parallel()
+	template := "# Overview\n<!--\n## Example rollout\nDo not publish this example.\n-->\n## Testing\n"
+	body := "# Overview\n\nFilled summary.\n\n## Testing\n\nPassed.\n"
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(templateDraft("feat: fill template", body, template))
+		return &agent.Result{Output: data}, nil
+	}
+
+	got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, template)
+	if err != nil {
+		t.Fatalf("draft without commented heading rejected: %v", err)
+	}
+	if got.Body != body || strings.Contains(got.Body, "Example rollout") {
+		t.Fatalf("commented heading was published: %q", got.Body)
+	}
+}
+
+func TestPRTemplateStructureRecognizesATXHeadings(t *testing.T) {
 	t.Parallel()
 	text := "# One\n  # Two ###\n#\n#\tTabbed\n## Two hashes\n### Three hashes\n#hashtag\n    # Indented code\n\t# Tab code\n> # Quoted\n- # List\nSetext\n======\n```markdown\n# Fenced\n```\n~~~\n# Tilde fenced\n~~~\n"
-	want := []string{"# One", "# Two ###", "#", "#\tTabbed"}
+	want := []string{"# One", "  # Two ###", "#", "#\tTabbed", "## Two hashes", "### Three hashes"}
 	if got := templateStructureLines(text); !reflect.DeepEqual(got, want) {
 		t.Fatalf("H1s = %q, want %q", got, want)
 	}
-	if err := validateTemplateStructure("## Optional\n### Nested\n- [ ] Choice\n```\n# Example\n```", "Narrative only."); err != nil {
-		t.Fatalf("no-H1 template rejected: %v", err)
+	if err := validateTranslatedTemplateStructure("## Optional\n### Nested\n- [ ] Choice\n```\n# Example\n```", "Narrative only.", identityHeadingTranslations("## Optional\n### Nested")); err == nil {
+		t.Fatal("required lower-level headings were omitted")
+	}
+}
+
+// A faithful agent echoes the template heading exactly as written, whitespace
+// included, so the guard must compare the trimmed forms it derived its own
+// structure lines from - not demand the agent normalize them.
+func TestPRTemplateStructureAcceptsVerbatimWhitespaceHeadings(t *testing.T) {
+	t.Parallel()
+	for name, template := range map[string]string{
+		"trailing space": "# Overview \n\nDescribe the change.\n",
+		"leading spaces": "   ## Summary\n\nDescribe the change.\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			var translations []templateHeadingTranslation
+			var bodyLines []string
+			for _, raw := range strings.Split(template, "\n") {
+				if !prTemplateHeadingLine.MatchString(raw) {
+					continue
+				}
+				translations = append(translations, templateHeadingTranslation{Source: raw, English: raw})
+				bodyLines = append(bodyLines, raw)
+			}
+			body := strings.Join(bodyLines, "\n") + "\n\nFilled narrative.\n"
+			if err := validateTranslatedTemplateStructure(template, body, translations); err != nil {
+				t.Fatalf("verbatim whitespace heading refused: %v", err)
+			}
+		})
 	}
 }
 
@@ -51,23 +134,23 @@ func TestPRTemplateDraftAllowsSubordinateCompletion(t *testing.T) {
 		{"Chatwoot", "# Pull Request Template\n## Description\n## Type of change\nPlease delete options that are not relevant.\n- [ ] Bug fix\n- [ ] New feature\n## Checklist:\n- [ ] Maintainer approval",
 			"# Pull Request Template\n## Description\nFix the helper.\n## Type of change\n- [x] Bug fix\n## Checklist:\n- [ ] Maintainer approval"},
 		{"Forem", "## What type of PR is this?\n- [ ] Bug Fix\n## Added/updated tests?\n- [ ] Yes\n- [ ] No, and this is why: _please replace this line with details on why tests\n      have not been included_\n### UI accessibility checklist\n- [ ] Keyboard operation\n## [optional] GIF",
-			"## What type of PR is this?\n- [x] Bug Fix\n## Added/updated tests?\n- [x] No, and this is why: this is a prose-only correction."},
+			"## What type of PR is this?\n- [x] Bug Fix\n## Added/updated tests?\n- [x] No, and this is why: this is a prose-only correction.\n### UI accessibility checklist\nNot applicable to this prose-only change.\n## [optional] GIF\nNot applicable."},
 		{"OpenProject", "# Ticket\n# What are you trying to accomplish?\n## Screenshots\n<!-- Provide before/after screenshots for visual changes; otherwise, remove this section -->\n# What approach did you choose and why?\n# Merge checklist\n- [ ] Tested major browsers",
-			"# Ticket\nNo ticket supplied.\n# What are you trying to accomplish?\nCorrect prose; no visual changes.\n# What approach did you choose and why?\nEdit only the incorrect sentence.\n# Merge checklist\n- [ ] Tested major browsers"},
+			"# Ticket\nNo ticket supplied.\n# What are you trying to accomplish?\nCorrect prose.\n## Screenshots\nNot applicable; there are no visual changes.\n# What approach did you choose and why?\nEdit only the incorrect sentence.\n# Merge checklist\n- [ ] Tested major browsers"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sctx, ag, _ := templateTestContext(t)
 			ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-				for _, rule := range []string{"Only these H1 headings are structurally required", "Make a best effort", "fill all applicable sections", "falsely claim human signoff", "mark human approval checkboxes complete"} {
+				for _, rule := range []string{"every ATX template heading", "Make a best effort", "fill all applicable sections", "falsely claim human signoff", "mark human approval checkboxes complete"} {
 					if !strings.Contains(opts.Prompt, rule) {
 						t.Errorf("missing drafting rule %q", rule)
 					}
 				}
-				data, _ := json.Marshal(prContent{Title: "fix: correct narrative", Body: tc.body})
+				data, _ := json.Marshal(templateDraft("fix: correct narrative", tc.body, tc.template))
 				return &agent.Result{Output: data}, nil
 			}
-			got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, tc.template)
+			got, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, tc.template)
 			if err != nil || got.Body != tc.body {
 				t.Fatalf("draft = %+v, error %v", got, err)
 			}

@@ -2,13 +2,17 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
 )
 
 func ownedFixture(t *testing.T) (prContent, string) {
@@ -106,13 +110,17 @@ func TestPROwnershipPublicationRedactionPrecedesDigest(t *testing.T) {
 
 type ownershipRaceHost struct {
 	scm.Host
-	body       string
-	reads      int
-	writes     int
-	read       func(*ownershipRaceHost) error
-	writeError error
-	afterWrite string
+	body            string
+	title           string
+	reads           int
+	writes          int
+	read            func(*ownershipRaceHost) error
+	writeError      error
+	afterWrite      string
+	afterWriteTitle string
 }
+
+func (h *ownershipRaceHost) Provider() scm.Provider { return scm.ProviderGitHub }
 
 func (h *ownershipRaceHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
 	h.reads++
@@ -121,7 +129,11 @@ func (h *ownershipRaceHost) GetPRContent(context.Context, *scm.PR) (scm.PRConten
 			return scm.PRContent{}, err
 		}
 	}
-	return scm.PRContent{Title: "Author title", Body: h.body}, nil
+	title := h.title
+	if title == "" {
+		title = "Author title"
+	}
+	return scm.PRContent{Title: title, Body: h.body}, nil
 }
 
 func (h *ownershipRaceHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
@@ -133,6 +145,9 @@ func (h *ownershipRaceHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.
 		return nil, h.writeError
 	}
 	h.body = content.Body + h.afterWrite
+	if h.afterWriteTitle != "" {
+		h.title = h.afterWriteTitle
+	}
 	return pr, nil
 }
 
@@ -147,7 +162,7 @@ func TestPROwnershipUpdateMergesLatestAuthorEdits(t *testing.T) {
 		return nil
 	}}
 	sctx := &pipeline.StepContext{Ctx: context.Background()}
-	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent(content), "", "", appendix+"\nNew recorded fact.", 0); err != nil {
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, content.scmContent(), "", "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
 		t.Fatal(err)
 	}
 	if host.writes != 1 || !strings.Contains(host.body, "Human updated checkbox label") || !strings.HasSuffix(host.body, "Fixes test/other#9") || !strings.Contains(host.body, "New recorded fact.") {
@@ -158,7 +173,7 @@ func TestPROwnershipUpdateMergesLatestAuthorEdits(t *testing.T) {
 func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 	t.Parallel()
 	content, appendix := ownedFixture(t)
-	for _, mode := range []string{"read-error", "write-error", "verify-error", "verify-divergence", "keeps-changing", "edited-owned", "legacy", "size"} {
+	for _, mode := range []string{"read-error", "write-error", "verify-error", "verify-divergence", "verify-title-divergence", "keeps-changing", "edited-owned", "legacy", "size"} {
 		t.Run(mode, func(t *testing.T) {
 			host := &ownershipRaceHost{body: content.Body}
 			initial := content
@@ -180,6 +195,9 @@ func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 			case "verify-divergence":
 				host.afterWrite = "\nConcurrent author note"
 				wantWrites = 1
+			case "verify-title-divergence":
+				host.afterWriteTitle = "Título alterado"
+				wantWrites = 1
 			case "keeps-changing":
 				host.read = func(h *ownershipRaceHost) error { h.body += fmt.Sprintf("\nAuthor edit %d", h.reads); return nil }
 			case "edited-owned":
@@ -189,9 +207,103 @@ func TestPROwnershipUpdateFailuresNeverReadAsSuccess(t *testing.T) {
 			case "size":
 				initial.Body = strings.Repeat("Author content\n", maxPullRequestBodyBytes)
 			}
-			err := updateOwnedPR(&pipeline.StepContext{Ctx: context.Background()}, host, &scm.PR{Number: "42"}, scm.PRContent(initial), "", "", appendix+"\nNew fact", 0)
+			err := updateOwnedPR(&pipeline.StepContext{Ctx: context.Background()}, host, &scm.PR{Number: "42"}, initial.scmContent(), "", "", appendix+"\nNew fact", 0, nil)
 			if err == nil || host.writes != wantWrites {
 				t.Fatalf("err=%v, writes=%d want %d", err, host.writes, wantWrites)
+			}
+		})
+	}
+}
+
+type draftTitleStoreHost struct {
+	scm.Host
+	provider scm.Provider
+	title    string
+	body     string
+}
+
+func (h *draftTitleStoreHost) Provider() scm.Provider { return h.provider }
+
+func (h *draftTitleStoreHost) GetPRContent(context.Context, *scm.PR) (scm.PRContent, error) {
+	return scm.PRContent{Title: h.title, Body: h.body}, nil
+}
+
+func (h *draftTitleStoreHost) UpdatePR(_ context.Context, pr *scm.PR, content scm.PRContent) (*scm.PR, error) {
+	h.body = content.Body
+	if strings.TrimSpace(content.Title) != "" {
+		h.title = "Draft: " + content.Title
+	}
+	return pr, nil
+}
+
+func TestUpdateOwnedPRAcceptsGitLabDraftTitleMarker(t *testing.T) {
+	t.Parallel()
+	content, appendix := ownedFixture(t)
+	host := &draftTitleStoreHost{provider: scm.ProviderGitLab, title: "Draft: " + content.Title, body: content.Body}
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	if err := updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, content.scmContent(), content.Title, "", appendix+"\nNew recorded fact.", 0, nil); err != nil {
+		t.Fatalf("stored draft title marker reported divergence after the write: %v", err)
+	}
+	if !strings.Contains(host.body, "New recorded fact.") || host.title != "Draft: "+content.Title {
+		t.Fatalf("draft title update did not settle: title=%q body=%q", host.title, host.body)
+	}
+}
+
+func TestPRTitleMatchesDraftMarkersOnlyForGitLab(t *testing.T) {
+	t.Parallel()
+	const title = "fix: repair cache"
+	for _, provider := range []scm.Provider{
+		scm.ProviderGitHub,
+		scm.ProviderAzureDevOps,
+		scm.ProviderBitbucket,
+		scm.ProviderGitea,
+		scm.ProviderForgejo,
+	} {
+		if prTitleMatches(provider, title, "Draft: "+title) {
+			t.Errorf("%s accepted a GitLab title marker", provider)
+		}
+	}
+	if !prTitleMatches(scm.ProviderGitLab, title, "Draft: "+title) {
+		t.Fatal("GitLab draft title marker reported a divergence")
+	}
+}
+
+// A draft marker written by GitLab's UpdatePR (which re-applies the live MR's
+// marker onto the written title) must round-trip through the readback
+// comparison inside updateOwnedPR for every marker form a forge can store.
+func TestGitLabDraftMarkerWrittenByUpdatePRRoundTripsReadbackComparison(t *testing.T) {
+	t.Parallel()
+	content, appendix := ownedFixture(t)
+	for _, marker := range []string{"Draft: ", "[Draft] ", "(draft) "} {
+		t.Run(strings.TrimSpace(marker), func(t *testing.T) {
+			storedTitle := marker + content.Title
+			viewJSON, err := json.Marshal(map[string]any{
+				"iid":         9,
+				"title":       storedTitle,
+				"description": content.Body,
+				"web_url":     "https://gitlab.com/test/repo/-/merge_requests/9",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			env, logFile := fakeGlab(t, string(viewJSON))
+			sctx := &pipeline.StepContext{Ctx: context.Background(), Env: env, WorkDir: t.TempDir()}
+			cmdFactory := func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				return stepCmdContext(sctx, ctx, name, args...)
+			}
+			host := gitlab.New(cmdFactory, func() bool { return true }, "gitlab.com", "test/repo")
+			pr := &scm.PR{Number: "9", URL: "https://gitlab.com/test/repo/-/merge_requests/9"}
+			initial := scm.PRContent{Title: storedTitle, Body: content.Body}
+			if err := updateOwnedPR(sctx, host, pr, initial, content.Title, "", appendix, 0, nil); err != nil {
+				t.Fatalf("marker written by UpdatePR reported readback divergence: %v", err)
+			}
+			logged, err := os.ReadFile(logFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := "mr update 9 --title Draft: " + content.Title + " --description"
+			if !strings.Contains(string(logged), want) {
+				t.Fatalf("UpdatePR did not re-apply the draft marker %q:\n%s", want, logged)
 			}
 		})
 	}

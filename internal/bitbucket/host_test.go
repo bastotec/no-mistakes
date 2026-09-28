@@ -1,10 +1,41 @@
 package bitbucket
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
+
+func TestFindPRReportsDestinationBranchAsBaseBranch(t *testing.T) {
+	repo := RepoRef{Workspace: "test", RepoSlug: "repo"}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/2.0/repositories/test/repo/pullrequests" {
+			t.Errorf("path = %q, want pull request list", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"values":[{"id":42,"destination":{"branch":{"name":"develop"}},"links":{"html":{"href":"https://bitbucket.org/test/repo/pull-requests/42"}}}]}`)
+	}))
+	defer server.Close()
+
+	client := &Client{
+		baseURL:    server.URL,
+		email:      "test@example.com",
+		token:      "token",
+		httpClient: &http.Client{Timeout: time.Second},
+	}
+	pr, err := NewHost(client, repo, false).FindPR(context.Background(), "feature", "")
+	if err != nil {
+		t.Fatalf("FindPR() error = %v", err)
+	}
+	if pr == nil || pr.BaseBranch != "develop" {
+		t.Fatalf("FindPR() = %+v, want the live destination branch develop as BaseBranch", pr)
+	}
+}
 
 func TestNormalizePRState(t *testing.T) {
 	tests := []struct {

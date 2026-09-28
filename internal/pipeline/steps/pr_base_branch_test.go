@@ -55,6 +55,16 @@ func TestEffectivePRBaseBranch_DefaultBranchWhenUnset(t *testing.T) {
 	}
 }
 
+func TestPublicationPRBaseBranchPrefersExistingPRForgeBase(t *testing.T) {
+	t.Parallel()
+	sctx := &pipeline.StepContext{Ctx: context.Background()}
+	existing := &scm.PR{Number: "7", BaseBranch: "develop"}
+	got, err := publicationPRBaseBranch(sctx, &ownershipRaceHost{}, existing, "main")
+	if err != nil || got != "develop" {
+		t.Fatalf("publicationPRBaseBranch() = (%q, %v), want the existing PR's live forge base develop", got, err)
+	}
+}
+
 func TestValidateRunPRBaseBranchName_RejectsInvalidBranch(t *testing.T) {
 	t.Parallel()
 	_, err := ValidateRunPRBaseBranchName("bad..branch")
@@ -66,6 +76,7 @@ func TestValidateRunPRBaseBranchName_RejectsInvalidBranch(t *testing.T) {
 func TestPRStep_UsesPerRunBaseBranch(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "epic/feature", baseSHA)
 	env, logFile := fakeGH(t, "")
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
@@ -90,6 +101,7 @@ func TestPRStep_UsesPerRunBaseBranch(t *testing.T) {
 func TestPRStep_PerRunBaseBranchOverridesRepoConfig(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "epic/feature", baseSHA)
 	env, logFile := fakeGH(t, "")
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
@@ -114,6 +126,7 @@ func TestPRStep_PerRunBaseBranchOverridesRepoConfig(t *testing.T) {
 func TestPRStep_RetargetsExistingPRWhenPerRunBaseDiffers(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "epic/feature", baseSHA)
 	env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/42", "develop")
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
@@ -146,6 +159,7 @@ func TestPRStep_RetargetsExistingPRWhenPerRunBaseDiffers(t *testing.T) {
 func TestPRStep_RepoConfigChangeDoesNotRetargetExistingPR(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "develop", baseSHA)
 	env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/42", "develop")
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
@@ -232,6 +246,7 @@ func TestRetargetExistingPRIfNeeded_MatchingIdentityRetargets(t *testing.T) {
 func TestPRStep_PrefersPersistedPRWhenFindPRReturnsSibling(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "branch", "epic/feature", baseSHA)
 	env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/99", "develop")
 
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})

@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -114,6 +115,17 @@ func TestCIGateReconciliationPreservesOpenErrorAndUnknownStates(t *testing.T) {
 func setupCIGateReconcileTest(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo, string, string, []string) {
 	t.Helper()
 	dir, baseSHA, headSHA := setupGitRepo(t)
+	// The PR step pins the live PR target branch before reading its format
+	// policy, so the reconcile executor drives a real fetch of the default
+	// branch. Give repositories that lack an explicitly configured origin a
+	// local one - the same hermetic arrangement newTestContext grants direct
+	// step tests - so that fetch stays inside the test repo instead of
+	// reaching the placeholder github.com/test/repo URL.
+	if out, err := exec.Command(testGitExecutable, "-C", dir, "remote", "get-url", "origin").CombinedOutput(); err != nil {
+		if addErr := exec.Command(testGitExecutable, "-C", dir, "remote", "add", "origin", dir).Run(); addErr != nil {
+			t.Fatalf("add hermetic test origin: %v: %s", addErr, out)
+		}
+	}
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)

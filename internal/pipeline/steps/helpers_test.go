@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps/internal/stepstest"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -26,22 +28,76 @@ import (
 var testGitExecutable, testGitErr = testgit.RealGit()
 
 type mockAgent struct {
-	name  string
-	runFn func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
-	calls []agent.RunOpts
+	name         string
+	runFn        func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
+	validationFn func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
+	calls        []agent.RunOpts
 }
 
 func (m *mockAgent) Name() string { return m.name }
 
+func validationDigestFromPrompt(prompt string) (string, error) {
+	const prefix = "- content_sha256: "
+	start := strings.Index(prompt, prefix)
+	if start < 0 {
+		return "", fmt.Errorf("validation prompt omitted content digest")
+	}
+	return strings.TrimSpace(strings.SplitN(prompt[start+len(prefix):], "\n", 2)[0]), nil
+}
+
+func addEmptyUnsupportedRules(result *agent.Result, schema json.RawMessage) *agent.Result {
+	if result == nil || (string(schema) != string(prContentSchema) && string(schema) != string(templatePRContentSchema)) {
+		return result
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(result.Output, &object) != nil {
+		return result
+	}
+	if _, ok := object["unsupported_rules"]; ok {
+		return result
+	}
+	object["unsupported_rules"] = json.RawMessage(`[]`)
+	output, _ := json.Marshal(object)
+	copy := *result
+	copy.Output = output
+	return &copy
+}
+
 func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if opts.Purpose == prContentValidationPurpose {
+		if m.validationFn != nil {
+			return m.validationFn(ctx, opts)
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}})
+		return &agent.Result{Output: payload}, nil
+	}
 	m.calls = append(m.calls, opts)
 	if m.runFn != nil {
-		return m.runFn(ctx, opts)
+		result, err := m.runFn(ctx, opts)
+		return addEmptyUnsupportedRules(result, opts.JSONSchema), err
+	}
+	if string(opts.JSONSchema) == string(prContentSchema) {
+		return &agent.Result{Output: []byte(`{"title":"chore: update pull request","body":"## What Changed\n\n- update the pull request","unsupported_rules":[]}`)}, nil
 	}
 	return &agent.Result{}, nil
 }
 
 func (m *mockAgent) Close() error { return nil }
+
+// buildPRContentForTest resolves the PR-format policy exactly the way
+// Execute does (once, from the publication base branch) so tests can draft
+// content without running the whole step.
+func (s *PRStep) buildPRContentForTest(sctx *pipeline.StepContext, branch, baseBranch, baseSHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
+	policySHA, err := resolvePRPolicySHA(sctx.Ctx, sctx, baseBranch)
+	if err != nil {
+		return prContent{}, err
+	}
+	return s.buildPRContentWithPolicy(sctx, branch, baseBranch, baseSHA, policySHA, provider, bodyLimit)
+}
 
 func gitCmd(t *testing.T, dir string, args ...string) string {
 	t.Helper()

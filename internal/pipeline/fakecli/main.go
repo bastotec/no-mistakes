@@ -182,7 +182,16 @@ func fakeGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {
-		if strings.Contains(strings.Join(args, " "), "--json state") {
+		joined := strings.Join(args, " ")
+		if strings.Contains(joined, "--json baseRefName") {
+			base := os.Getenv("FAKE_CLI_PR_BASE")
+			if base == "" {
+				base = "main"
+			}
+			fmt.Println(base)
+			os.Exit(0)
+		}
+		if strings.Contains(joined, "--json state") {
 			state := os.Getenv("FAKE_CLI_PR_STATE")
 			if state == "" {
 				state = "OPEN"

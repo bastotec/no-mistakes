@@ -27,10 +27,11 @@ type RepoRef struct {
 }
 
 type PullRequest struct {
-	ID               int
-	URL              string
-	State            string
-	SourceCommitHash string
+	ID                int
+	URL               string
+	State             string
+	SourceCommitHash  string
+	DestinationBranch string
 }
 
 type CommitStatus struct {
@@ -337,6 +338,11 @@ type bitbucketPullRequest struct {
 			Hash string `json:"hash"`
 		} `json:"commit"`
 	} `json:"source"`
+	Destination struct {
+		Branch struct {
+			Name string `json:"name"`
+		} `json:"branch"`
+	} `json:"destination"`
 	Links struct {
 		HTML struct {
 			Href string `json:"href"`
@@ -346,10 +352,11 @@ type bitbucketPullRequest struct {
 
 func (pr bitbucketPullRequest) toPullRequest() *PullRequest {
 	return &PullRequest{
-		ID:               pr.ID,
-		URL:              strings.TrimSpace(pr.Links.HTML.Href),
-		State:            strings.TrimSpace(pr.State),
-		SourceCommitHash: strings.TrimSpace(pr.Source.Commit.Hash),
+		ID:                pr.ID,
+		URL:               strings.TrimSpace(pr.Links.HTML.Href),
+		State:             strings.TrimSpace(pr.State),
+		SourceCommitHash:  strings.TrimSpace(pr.Source.Commit.Hash),
+		DestinationBranch: strings.TrimSpace(pr.Destination.Branch.Name),
 	}
 }
 

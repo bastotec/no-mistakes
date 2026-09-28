@@ -19,9 +19,27 @@ import (
 const testPRTemplate = "# Overview\n\n<!-- Describe the final change. -->\n\n## Testing\n\n- [ ] Maintainer approves rollout\n"
 const filledPRTemplate = "# Overview\n\nAdd a Bar helper.\n\n## Testing\n\n- [ ] Maintainer approves rollout\n"
 
+func identityHeadingTranslations(template string) []templateHeadingTranslation {
+	lines := templateStructureLines(template)
+	translations := make([]templateHeadingTranslation, len(lines))
+	for i, line := range lines {
+		translations[i] = templateHeadingTranslation{Source: line, English: line}
+	}
+	return translations
+}
+
+func templateDraft(title, body, template string) templatePRContent {
+	return templatePRContent{
+		prContent:           prContent{Title: title, Body: body},
+		HeadingTranslations: identityHeadingTranslations(template),
+		UnsupportedRules:    []string{},
+	}
+}
+
 func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, string) {
 	t.Helper()
 	dir, base, _ := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
 	name := ".github/pull_request_template.md"
 	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
 		t.Fatal(err)
@@ -32,8 +50,12 @@ func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, strin
 	gitCmd(t, dir, "add", ".github")
 	gitCmd(t, dir, "commit", "-m", "trusted template")
 	trusted := gitCmd(t, dir, "rev-parse", "HEAD")
-	// Neither the current file nor a later committed pushed version may supply
-	// the PR agent's template. This also models config recovery with a pin.
+	gitCmd(t, dir, "checkout", "feature")
+	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// Neither the worktree file nor a later pushed version may supply the PR
+	// agent's template; the target policy remains the trusted main commit.
 	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("## CONTRIBUTOR TEMPLATE MUST NOT WIN\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +63,7 @@ func templateTestContext(t *testing.T) (*pipeline.StepContext, *mockAgent, strin
 	gitCmd(t, dir, "commit", "-m", "pushed template override")
 	head := gitCmd(t, dir, "rev-parse", "HEAD")
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		data, _ := json.Marshal(prContent{Title: "feat(pipeline): fill template", Body: filledPRTemplate})
+		data, _ := json.Marshal(templateDraft("feat(pipeline): fill template", filledPRTemplate, testPRTemplate))
 		return &agent.Result{Output: data}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
@@ -124,7 +146,7 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	sctx.UserIntent = "Complete reviewer context stays available."
 	env, _ := fakeGH(t, "")
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
-	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=feat(pipeline): fill template")
 	out, err := (&PRStep{}).Execute(sctx)
 	if err != nil || out == nil || out.PRURL == "" {
 		t.Fatalf("create: %+v, %v", out, err)
@@ -140,6 +162,9 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	if err != nil || !parts.managed || !strings.Contains(parts.before, "## Testing") {
 		t.Fatalf("author Testing heading was stripped or ownership missing: %+v, %v", parts, err)
 	}
+	if !strings.Contains(parts.appendix, noMistakesPRSignature) {
+		t.Fatalf("template appendix dropped the no-mistakes signature:\n%s", parts.appendix)
+	}
 	if got := parsePipelineAttestationForTest(t, string(body)).HeadSHA; got != sctx.Run.HeadSHA {
 		t.Fatalf("head = %q, want %s", got, sctx.Run.HeadSHA)
 	}
@@ -148,6 +173,407 @@ func TestPRTemplateCreateThroughFakeGitHubAndReadback(t *testing.T) {
 	}
 	if sctx.UserIntent != "Complete reviewer context stays available." {
 		t.Fatal("publication setting changed reviewer intent")
+	}
+}
+
+func TestPRTemplatePublishesWhenDraftNotesOutsideProseRules(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "Report prose-only or ambiguous body-format rules as unsupported") {
+			t.Error("template drafting prompt still solicits prose-rule declarations")
+		}
+		draft := templateDraft("feat(pipeline): fill template", filledPRTemplate, testPRTemplate)
+		draft.UnsupportedRules = []string{"PR descriptions must link the issue they close"}
+		data, err := json.Marshal(draft)
+		return &agent.Result{Output: data}, err
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "Report prose-only or ambiguous body-format rules as unsupported") {
+			t.Error("template verdict prompt still solicits a prose-rule refusal")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	env, logFile := fakeGH(t, "")
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=feat(pipeline): fill template")
+
+	out, err := (&PRStep{}).Execute(sctx)
+	if err != nil || out == nil || out.PRURL == "" {
+		t.Fatalf("template publication blocked by an outside prose rule: %+v, %v", out, err)
+	}
+	logs, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(logs), "pr create") {
+		t.Fatalf("template PR was not created:\n%s", logs)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), filledPRTemplate) {
+		t.Fatalf("template narrative not published:\n%s", body)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("template appendix missing:\n%s", body)
+	}
+}
+
+func TestPRTemplateAutoDiscoversCommittedTemplate(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	name := ".github/PULL_REQUEST_TEMPLATE/change.md"
+	gitCmd(t, dir, "checkout", "main")
+	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n\n## Rollback\n\nDescribe rollback.\n"
+	if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", name)
+	gitCmd(t, dir, "commit", "-m", "add PR template")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	body := "## Summary\n\nUpdate PR composition.\n\n## Testing\n\nTargeted checks passed.\n\n## Rollback\n\nRevert the change."
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if string(opts.JSONSchema) != string(templatePRContentSchema) {
+			t.Fatalf("committed template did not select template drafting: %s", opts.JSONSchema)
+		}
+		if !strings.Contains(opts.Prompt, policySHA) || !strings.Contains(opts.Prompt, base) {
+			t.Fatalf("template worker did not receive distinct policy and diff commits:\n%s", opts.Prompt)
+		}
+		data, _ := json.Marshal(templateDraft("fix: follow committed template", body, template))
+		return &agent.Result{Output: data}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := parsePROwnedBody(content.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(parts.before) != body {
+		t.Fatalf("committed template narrative changed:\n%s", parts.before)
+	}
+	if strings.Contains(parts.appendix, "## ") || strings.Count(parts.appendix, pipelineAttestationCommentPrefix) != 1 {
+		t.Fatalf("generated appendix changed the repository heading contract:\n%s", parts.appendix)
+	}
+}
+
+func TestPRTemplateDiscoveryUsesActiveProviderNamespace(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	for name, body := range map[string]string{
+		".github/pull_request_template.md":           "## GitHub Summary\n",
+		".gitlab/merge_request_templates/Default.md": "## GitLab Summary\n",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", ".github", ".gitlab")
+	gitCmd(t, dir, "commit", "-m", "add provider templates")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+	githubTemplate, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || githubTemplate != "## GitHub Summary\n" {
+		t.Fatalf("GitHub template = %q, err %v", githubTemplate, err)
+	}
+	gitlabTemplate, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitLab)
+	if err != nil || gitlabTemplate != "## GitLab Summary\n" {
+		t.Fatalf("GitLab template = %q, err %v", gitlabTemplate, err)
+	}
+}
+
+func TestPRTemplateDiscoveryAzureDefaultLocations(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{
+		"pull_request_template.md",
+		"docs/pull_request_template.md",
+		".azuredevops/pull_request_template.md",
+		".vsts/pull_request_template.md",
+	} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "## Azure Summary\n"
+			if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", name)
+			gitCmd(t, dir, "commit", "-m", "add Azure PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderAzureDevOps)
+			if err != nil || got != body {
+				t.Fatalf("Azure template %q = %q, err %v", name, got, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateDiscoveryGiteaRootDefaults(t *testing.T) {
+	t.Parallel()
+	for _, name := range []string{"pull_request_template.md", "PULL_REQUEST_TEMPLATE.md"} {
+		name := name
+		t.Run(name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			body := "## Gitea Summary\n"
+			if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", name)
+			gitCmd(t, dir, "commit", "-m", "add Gitea PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitea)
+			if err != nil || got != body {
+				t.Fatalf("Gitea template %q = %q, err %v", name, got, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateDiscoveryForgeRecognizedLocations(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		provider scm.Provider
+		name     string
+	}{
+		{scm.ProviderGitea, ".gitea/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderGitea, ".gitea/pull_request_template.md"},
+		{scm.ProviderGitea, ".github/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderGitea, ".github/pull_request_template.md"},
+		{scm.ProviderForgejo, ".forgejo/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderForgejo, ".forgejo/pull_request_template.md"},
+		{scm.ProviderForgejo, ".gitea/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderForgejo, ".github/PULL_REQUEST_TEMPLATE.md"},
+		{scm.ProviderForgejo, ".github/pull_request_template.md"},
+	} {
+		tc := tc
+		t.Run(string(tc.provider)+"/"+tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(tc.name))), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "## Forge Summary\n"
+			if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(tc.name)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", tc.name)
+			gitCmd(t, dir, "commit", "-m", "add forge PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, tc.provider)
+			if err != nil || got != body {
+				t.Fatalf("%s template %q = %q, err %v", tc.provider, tc.name, got, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateDiscoveryUsesSingleAutoAppliedDirectoryTemplate(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		provider scm.Provider
+		name     string
+	}{
+		{scm.ProviderGitHub, "PULL_REQUEST_TEMPLATE/change.md"},
+		{scm.ProviderAzureDevOps, ".azuredevops/pullrequesttemplate/change.md"},
+	} {
+		tc := tc
+		t.Run(string(tc.provider)+"/"+tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "main")
+			if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(tc.name))), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := "## Directory Template\n"
+			if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(tc.name)), []byte(body), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "add", tc.name)
+			gitCmd(t, dir, "commit", "-m", "add directory PR template")
+			policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+			got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, tc.provider)
+			if err != nil || got != body {
+				t.Fatalf("%s directory template %q = %q, err %v", tc.provider, tc.name, got, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateDiscoveryIgnoresMultiFileSelectorDirectory(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	for _, name := range []string{
+		".github/PULL_REQUEST_TEMPLATE/security.md",
+		".github/PULL_REQUEST_TEMPLATE/feature.md",
+	} {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("## Selected Template\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", ".github")
+	gitCmd(t, dir, "commit", "-m", "add selectable PR templates")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+	got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || got != "" {
+		t.Fatalf("multi-file selector directory selected a template: %q, err %v", got, err)
+	}
+	sctx.Config.PR.Template = ".github/PULL_REQUEST_TEMPLATE/security.md"
+	sctx.Config.TrustedConfigSHA = policySHA
+	selected, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, scm.ProviderGitHub)
+	if err != nil || selected != "## Selected Template\n" {
+		t.Fatalf("explicit optional template = %q, err %v", selected, err)
+	}
+}
+
+func TestPRTemplateDiscoveryIgnoresOtherProviderSelectorDirectories(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	files := map[string]scm.Provider{
+		".gitlab/merge_request_templates/Security.md": scm.ProviderGitLab,
+		".gitea/PULL_REQUEST_TEMPLATE/security.md":    scm.ProviderGitea,
+		".forgejo/PULL_REQUEST_TEMPLATE/security.md":  scm.ProviderForgejo,
+	}
+	for name := range files {
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(dir, filepath.FromSlash(name))), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte("## Security Review\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, dir, "add", ".gitlab", ".gitea", ".forgejo")
+	gitCmd(t, dir, "commit", "-m", "add optional PR templates")
+	policySHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+
+	for name, provider := range files {
+		got, err := resolvePRTemplate(sctx.Ctx, sctx, policySHA, provider)
+		if err != nil || got != "" {
+			t.Fatalf("optional template %q selected for %s: %q, err %v", name, provider, got, err)
+		}
+	}
+}
+
+func TestPRTemplateExistingPRUsesLiveBasePolicy(t *testing.T) {
+	t.Parallel()
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "main")
+	name := ".github/pull_request_template.md"
+	if err := os.MkdirAll(filepath.Join(dir, ".github"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mainTemplate := "## Main Summary\n\nDescribe the main-target change.\n"
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(mainTemplate), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", name)
+	gitCmd(t, dir, "commit", "-m", "add main PR template")
+	trustedConfigSHA := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "-b", "develop")
+	template := "## Summary\n\nDescribe the change.\n\n## Testing\n\nDescribe validation.\n"
+	if err := os.WriteFile(filepath.Join(dir, filepath.FromSlash(name)), []byte(template), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", name)
+	gitCmd(t, dir, "commit", "-m", "add develop PR template")
+	developTip := gitCmd(t, dir, "rev-parse", "HEAD")
+	gitCmd(t, dir, "checkout", "feature")
+	body := "## Summary\n\nUpdate PR policy selection.\n\n## Testing\n\nTargeted checks passed."
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if string(opts.JSONSchema) != string(templatePRContentSchema) || !strings.Contains(opts.Prompt, developTip) {
+			t.Fatalf("existing PR did not use develop policy:\n%s", opts.Prompt)
+		}
+		data, _ := json.Marshal(templateDraft("fix: follow live PR base", body, template))
+		return &agent.Result{Output: data}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.Config.PR.BaseBranch = "main"
+	sctx.Config.PR.Template = name
+	sctx.Config.TrustedConfigSHA = trustedConfigSHA
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/42", "develop")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=fix: follow live PR base")
+	sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(sr.ID, types.StepStatusCompleted); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	published, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(published), "## Summary") || !strings.Contains(string(published), "## Testing") || strings.Contains(string(published), "## What Changed") {
+		t.Fatalf("existing PR did not receive live-base template:\n%s", published)
+	}
+	logData, err := os.ReadFile(logFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(logData), "--base main") {
+		t.Fatalf("repository config change retargeted existing PR:\n%s", logData)
 	}
 }
 
@@ -161,16 +587,205 @@ func TestPRTemplateCreateAppliesConfiguredTitleFormat(t *testing.T) {
 		if strings.Contains(opts.Prompt, sctx.Config.PR.TitleFormat) {
 			t.Fatal("prompt exposed configured title format")
 		}
-		data, _ := json.Marshal(prContent{Title: "add widget", Body: filledPRTemplate})
+		data, _ := json.Marshal(templateDraft("add widget", filledPRTemplate, testPRTemplate))
 		return &agent.Result{Output: data}, nil
 	}
 
-	content, err := (&PRStep{}).buildPRContent(sctx, "feature/PROJ-123-add-widget", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature/PROJ-123-add-widget", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if content.Title != "PROJ-123: add widget" {
 		t.Fatalf("title = %q, want configured title", content.Title)
+	}
+}
+
+func TestPRTemplateTranslatesRequiredHeadingsToEnglish(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	template := "# Resumo\n\nDescreva a mudança.\n\n# Testes\n"
+	body := "# Summary\n\nDescribe the change.\n\n# Testing\n\nTargeted checks passed."
+	ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, "translate a non-English heading") {
+			t.Fatal("template prompt omitted heading translation policy")
+		}
+		content := templatePRContent{
+			prContent: prContent{Title: "fix: describe the change", Body: body},
+			HeadingTranslations: []templateHeadingTranslation{
+				{Source: "# Resumo", English: "# Summary"},
+				{Source: "# Testes", English: "# Testing"},
+			},
+		}
+		data, _ := json.Marshal(content)
+		return &agent.Result{Output: data}, nil
+	}
+
+	content, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, template)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if content.Body != body {
+		t.Fatalf("translated body = %q, want %q", content.Body, body)
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, `"source":"# Resumo","english":"# Summary"`) ||
+			!strings.Contains(opts.Prompt, `"source":"# Testes","english":"# Testing"`) {
+			t.Fatal("final validator did not receive the approved heading translations")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, template, sctx.Run.BaseSHA, false); err != nil {
+		t.Fatalf("translated template failed final validation: %v", err)
+	}
+}
+
+func TestPRTemplateHeadingTranslationsFollowPublicationRedaction(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	template := "## Logs from /home/alex/build\n"
+	draft := prContent{
+		Title: "fix: document logs",
+		Body:  "## Logs from /home/alex/build\n\nCaptured output.",
+		HeadingTranslations: []templateHeadingTranslation{{
+			Source:  "## Logs from /home/alex/build",
+			English: "## Logs from /home/alex/build",
+		}},
+	}
+	redacted := redactPRContent(draft)
+	if redacted.Body != "## Logs from ~/build\n\nCaptured output." || redacted.HeadingTranslations[0].English != "## Logs from ~/build" || !redacted.HeadingTranslations[0].PublicationRedacted {
+		t.Fatalf("publication redaction did not keep the body and mapped heading synchronized: %+v", redacted)
+	}
+	if redacted.HeadingTranslations[0].Source != draft.HeadingTranslations[0].Source {
+		t.Fatal("publication redaction changed the source heading used for semantic validation")
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, `"source":"## Logs from /home/alex/build","english":"## Logs from ~/build","publication_redacted":true`) {
+			t.Fatalf("final validator received unsynchronized heading translations:\n%s", opts.Prompt)
+		}
+		if !strings.Contains(opts.Prompt, "that flag authorizes only the synchronized home-path redaction") {
+			t.Fatalf("final validator was not told why the mapped heading differs:\n%s", opts.Prompt)
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}})
+		return &agent.Result{Output: payload}, nil
+	}
+	_, appendix := ownedFixture(t)
+	for _, mode := range []string{"new template publication", "empty existing PR adoption"} {
+		t.Run(mode, func(t *testing.T) {
+			candidate, err := composeOwnedPRContent(prOwnedBody{before: redacted.Body}, redacted.Title, appendix, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			runWritten := candidate
+			switch mode {
+			case "new template publication":
+				runWritten.HeadingTranslations = redacted.HeadingTranslations
+			case "empty existing PR adoption":
+				runWritten = redactPRContent(prContent{
+					Title:               draft.Title,
+					Body:                strings.TrimSpace(draft.Body + "\n\n" + appendix),
+					HeadingTranslations: draft.HeadingTranslations,
+				})
+			}
+			if err := (&PRStep{}).validateFinalPRContent(sctx, candidate, runWritten, template, sctx.Run.BaseSHA, false); err != nil {
+				t.Fatalf("%s rejected a redacted required heading: %v", mode, err)
+			}
+		})
+	}
+}
+
+func TestPRTemplateFinalValidationRejectsAlteredUnredactedHeading(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	content := prContent{
+		Title: "fix: describe validation",
+		Body:  "## Validation\n\nTargeted checks passed.",
+		HeadingTranslations: []templateHeadingTranslation{{
+			Source:  "## Testing",
+			English: "## Validation",
+		}},
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, `"source":"## Testing","english":"## Validation"`) || strings.Contains(opts.Prompt, `"publication_redacted":true`) {
+			t.Fatalf("final validator received the wrong unredacted heading contract:\n%s", opts.Prompt)
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest,
+			English:       true,
+			Issues:        []string{"already-English template heading was not retained verbatim"},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, "## Testing\n", sctx.Run.BaseSHA, false); err == nil || !strings.Contains(err.Error(), "not retained verbatim") {
+		t.Fatalf("final validation accepted an altered unredacted heading: %v", err)
+	}
+}
+
+func TestPRTemplateFinalValidationRejectsMissingMappedHeading(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.validationFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("validator ran after the mapped heading was missing")
+		return nil, nil
+	}
+	content := prContent{
+		Title: "fix: describe the change",
+		Body:  "# Summary\n\nDescribe the change.",
+		HeadingTranslations: []templateHeadingTranslation{
+			{Source: "# Resumo", English: "# Summary"},
+			{Source: "# Testes", English: "# Testing"},
+		},
+	}
+	template := "# Resumo\n\nDescreva a mudança.\n\n# Testes\n"
+	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, template, sctx.Run.BaseSHA, false); err == nil {
+		t.Fatal("final validation accepted a body missing its mapped Testing heading")
+	}
+}
+
+func TestPRTemplateRejectsNonEnglishHeadingTranslation(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	body := "# Resumen\n\nDescribe the change.\n\n## Pruebas\n\nTargeted checks passed."
+	ag.runFn = func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		content := templatePRContent{
+			prContent: prContent{Title: "fix: describe the change", Body: body},
+			HeadingTranslations: []templateHeadingTranslation{
+				{Source: "# Overview", English: "# Resumen"},
+				{Source: "## Testing", English: "## Pruebas"},
+			},
+			UnsupportedRules: []string{},
+		}
+		data, _ := json.Marshal(content)
+		return &agent.Result{Output: data}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: false, FormatCompliant: true,
+			Issues: []string{"template headings are Spanish, not English"},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0); err == nil || !strings.Contains(err.Error(), "Spanish") {
+		t.Fatalf("buildPRContent() error = %v, want non-English heading refusal", err)
 	}
 }
 
@@ -184,16 +799,28 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 		if strings.Contains(opts.Prompt, sctx.Config.PR.TitleFormat) {
 			t.Fatal("prompt exposed configured title format")
 		}
+		for _, clause := range []string{
+			"Report prose-only or ambiguous body-format rules as unsupported",
+			"Inspect only the pinned PR-format policy revision named in the task",
+			"A committed Markdown pull-request template",
+		} {
+			if strings.Contains(opts.Prompt, clause) {
+				t.Errorf("title-only drafting prompt still carries the body-format clause %q", clause)
+			}
+		}
+		if !strings.Contains(opts.Prompt, "Write all natural-language title and body text in English") {
+			t.Error("title drafting prompt lost the English requirement")
+		}
 		data, _ := json.Marshal(map[string]string{"title": "add widget"})
 		return &agent.Result{Output: data}, nil
 	}
-	author := "## Overview\n\nHuman account.\n\nCloses https://github.com/test/repo/issues/7\n"
+	author := "# Overview\n\nHuman account.\n\n## Testing\n\nNot yet recorded.\n\nCloses https://github.com/test/repo/issues/7\n"
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	env, logFile := fakeGH(t, "https://github.com/test/repo/pull/42")
-	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=Author title")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=PROJ-123: add widget")
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatal(err)
@@ -218,12 +845,196 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 	}
 }
 
+func TestPRStep_ValidationVerdictScopeExcludesAuthorProse(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	author := "# Overview\n\nDescrição humana em português.\n\n## Testing\n\n- [ ] Mantenedor aprova\n"
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE=Título do autor")
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "mechanical_default_format") {
+			t.Error("verdict prompt carried the unconsumed mechanical_default_format field")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		// The verdict may only see what this run writes: authored prose that
+		// reaches the validator here would deadlock a body the run must preserve.
+		english := !strings.Contains(opts.Prompt, "Descrição humana em português")
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: english, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("author-owned prose failed the run-written verdict: %v", err)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := parsePROwnedBody(string(body))
+	if err != nil || !strings.Contains(parts.before, "Descrição humana em português") {
+		t.Fatalf("author body changed or dropped: %+v, %v", parts, err)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("run-written appendix missing:\n%s", body)
+	}
+}
+
+func TestPRStep_NarrativeFreeAppendixPublicationSkipsFormatVerdict(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	author := "# Overview\n\nAuthor-written description.\n"
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "set it false when committed prose-only") {
+			t.Error("narrative-free verdict still demands a prose-rule format refusal")
+		}
+		for _, policyClause := range []string{
+			"Inspect only the pinned PR-format policy revision named in the task",
+			"Report prose-only or ambiguous body-format rules as unsupported",
+		} {
+			if strings.Contains(opts.Prompt, policyClause) {
+				t.Errorf("narrative-free verdict prompt still carries the policy clause %q", policyClause)
+			}
+		}
+		if !strings.Contains(opts.Prompt, "Write all natural-language title and body text in English") {
+			t.Error("narrative-free verdict prompt lost the English requirement")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		// The run authors no prose here, so an obedient validator following
+		// the prose-rule policy would return exactly this verdict.
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: false,
+			Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("narrative-free appendix publication blocked by format verdict: %v", err)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), author) {
+		t.Fatalf("author description changed:\n%s", body)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("run-written appendix missing:\n%s", body)
+	}
+}
+
+func TestPRStep_ConcurrentAuthorNarrativeDisplacedFromVerdictScope(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	bodyFile := filepath.Join(t.TempDir(), "body.md")
+	if err := os.WriteFile(bodyFile, nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	wantTitle, err := renderPRTitle(sctx, "feat: fill template")
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, _ := fakeGH(t, "https://github.com/test/repo/pull/42")
+	sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile, "FAKE_CLI_PR_TITLE="+wantTitle)
+	author := "Human description added while the run was drafting.\n"
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		// A human publishes a description while the drafting turn is running.
+		if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
+			return nil, err
+		}
+		data, _ := json.Marshal(templateDraft("feat: fill template", filledPRTemplate, testPRTemplate))
+		return &agent.Result{Output: data}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		if strings.Contains(opts.Prompt, "Add a Bar helper") {
+			t.Error("verdict scope still carries the displaced drafted narrative")
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("concurrent author description failed publication: %v", err)
+	}
+	body, err := os.ReadFile(bodyFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(body), author) {
+		t.Fatalf("author description changed or dropped:\n%s", body)
+	}
+	if strings.Contains(string(body), "Add a Bar helper") {
+		t.Fatalf("displaced narrative published:\n%s", body)
+	}
+	if !hasPRAppendixMarkers(string(body)) {
+		t.Fatalf("run-written appendix missing:\n%s", body)
+	}
+}
+
+func TestPRTemplateFinalVerdictReceivesApprovedHeadingTranslations(t *testing.T) {
+	t.Parallel()
+	sctx, ag, _ := templateTestContext(t)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		body := strings.ReplaceAll(filledPRTemplate, "# Overview", "")
+		data, _ := json.Marshal(templateDraft("feat: fill template", body, testPRTemplate))
+		return &agent.Result{Output: data}, nil
+	}
+	if _, err := (&PRStep{}).draftTemplateNarrative(sctx, "feature", "main", sctx.Run.BaseSHA, sctx.Run.BaseSHA, testPRTemplate); err == nil {
+		t.Fatal("drafter-side structure check accepted a template body missing a required heading")
+	}
+
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		data, _ := json.Marshal(templateDraft("feat: fill template", filledPRTemplate, testPRTemplate))
+		return &agent.Result{Output: data}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, "required_heading_translations_json") {
+			t.Error("final verdict prompt omitted the approved heading translations")
+		}
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{
+			ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{},
+		})
+		return &agent.Result{Output: payload}, nil
+	}
+	if _, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0); err != nil {
+		t.Fatalf("template publication required a validator-side heading table: %v", err)
+	}
+}
+
 func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
 	// An existing author body without old generated attestation can be adopted
 	// without a model rewrite. Reserved-looking headings are not ownership.
-	author := "## Overview\n\nHuman account.\n\n## Tests\n\n- [x] Maintainer approves rollout\n\nCloses https://github.com/test/repo/issues/7\n"
+	author := "# Overview\n\nHuman account.\n\n## Testing\n\n- [x] Maintainer approves rollout\n\n## Reviewer Notes\n\nKeep this author section.\n\nCloses https://github.com/test/repo/issues/7\n"
 	bodyFile := filepath.Join(t.TempDir(), "body.md")
 	if err := os.WriteFile(bodyFile, []byte(author), 0o644); err != nil {
 		t.Fatal(err)
@@ -261,7 +1072,7 @@ func TestPRTemplateRegenerationPreservesAuthorsAndClosingReferences(t *testing.T
 
 func TestPRTemplateDraftFailureDoesNotFallBackOrPublish(t *testing.T) {
 	t.Parallel()
-	for _, mode := range []string{"agent-error", "missing", "nested-json", "missing-heading", "heading", "ownership", "fenced", "oversized"} {
+	for _, mode := range []string{"agent-error", "missing", "nested-json", "missing-translations", "missing-heading", "heading", "ownership", "fenced", "oversized"} {
 		t.Run(mode, func(t *testing.T) {
 			sctx, ag, _ := templateTestContext(t)
 			ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
@@ -284,7 +1095,11 @@ func TestPRTemplateDraftFailureDoesNotFallBackOrPublish(t *testing.T) {
 				case "oversized":
 					body += strings.Repeat("x", maxPullRequestBodyBytes)
 				}
-				data, _ := json.Marshal(prContent{Title: "feat: change", Body: body})
+				draft := templateDraft("feat: change", body, testPRTemplate)
+				if mode == "missing-translations" {
+					draft.HeadingTranslations = nil
+				}
+				data, _ := json.Marshal(draft)
 				return &agent.Result{Output: data}, nil
 			}
 			env, logFile := fakeGH(t, "")
@@ -305,18 +1120,18 @@ func TestPRTemplateStructureAllowsTaskEdits(t *testing.T) {
 	for _, line := range []string{"- [ ]", "*\t[ ] Approval", "+   [x] Approval", "1. [ ] Approval", "2) [X] Approval"} {
 		template := "## Overview\n\n" + line + "\n"
 		body := "## Overview\n\nFilled narrative.\n\n" + line + "\n"
-		if err := validateTemplateStructure(template, body); err != nil {
+		if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
 			t.Errorf("unchanged checklist %q rejected: %v", line, err)
 		}
 		changed := strings.ReplaceAll(body, "[ ]", "[x]")
 		if changed == body {
 			changed = strings.ReplaceAll(strings.ReplaceAll(body, "[x]", "[ ]"), "[X]", "[ ]")
 		}
-		if err := validateTemplateStructure(template, changed); err != nil {
+		if err := validateTranslatedTemplateStructure(template, changed, identityHeadingTranslations(template)); err != nil {
 			t.Errorf("changed checklist state %q rejected: %v", line, err)
 		}
-		if err := validateTemplateStructure(template, "Filled narrative."); err != nil {
-			t.Errorf("omitted checklist/subheading %q rejected: %v", line, err)
+		if err := validateTranslatedTemplateStructure(template, "Filled narrative.", identityHeadingTranslations(template)); err == nil {
+			t.Errorf("omitted required subheading %q accepted", line)
 		}
 	}
 }
@@ -358,7 +1173,7 @@ func TestPRTemplateUnsupportedProviderIsExplicit(t *testing.T) {
 	t.Parallel()
 	sctx, ag, _ := templateTestContext(t)
 	for _, provider := range []scm.Provider{scm.ProviderUnknown} {
-		if _, err := (&PRStep{}).buildPRContent(sctx, "feature", "main", sctx.Run.BaseSHA, provider, 4000); err == nil {
+		if _, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", sctx.Run.BaseSHA, provider, 4000); err == nil {
 			t.Errorf("provider %v silently accepted template preservation", provider)
 		}
 	}
@@ -389,7 +1204,7 @@ func TestPRTemplateIncompleteGitHubReadsNeverOverwriteAuthor(t *testing.T) {
 						t.Fatal(reason)
 					}
 					_, appendix := ownedFixture(t)
-					err = updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent{Title: "Author title", Body: author}, "", "", appendix, 0)
+					err = updateOwnedPR(sctx, host, &scm.PR{Number: "42"}, scm.PRContent{Title: "Author title", Body: author}, "", "", appendix, 0, nil)
 				}
 				if err == nil {
 					t.Fatal("incomplete read permitted publication")
@@ -414,17 +1229,17 @@ func TestPRTemplateStructureInvalidBacktickFenceKeepsRequiredHeadings(t *testing
 	t.Parallel()
 	template := "``` `example`\n# First\n# Second\n"
 	for _, body := range []string{"# First\n# Second\n", template} {
-		if err := validateTemplateStructure(template, body); err != nil {
+		if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err != nil {
 			t.Fatalf("preserved headings rejected: %v", err)
 		}
 	}
 	for _, body := range []string{"# First\n", "# Second\n# First\n"} {
-		if err := validateTemplateStructure(template, body); err == nil {
+		if err := validateTranslatedTemplateStructure(template, body, identityHeadingTranslations(template)); err == nil {
 			t.Fatalf("missing or reordered required heading accepted: %q", body)
 		}
 	}
 	// Tilde fences allow backticks in their info strings.
-	if err := validateTemplateStructure("~~~ `example`\n# Example\n~~~\n# Required\n", "# Required\n"); err != nil {
+	if err := validateTranslatedTemplateStructure("~~~ `example`\n# Example\n~~~\n# Required\n", "# Required\n", []templateHeadingTranslation{{Source: "# Required", English: "# Required"}}); err != nil {
 		t.Fatalf("fenced example treated as required: %v", err)
 	}
 }

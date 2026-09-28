@@ -82,7 +82,7 @@ func renderPRWithScreenshot(t *testing.T, uploader userAssetUploader, configure 
 	if configure != nil {
 		configure(ctx)
 	}
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature", "main", baseSHA, ctx.provider, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature", "main", baseSHA, ctx.provider, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,11 +122,11 @@ func TestPRStep_ReusesScreenshotAttachmentAcrossPRRenders(t *testing.T) {
 	uploader := &stubMediaUploader{t: t, urls: map[string]string{"checkout.png": testAttachmentURL}}
 	step := &PRStep{mediaUploader: uploader}
 
-	first, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	first, err := step.buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := step.buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	second, err := step.buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -150,7 +150,7 @@ func TestPRStep_DeduplicatesScreenshotUploadsByPath(t *testing.T) {
 	insertCompletedStep(t, sctx, types.StepTest, findings, "")
 	uploader := &stubMediaUploader{t: t, urls: map[string]string{"checkout.png": testAttachmentURL}}
 
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -173,7 +173,7 @@ func TestPRStep_StoreInRepoKeepsCommitLinkAndAttachment(t *testing.T) {
 	insertCompletedStep(t, sctx, types.StepTest, screenshotFindings(png), "")
 	uploader := &stubMediaUploader{t: t, urls: map[string]string{"checkout.png": testAttachmentURL}}
 
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature/add-login", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature/add-login", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +208,7 @@ func TestPRStep_UploadFailureKeepsTodaysRendering(t *testing.T) {
 
 	disabled := makeCtx(prDraftAgent())
 	disabled.Config.Test.Evidence.AttachMedia = false
-	today, err := (&PRStep{}).buildPRContent(disabled, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	today, err := (&PRStep{}).buildPRContentForTest(disabled, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestPRStep_UploadFailureKeepsTodaysRendering(t *testing.T) {
 	var logs []string
 	failing := makeCtx(prDraftAgent())
 	failing.Log = func(line string) { logs = append(logs, line) }
-	failed, err := (&PRStep{mediaUploader: &stubMediaUploader{err: errors.New("upload endpoint 500")}}).buildPRContent(failing, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	failed, err := (&PRStep{mediaUploader: &stubMediaUploader{err: errors.New("upload endpoint 500")}}).buildPRContentForTest(failing, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestPRStep_TextArtifactIsNotUploaded(t *testing.T) {
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"log","label":"CLI run","path":%q}]}`, logPath)
 	insertCompletedStep(t, sctx, types.StepTest, findings, "")
 	uploader := &stubMediaUploader{t: t}
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,7 +287,7 @@ func TestPRStep_OversizedImageIsSkippedWithReason(t *testing.T) {
 	var logs []string
 	sctx.Log = func(line string) { logs = append(logs, line) }
 	uploader := &stubMediaUploader{t: t}
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +333,7 @@ func TestPRStep_OversizedImagePreservesCommittedPath(t *testing.T) {
 	sctx.Log = func(line string) { logs = append(logs, line) }
 	uploader := &stubMediaUploader{t: t}
 
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature/add-login", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature/add-login", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestPRStep_UnsupportedImagePreservesCommittedPath(t *testing.T) {
 	sctx.Log = func(line string) { logs = append(logs, line) }
 	uploader := &stubMediaUploader{t: t}
 
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature/add-login", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature/add-login", "main", sctx.Run.BaseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -392,7 +392,7 @@ func TestPRStep_VideoAttachmentIsBareURL(t *testing.T) {
 	findings := fmt.Sprintf(`{"findings":[],"summary":"","testing_summary":"Evidence was collected.","artifacts":[{"kind":"video","label":"Checkout recording","path":%q}]}`, video)
 	insertCompletedStep(t, sctx, types.StepTest, findings, "")
 	uploader := &stubMediaUploader{t: t, urls: map[string]string{"checkout.mp4": testAttachmentURL}}
-	content, err := (&PRStep{mediaUploader: uploader}).buildPRContent(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	content, err := (&PRStep{mediaUploader: uploader}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
