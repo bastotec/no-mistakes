@@ -3,13 +3,33 @@ package pipeline
 import (
 	"context"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExhaustedRepairFindingsProvidesValidFixSelection(t *testing.T) {
+	raw := `{"findings":[{"id":"ci-red","severity":"error","description":"CI failed","action":"auto-fix"},{"id":"needs-user","severity":"warning","description":"needs input","action":"ask-user"}],"summary":"blocked"}`
+	got := exhaustedRepairFindings(raw, types.StepCI, "run-1", db.RepairBudgetDecision{
+		Consumed:       1,
+		Limit:          3,
+		AuthorityLimit: 1,
+	})
+	findings, err := types.ParseFindingsJSON(got)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := findings.Items[len(findings.Items)-1]
+	want := "`no-mistakes axi respond --step ci --action fix --findings ci-red`"
+	if !strings.Contains(budget.Description, want) {
+		t.Fatalf("repair budget guidance = %q, want command %s", budget.Description, want)
+	}
+}
 
 func TestExecutor_ResumedLegacyOverrunRequiresOneBoundedResponse(t *testing.T) {
 	database, p, run, repo := setupTest(t)
