@@ -363,7 +363,7 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 		},
 	}
 
-	exec := NewExecutor(database, p, &config.Config{Agent: types.AgentClaude}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{Agent: types.AgentClaude, AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
 
 	done := make(chan error, 1)
 	go func() {

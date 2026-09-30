@@ -64,7 +64,10 @@ type Executor struct {
 	approvalCh           chan approvalResponse // buffered channel for approval responses
 	waiting              bool                  // true when blocked on approval
 	waitingStep          types.StepName        // which step is currently awaiting approval
-	waitingProtectedPath bool                  // approval would skip work refused by protected_paths
+	waitingStepResultID  string
+	waitingRoundID       string
+	waitingAutoFixLimit  int
+	waitingProtectedPath bool // approval would skip work refused by protected_paths
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -174,6 +177,19 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if action == types.ActionApprove && e.waitingProtectedPath {
 		e.mu.Unlock()
 		return fmt.Errorf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
+	}
+	var repairDecision db.RepairBudgetDecision
+	if action == types.ActionFix {
+		var err error
+		repairDecision, err = e.db.ReserveStepRepair(e.waitingStepResultID, e.waitingRoundID, e.waitingAutoFixLimit, true)
+		if err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("authorize %s repair: %w", step, err)
+		}
+		if !repairDecision.Granted {
+			e.mu.Unlock()
+			return fmt.Errorf("cannot authorize another %s repair: consumed %d of configured maximum %d", step, repairDecision.Consumed, repairDecision.Limit)
+		}
 	}
 	e.waiting = false
 	e.mu.Unlock()
@@ -433,6 +449,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
+	e.waitingStepResultID = gate.stepResult.ID
+	e.waitingRoundID = gate.lastRoundID
+	e.waitingAutoFixLimit = e.autoFixLimit(gate.step.Name())
 	e.waitingProtectedPath = HasProtectedPathRefusal(gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
@@ -499,10 +518,6 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	case types.ActionFix:
-		decision, err := e.db.ReserveStepRepair(gate.stepResult.ID, gate.lastRoundID, e.autoFixLimit(gate.step.Name()), true)
-		if err != nil || !decision.Granted {
-			return fmt.Errorf("recovered repair was not newly authorized: duplicate=%t error=%v", decision.Duplicate, err)
-		}
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
 		selected := repairWorkFindings(filterFindingsJSON(gate.findings, response.findingIDs))
 		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
@@ -699,6 +714,9 @@ func recoveredLogPath(step *db.StepResult) string {
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
 	if e.config == nil {
 		return 0
+	}
+	if anchor, ok := stepName.CustomGateAnchor(); ok {
+		stepName = anchor
 	}
 	return e.config.AutoFixLimit(stepName)
 }
@@ -1098,6 +1116,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.mu.Lock()
 		e.waiting = true
 		e.waitingStep = stepName
+		e.waitingStepResultID = sr.ID
+		e.waitingRoundID = currentRoundID
+		e.waitingAutoFixLimit = autoFixLimit
 		e.waitingProtectedPath = HasProtectedPathRefusal(outcome.Findings)
 		e.mu.Unlock()
 
@@ -1177,10 +1198,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
-			decision, err := e.db.ReserveStepRepair(sr.ID, currentRoundID, autoFixLimit, true)
-			if err != nil || !decision.Granted {
-				return false, "", fmt.Errorf("repair was not newly authorized: duplicate=%t error=%v", decision.Duplicate, err)
-			}
 			telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0))
 			// Fix - mark step as fixing, resume execution timer, re-execute.
 			phaseStart = time.Now()

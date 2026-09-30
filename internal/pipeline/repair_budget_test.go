@@ -85,6 +85,19 @@ func TestExecutor_ResumedLegacyOverrunRequiresOneBoundedResponse(t *testing.T) {
 	if current.HeadSHA != run.HeadSHA {
 		t.Fatal("resumption changed custody before authority")
 	}
+	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err == nil {
+		t.Fatal("configured ceiling accepted an impossible recovered repair")
+	}
+	select {
+	case err := <-done:
+		finished.Store(true)
+		t.Fatalf("impossible recovered repair ended the run: %v", err)
+	default:
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 || steps[0].Status != types.StepStatusFixReview {
+		t.Fatalf("impossible recovered repair did not preserve gate: %+v %v", steps, err)
+	}
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}

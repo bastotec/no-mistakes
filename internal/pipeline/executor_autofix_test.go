@@ -230,8 +230,28 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		t.Errorf("expected 3 calls (1 initial + 2 auto-fix), got %d", callCount)
 	}
 
+	if err := exec.Respond(types.StepLint, types.ActionFix, nil); err == nil {
+		t.Fatal("configured maximum accepted an impossible repair")
+	}
+	updatedRun, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updatedRun.Status != types.RunRunning {
+		t.Fatalf("impossible repair response ended active run: %s", updatedRun.Status)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 || steps[0].Status != types.StepStatusFixReview {
+		t.Fatalf("impossible repair response did not preserve gate: %+v %v", steps, err)
+	}
+	if steps[0].FindingsJSON == nil || !HasConfiguredRepairLimitExhaustion(*steps[0].FindingsJSON) || strings.Contains(*steps[0].FindingsJSON, "authorize exactly one additional repair") {
+		t.Fatalf("configured ceiling offered another repair: %+v", steps[0].FindingsJSON)
+	}
+
 	// Now approve manually to finish
-	exec.Respond(types.StepLint, types.ActionApprove, nil)
+	if err := exec.Respond(types.StepLint, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
 	waitExecutorDone(t, done)
 }
 
