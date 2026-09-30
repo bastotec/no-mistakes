@@ -543,6 +543,37 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 	waitExecutorDone(t, done)
 }
 
+func TestExecutor_AskUserGatePublishesConfiguredLimitExhaustion(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"ask-user"}]}`}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 0}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 || steps[0].FindingsJSON == nil || !HasConfiguredRepairLimitExhaustion(*steps[0].FindingsJSON) {
+		t.Fatalf("parked findings did not publish configured exhaustion: steps=%+v err=%v", steps, err)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err == nil {
+		t.Fatal("configured-exhausted gate accepted fix")
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
+func TestExecutor_CustomGateDoesNotInheritAnchorRepairBudget(t *testing.T) {
+	exec := NewExecutor(nil, nil, &config.Config{AutoFix: config.AutoFix{Review: 3, Test: 2}}, nil, nil, nil)
+	if got := exec.autoFixLimit(types.CustomGateStepName(types.StepReview, "policy")); got != 0 {
+		t.Fatalf("review custom gate auto-fix limit = %d, want 0", got)
+	}
+	if got := exec.autoFixLimit(types.CustomGateStepName(types.StepTest, "browser")); got != 0 {
+		t.Fatalf("test custom gate auto-fix limit = %d, want 0", got)
+	}
+}
+
 func TestExecutor_ParkedStepReleasesLogFileAfterCancel(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()

@@ -99,7 +99,7 @@ func TestExecutor_ResumeReplaysAuthorizedRepairWithoutAnotherReservation(t *test
 	}
 }
 
-func TestExecutor_ResumeKeepsUnresolvedRepairActiveWithoutGateOrReplay(t *testing.T) {
+func TestExecutor_ResumeParksUnresolvedRepairAtReconciliationGate(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
@@ -123,6 +123,10 @@ func TestExecutor_ResumeKeepsUnresolvedRepairActiveWithoutGateOrReplay(t *testin
 	if err := database.MarkStepRepairStarted(round.ID); err != nil {
 		t.Fatal(err)
 	}
+	pid := 4242
+	if err := database.SetStepAgentActivity(stepResult.ID, "repair process active", &pid); err != nil {
+		t.Fatal(err)
+	}
 	run, _ = database.GetRun(run.ID)
 	calls := 0
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
@@ -130,32 +134,25 @@ func TestExecutor_ResumeKeepsUnresolvedRepairActiveWithoutGateOrReplay(t *testin
 		return &StepOutcome{}, nil
 	}}
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
-	ctx, cancel := context.WithCancelCause(context.Background())
 	done := make(chan error, 1)
-	go func() { done <- exec.Resume(ctx, run, repo, t.TempDir()) }()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		stored, err := database.GetStepResult(stepResult.ID)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if stored.LastActivity != nil && *stored.LastActivity == "repair outcome unresolved after daemon restart" {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("resume did not preserve unresolved repair")
-		}
-		time.Sleep(10 * time.Millisecond)
+	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+		t.Fatal("reconciliation gate accepted approve")
 	}
-	exec.mu.Lock()
-	waiting := exec.waiting
-	exec.mu.Unlock()
-	if waiting {
-		t.Fatal("unresolved repair was exposed as an approval gate")
+	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err == nil {
+		t.Fatal("reconciliation gate replayed a registered process")
 	}
-	cancel(fmt.Errorf("test complete"))
-	if err := <-done; err == nil || err.Error() != "test complete" {
-		t.Fatalf("Resume() error = %v", err)
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatalf("abort reconciliation: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "aborted by user") {
+			t.Fatalf("Resume() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconciliation gate remained permanently stalled")
 	}
 	if calls != 0 {
 		t.Fatalf("repair replayed %d times", calls)

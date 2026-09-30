@@ -245,6 +245,51 @@ func (d *DB) MarkStepRepairStarted(roundID string) error {
 	return err
 }
 
+func (d *DB) RetryUnstartedStepRepair(stepID, roundID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state sql.NullString
+	var pid sql.NullInt64
+	if err := tx.QueryRow(`SELECT d.dispatch_state, s.agent_pid FROM repair_budget_decisions d JOIN step_results s ON s.id = d.step_result_id WHERE d.round_id = ? AND d.step_result_id = ? AND d.source = ?`, roundID, stepID, RoundSelectionSourceUser).Scan(&state, &pid); err != nil {
+		return fmt.Errorf("read unresolved repair: %w", err)
+	}
+	if !state.Valid || state.String != "repair_started_unresolved" {
+		return fmt.Errorf("repair is not awaiting reconciliation")
+	}
+	if pid.Valid {
+		return fmt.Errorf("repair process identity %d was registered; abort rather than replaying it", pid.Int64)
+	}
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'fix_authorized' WHERE round_id = ? AND dispatch_state = 'repair_started_unresolved'`, roundID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) StepRepairBudgetStatus(stepID string, configuredLimit int) (RepairBudgetDecision, error) {
+	result := RepairBudgetDecision{Limit: configuredLimit, AuthorityLimit: configuredLimit}
+	var stepLimit sql.NullInt64
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit FROM step_results WHERE id = ?`, stepID).Scan(&stepLimit); err != nil {
+		return result, err
+	}
+	if stepLimit.Valid {
+		result.Limit = min(result.Limit, int(stepLimit.Int64))
+		result.AuthorityLimit = result.Limit
+	}
+	var reserved, completed int
+	if err := d.sql.QueryRow(`SELECT COALESCE(MAX(consumed), 0) FROM repair_budget_decisions WHERE step_result_id = ? AND source != 'exhausted'`, stepID).Scan(&reserved); err != nil {
+		return result, err
+	}
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM step_rounds WHERE step_result_id = ? AND trigger_type IN ('auto_fix', 'user_fix')`, stepID).Scan(&completed); err != nil {
+		return result, err
+	}
+	result.Consumed = max(reserved, completed)
+	result.ExplicitRepairAvailable = result.Consumed < result.Limit
+	return result, nil
+}
+
 func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, error) {
 	tx, err := d.sql.Begin()
 	if err != nil {

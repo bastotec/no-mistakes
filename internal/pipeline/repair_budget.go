@@ -8,8 +8,9 @@ import (
 )
 
 const (
-	repairBudgetFindingCategory = "repair-budget"
-	repairLimitFindingCategory  = "repair-limit"
+	repairBudgetFindingCategory         = "repair-budget"
+	repairLimitFindingCategory          = "repair-limit"
+	repairReconciliationFindingCategory = "repair-reconciliation"
 )
 
 // HasRepairBudgetExhaustion identifies a control-plane gate that unattended
@@ -21,6 +22,19 @@ func HasRepairBudgetExhaustion(raw string) bool {
 	}
 	for _, item := range findings.Items {
 		if item.Category == repairBudgetFindingCategory || item.Category == repairLimitFindingCategory {
+			return true
+		}
+	}
+	return false
+}
+
+func HasRepairReconciliation(raw string) bool {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false
+	}
+	for _, item := range findings.Items {
+		if item.Category == repairReconciliationFindingCategory {
 			return true
 		}
 	}
@@ -65,6 +79,37 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 	return result
 }
 
+func configuredRepairLimitFindings(raw string, step types.StepName, decision db.RepairBudgetDecision) string {
+	if decision.Consumed < decision.Limit || HasConfiguredRepairLimitExhaustion(raw) {
+		return raw
+	}
+	decision.ExplicitRepairAvailable = false
+	return exhaustedRepairFindings(raw, step, "", decision)
+}
+
+func repairReconciliationFindings(raw string, step types.StepName, pid *int) string {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return raw
+	}
+	description := fmt.Sprintf("Repair execution for %s was interrupted by daemon restart before its outcome was durably observed. No original approve or skip action is available. Abort the run to stop, or explicitly retry only if the repair process never started.", step)
+	if pid != nil {
+		description = fmt.Sprintf("Repair execution for %s was interrupted by daemon restart after process %d was registered. The process outcome cannot be proven, so replay is refused; abort the run after inspecting the worktree.", step, *pid)
+	}
+	findings.Items = append(findings.Items, types.Finding{
+		ID:          "repair-reconciliation-" + string(step),
+		Severity:    types.FindingSeverityError,
+		Action:      types.ActionAskUser,
+		Category:    repairReconciliationFindingCategory,
+		Description: description,
+	})
+	result, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return raw
+	}
+	return result
+}
+
 // The budget decision is control-plane metadata, not work for a code fixer or
 // a deferred finding that should follow its next validation pass.
 func repairWorkFindings(raw string) string {
@@ -74,7 +119,7 @@ func repairWorkFindings(raw string) string {
 	}
 	items := findings.Items[:0]
 	for _, item := range findings.Items {
-		if item.Category != repairBudgetFindingCategory && item.Category != repairLimitFindingCategory {
+		if item.Category != repairBudgetFindingCategory && item.Category != repairLimitFindingCategory && item.Category != repairReconciliationFindingCategory {
 			items = append(items, item)
 		}
 	}

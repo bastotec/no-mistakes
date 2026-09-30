@@ -61,15 +61,16 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
-	mu                   sync.Mutex
-	approvalCh           chan approvalResponse // buffered channel for approval responses
-	waiting              bool                  // true when blocked on approval
-	waitingStep          types.StepName        // which step is currently awaiting approval
-	waitingStepResultID  string
-	waitingRoundID       string
-	waitingFindings      string
-	waitingAutoFixLimit  int
-	waitingProtectedPath bool // approval would skip work refused by protected_paths
+	mu                          sync.Mutex
+	approvalCh                  chan approvalResponse // buffered channel for approval responses
+	waiting                     bool                  // true when blocked on approval
+	waitingStep                 types.StepName        // which step is currently awaiting approval
+	waitingStepResultID         string
+	waitingRoundID              string
+	waitingFindings             string
+	waitingAutoFixLimit         int
+	waitingProtectedPath        bool // approval would skip work refused by protected_paths
+	waitingRepairReconciliation bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -179,6 +180,23 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if action == types.ActionApprove && e.waitingProtectedPath {
 		e.mu.Unlock()
 		return fmt.Errorf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
+	}
+	if e.waitingRepairReconciliation {
+		switch action {
+		case types.ActionFix:
+			if err := e.db.RetryUnstartedStepRepair(e.waitingStepResultID, e.waitingRoundID); err != nil {
+				e.mu.Unlock()
+				return fmt.Errorf("retry unresolved %s repair: %w", step, err)
+			}
+		case types.ActionAbort:
+		default:
+			e.mu.Unlock()
+			return fmt.Errorf("repair reconciliation accepts only fix or abort")
+		}
+		e.waiting = false
+		e.mu.Unlock()
+		e.approvalCh <- approvalResponse{action: action}
+		return nil
 	}
 	var repairDecision db.RepairBudgetDecision
 	if action == types.ActionFix {
@@ -414,18 +432,14 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 	if gate.repairUnresolved {
-		e.emitStepEventWithFindingsAndError(
-			ipc.EventStepCompleted,
-			run,
-			repo,
-			gate.step.Name(),
-			string(types.StepStatusFixing),
-			gate.findings,
-			"repair outcome unresolved after daemon restart",
-			gate.stepResult.DurationMS,
-		)
-		<-ctx.Done()
-		return context.Cause(ctx)
+		gate.findings = repairReconciliationFindings(gate.findings, gate.step.Name(), gate.stepResult.AgentPID)
+		if err := e.db.SetRepairBudgetFindings(gate.lastRoundID, gate.findings); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("persist repair reconciliation findings: %w", err), ctx)
+		}
+		if err := e.db.ParkStepForApproval(run.ID, gate.stepResult.ID, types.StepStatusAwaitingApproval, recoveredExitCode(gate.stepResult), recoveredStepDuration(gate.stepResult), &gate.findings); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("park repair reconciliation: %w", err), ctx)
+		}
+		gate.stepResult.Status = types.StepStatusAwaitingApproval
 	}
 
 	parkStart := time.Now()
@@ -502,6 +516,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waitingFindings = gate.findings
 	e.waitingAutoFixLimit = e.autoFixLimit(gate.step.Name())
 	e.waitingProtectedPath = HasProtectedPathRefusal(gate.findings)
+	e.waitingRepairReconciliation = gate.repairUnresolved
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -541,6 +556,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	if reconciled {
 		return completeReconciledGate()
+	}
+	if gate.repairUnresolved && response.action == types.ActionFix && gate.selectedFindingIDs != nil {
+		_ = json.Unmarshal([]byte(*gate.selectedFindingIDs), &response.findingIDs)
 	}
 
 	approvalFields := telemetry.Fields{
@@ -802,9 +820,6 @@ func recoveredLogPath(step *db.StepResult) string {
 func (e *Executor) autoFixLimit(stepName types.StepName) int {
 	if e.config == nil {
 		return 0
-	}
-	if anchor, ok := stepName.CustomGateAnchor(); ok {
-		stepName = anchor
 	}
 	return e.config.AutoFixLimit(stepName)
 }
@@ -1193,6 +1208,22 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			break
 		}
 
+		budgetStatus, dbErr := e.db.StepRepairBudgetStatus(sr.ID, autoFixLimit)
+		if dbErr != nil {
+			return false, "", fmt.Errorf("read %s repair budget: %w", stepName, dbErr)
+		}
+		limitedFindings := configuredRepairLimitFindings(outcome.Findings, stepName, budgetStatus)
+		if limitedFindings != outcome.Findings {
+			outcome.Findings = limitedFindings
+			findingsPtr = &outcome.Findings
+			if err := e.db.SetRepairBudgetFindings(currentRoundID, outcome.Findings); err != nil {
+				return false, "", fmt.Errorf("persist %s configured repair limit gate: %w", stepName, err)
+			}
+			if err := e.db.SetStepFindings(sr.ID, outcome.Findings); err != nil {
+				return false, "", fmt.Errorf("persist %s configured repair limit findings: %w", stepName, err)
+			}
+		}
+
 		// Freeze execution timer before entering approval wait.
 		executionMS += time.Since(phaseStart).Milliseconds()
 
@@ -1218,6 +1249,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waitingFindings = outcome.Findings
 		e.waitingAutoFixLimit = autoFixLimit
 		e.waitingProtectedPath = HasProtectedPathRefusal(outcome.Findings)
+		e.waitingRepairReconciliation = false
 		e.mu.Unlock()
 
 		// Parking starts before the gate becomes observable. This includes the
