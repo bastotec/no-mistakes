@@ -32,37 +32,42 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 	defer tx.Rollback()
 	var stepLimit sql.NullInt64
 	var stepStatus types.StepStatus
-	if err := tx.QueryRow(`SELECT auto_fix_limit, status FROM step_results WHERE id = ?`, stepID).Scan(&stepLimit, &stepStatus); err != nil {
+	var limitProvenance string
+	if err := tx.QueryRow(`SELECT auto_fix_limit, status, auto_fix_limit_provenance FROM step_results WHERE id = ?`, stepID).Scan(&stepLimit, &stepStatus, &limitProvenance); err != nil {
 		return result, err
 	}
-	authorityLimit := limit
-	if stepLimit.Valid {
-		limit = min(limit, int(stepLimit.Int64))
-		authorityLimit = limit
-	} else {
+	legacyExplicitEligible := false
+	switch limitProvenance {
+	case "initialized":
+		if stepLimit.Valid {
+			limit = min(limit, int(stepLimit.Int64))
+		}
+	case "legacy_normalized":
+		limit = 0
+		legacyExplicitEligible = true
+	default:
 		switch stepStatus {
-		case types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview:
-			authorityLimit = 0
-			if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = 0 WHERE id = ? AND auto_fix_limit IS NULL`, stepID); err != nil {
-				return result, err
-			}
 		case types.StepStatusPending:
-			if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ? AND auto_fix_limit IS NULL`, limit, stepID); err != nil {
+			if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = ?, auto_fix_limit_provenance = 'initialized' WHERE id = ? AND auto_fix_limit_provenance = 'legacy_unknown'`, limit, stepID); err != nil {
 				return result, err
 			}
+		case types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview:
+			limit = 0
+			legacyExplicitEligible = true
+			if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = 0, auto_fix_limit_provenance = 'legacy_normalized' WHERE id = ? AND auto_fix_limit_provenance = 'legacy_unknown'`, stepID); err != nil {
+				return result, err
+			}
+		default:
+			limit = 0
 		}
 	}
+	authorityLimit := limit
 	var pinnedLimit sql.NullInt64
 	if err := tx.QueryRow(`SELECT MIN(repair_limit) FROM repair_budget_decisions WHERE step_result_id = ?`, stepID).Scan(&pinnedLimit); err != nil {
 		return result, err
 	}
 	if pinnedLimit.Valid {
-		if stepLimit.Valid && stepLimit.Int64 == 0 && pinnedLimit.Int64 > 0 {
-			limit = min(configuredLimit, int(pinnedLimit.Int64))
-			authorityLimit = 0
-		} else {
-			limit = min(limit, int(pinnedLimit.Int64))
-		}
+		limit = min(limit, int(pinnedLimit.Int64))
 	}
 	authorityLimit = min(authorityLimit, limit)
 	result.Limit = limit
@@ -121,7 +126,11 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		result.AuthorityLimit = min(limit, int(recordedAuthority.Int64))
 	}
 	if explicit {
-		result.AuthorityLimit = min(limit, result.Consumed+1)
+		if legacyExplicitEligible {
+			result.AuthorityLimit = min(configuredLimit, result.Consumed+1)
+		} else {
+			result.AuthorityLimit = min(limit, result.Consumed+1)
+		}
 	}
 	source = "exhausted"
 	if result.Consumed < result.AuthorityLimit {
@@ -137,7 +146,7 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 	}
 	if result.Granted {
 		ts := now()
-		if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair authorized", stepID); err != nil {
+		if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, override_reason = NULL, auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_normalized' THEN 'initialized' ELSE auto_fix_limit_provenance END WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair authorized", stepID); err != nil {
 			return result, err
 		}
 	}

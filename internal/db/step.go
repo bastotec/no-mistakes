@@ -211,9 +211,30 @@ func (d *DB) StartStep(id string) error {
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimit, autoFixLimit, id)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin start step: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL,
+		auto_fix_limit = CASE
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' AND status != ? THEN 0
+			WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ?
+			ELSE auto_fix_limit
+		END,
+		auto_fix_limit_provenance = CASE
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' AND status != ? THEN 'legacy_normalized'
+			ELSE 'initialized'
+		END
+		WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", types.StepStatusPending, autoFixLimit, autoFixLimit, types.StepStatusPending, id)
 	if err != nil {
 		return fmt.Errorf("start step: %w", err)
+	}
+	if err := capRepairBudgetToStepLimit(tx, id); err != nil {
+		return fmt.Errorf("cap start step repair budget: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit start step: %w", err)
 	}
 	return nil
 }
@@ -222,16 +243,57 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 // preserving started_at as the clock for the enclosing step.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimit, autoFixLimit, id)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin start step fix round: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?,
+		auto_fix_limit = CASE
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 0
+			WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ?
+			ELSE auto_fix_limit
+		END,
+		auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 'legacy_normalized' ELSE 'initialized' END,
+		override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimit, autoFixLimit, id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
+	}
+	if err := capRepairBudgetToStepLimit(tx, id); err != nil {
+		return fmt.Errorf("cap fix round repair budget: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit start step fix round: %w", err)
 	}
 	return nil
 }
 
+func capRepairBudgetToStepLimit(tx *sql.Tx, id string) error {
+	var limit int
+	if err := tx.QueryRow(`SELECT auto_fix_limit FROM step_results WHERE id = ?`, id).Scan(&limit); err != nil {
+		return err
+	}
+	_, err := tx.Exec(`UPDATE repair_budget_decisions
+		SET repair_limit = MIN(repair_limit, ?),
+			authority_limit = CASE WHEN authority_limit IS NULL THEN NULL ELSE MIN(authority_limit, ?) END
+		WHERE step_result_id = ?`, limit, limit, id)
+	return err
+}
+
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {
-	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimit, id); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin set step auto-fix limit: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END, auto_fix_limit_provenance = 'initialized' WHERE id = ?`, autoFixLimit, autoFixLimit, id); err != nil {
 		return fmt.Errorf("set step auto-fix limit: %w", err)
+	}
+	if err := capRepairBudgetToStepLimit(tx, id); err != nil {
+		return fmt.Errorf("cap step repair budget: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit step auto-fix limit: %w", err)
 	}
 	return nil
 }

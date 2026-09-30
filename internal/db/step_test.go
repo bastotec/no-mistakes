@@ -180,7 +180,10 @@ func TestStartStepFixRoundResetsRoundClockAndPreservesLowerLimit(t *testing.T) {
 
 	const stepStarted = int64(123)
 	const priorAutoFixLimit = 1
-	if _, err := d.sql.Exec(`UPDATE step_results SET started_at = ?, round_started_at = ?, auto_fix_limit = ? WHERE id = ?`, stepStarted, stepStarted, priorAutoFixLimit, step.ID); err != nil {
+	if err := d.StartStepWithAutoFixLimit(step.ID, priorAutoFixLimit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE step_results SET started_at = ?, round_started_at = ? WHERE id = ?`, stepStarted, stepStarted, step.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SetStepOverrideReason(step.ID, "approved over failure"); err != nil {

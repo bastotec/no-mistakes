@@ -198,7 +198,7 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 1, 10, &findings); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = NULL WHERE id = ?`, step.ID); err != nil {
+	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = NULL, auto_fix_limit_provenance = 'legacy_unknown' WHERE id = ?`, step.ID); err != nil {
 		t.Fatal(err)
 	}
 	d.Close()
@@ -208,20 +208,27 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
-	if err != nil || denied.Granted || denied.Limit != 3 || denied.AuthorityLimit != 0 {
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 {
 		t.Fatalf("legacy NULL gained automatic authority: %+v %v", denied, err)
 	}
 	persisted, err := d.GetStepResult(step.ID)
 	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
 		t.Fatalf("legacy NULL was not normalized to zero: %+v %v", persisted, err)
 	}
+	var provenance string
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "legacy_normalized" {
+		t.Fatalf("legacy NULL provenance after normalization = %q, %v", provenance, err)
+	}
 	granted, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
-	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 3 || granted.AuthorityLimit != 1 {
+	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 0 || granted.AuthorityLimit != 1 {
 		t.Fatalf("explicit response did not grant exactly one repair: %+v %v", granted, err)
 	}
 	persisted, err = d.GetStepResult(step.ID)
 	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
 		t.Fatalf("explicit response widened automatic limit: %+v %v", persisted, err)
+	}
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "initialized" {
+		t.Fatalf("legacy authority was not consumed exactly once: %q, %v", provenance, err)
 	}
 	next, err := d.InsertStepRound(step.ID, 2, "user_fix", &findings, nil, 0)
 	if err != nil {
@@ -236,8 +243,59 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	defer d.Close()
 	for range 2 {
 		retried, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
-		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 3 || retried.AuthorityLimit != 1 {
+		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 0 || retried.AuthorityLimit != 0 {
 			t.Fatalf("resume or retry widened legacy authority: %+v %v", retried, err)
+		}
+	}
+}
+
+func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "initialized-zero.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	firstRound, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	first, err := d.ReserveStepRepair(step.ID, firstRound.ID, 3, false)
+	if err != nil || !first.Granted {
+		t.Fatalf("initial reservation: %+v %v", first, err)
+	}
+	if err := d.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	observation, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.Consumed != 1 {
+		t.Fatalf("initialized zero reopened prior authority: %+v %v", denied, err)
+	}
+	var provenance string
+	var decisionLimit, decisionAuthority int
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.sql.QueryRow(`SELECT MAX(repair_limit), MAX(authority_limit) FROM repair_budget_decisions WHERE step_result_id = ?`, step.ID).Scan(&decisionLimit, &decisionAuthority); err != nil {
+		t.Fatal(err)
+	}
+	if provenance != "initialized" || decisionLimit != 0 || decisionAuthority != 0 {
+		t.Fatalf("lowered lifecycle state = %q, limits %d/%d", provenance, decisionLimit, decisionAuthority)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for range 2 {
+		retried, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+		if err != nil || retried.Granted || retried.Limit != 0 || retried.AuthorityLimit != 0 || retried.Consumed != 1 {
+			t.Fatalf("resume or retry reopened initialized zero: %+v %v", retried, err)
 		}
 	}
 }

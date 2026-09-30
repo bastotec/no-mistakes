@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     last_activity    TEXT,
     agent_pid        INTEGER,
     auto_fix_limit              INTEGER,
+    auto_fix_limit_provenance   TEXT NOT NULL DEFAULT 'legacy_unknown',
     ci_fix_attempts             INTEGER NOT NULL DEFAULT 0,
     override_reason             TEXT
 );
@@ -317,6 +318,8 @@ var migrationStatements = []string{
 	// written before this column existed can have had.
 	`ALTER TABLE runs ADD COLUMN gates_json TEXT`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN auto_fix_limit_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'`,
+	`UPDATE step_results SET auto_fix_limit_provenance = 'initialized' WHERE auto_fix_limit IS NOT NULL AND auto_fix_limit_provenance = 'legacy_unknown'`,
 	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE repair_budget_decisions ADD COLUMN authority_limit INTEGER`,
 	// Non-nil exactly when a human answered ActionApprove on a step whose gate
