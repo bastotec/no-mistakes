@@ -10,6 +10,55 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestExplicitRepairAuthorizationStaysRecoverablyParkedUntilClaim(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","action":"ask-user"}]}`
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	decision, err := d.AuthorizeStepRepair(step.ID, round.ID, 3, &ids, nil)
+	if err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	parked, err := d.GetStepResult(step.ID)
+	if err != nil || parked.Status != types.StepStatusAwaitingApproval || parked.FindingsJSON == nil {
+		t.Fatalf("authorization erased recoverable gate: %+v, %v", parked, err)
+	}
+	storedRun, err := d.GetRun(run.ID)
+	if err != nil || storedRun.AwaitingAgentSince == nil {
+		t.Fatalf("authorization erased parked run marker: %+v, %v", storedRun, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := d.GetStepResult(step.ID)
+	if claimed.Status != types.StepStatusFixing {
+		t.Fatalf("claimed status = %s, want fixing", claimed.Status)
+	}
+	claimedRun, err := d.GetRun(run.ID)
+	if err != nil || claimedRun.AwaitingAgentSince != nil {
+		t.Fatalf("claimed repair retained parked marker: %+v, %v", claimedRun, err)
+	}
+	recoverable, err := d.HasRecoverableRepairDispatch(run.ID)
+	if err != nil || !recoverable {
+		t.Fatalf("claimed repair is not recoverable: %v, %v", recoverable, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatalf("replayed claim: %v", err)
+	}
+}
+
 func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) {
 	for _, tc := range []struct {
 		name  string

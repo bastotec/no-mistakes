@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,42 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExecutor_ResumeReplaysAuthorizedRepairWithoutAnotherReservation(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}],"summary":"one issue"}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	if err := database.ParkStepForApproval(run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 3, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("authorize repair = %+v, %v", decision, err)
+	}
+	run, _ = database.GetRun(run.ID)
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if !sctx.Fixing || !strings.Contains(sctx.PreviousFindings, "review-1") {
+			t.Fatalf("replayed repair context = fixing:%v findings:%s", sctx.Fixing, sctx.PreviousFindings)
+		}
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 3}}, nil, []Step{step}, nil)
+	if err := exec.Resume(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("fixer calls = %d, want 1", calls)
+	}
+}
 
 func TestExecutor_ApprovalFix(t *testing.T) {
 	database, p, run, repo := setupTest(t)

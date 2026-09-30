@@ -428,6 +428,17 @@ func recoverOnStartup(d *db.DB, p *paths.Paths, mgr *RunManager, layout *worktre
 		preserved[plan.run.ID] = struct{}{}
 	}
 	logStartupPhase("parked_runs", parkedStarted, "preserved", len(plans))
+	if len(plans) > 0 {
+		worktreesToSweep := make([]procreap.Worktree, 0, len(plans))
+		for _, plan := range plans {
+			started, err := d.HasStartedRepairDispatch(plan.run.ID)
+			if err != nil || !started {
+				continue
+			}
+			worktreesToSweep = append(worktreesToSweep, procreap.Worktree{Dir: plan.workDir, RepoID: plan.repo.ID, RunID: plan.run.ID})
+		}
+		procreap.SweepRunWorktrees(p.WorktreesDir(), worktreesToSweep, "repair_dispatch_recovery")
+	}
 
 	// Read while the runs that were executing when this daemon started still say
 	// so: recovery below turns them terminal, and they are the ones whose

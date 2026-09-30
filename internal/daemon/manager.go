@@ -135,8 +135,15 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 }
 
 func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*recoveredRunPlan, error) {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil || run.Branch == "" {
-		return nil, fmt.Errorf("run is not a parked running run")
+	if run == nil || run.Status != types.RunRunning || run.Branch == "" {
+		return nil, fmt.Errorf("run is not a recoverable running run")
+	}
+	repairDispatch, err := m.db.HasRecoverableRepairDispatch(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read repair dispatch: %w", err)
+	}
+	if run.AwaitingAgentSince == nil && !repairDispatch {
+		return nil, fmt.Errorf("run is not a parked or repair-dispatched running run")
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {

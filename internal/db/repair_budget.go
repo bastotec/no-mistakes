@@ -24,6 +24,14 @@ type RepairBudgetDecision struct {
 // count before agents/custody mutation, even if execution never returns a round.
 // Legacy completed rounds and pending selections are conservatively retained.
 func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool) (RepairBudgetDecision, error) {
+	return d.reserveStepRepair(stepID, roundID, limit, explicit, false, nil, nil)
+}
+
+func (d *DB) AuthorizeStepRepair(stepID, roundID string, limit int, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
+	return d.reserveStepRepair(stepID, roundID, limit, true, true, selectedFindingIDs, userFindingsJSON)
+}
+
+func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, replayAuthorization bool, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
 	configuredLimit := limit
 	result := RepairBudgetDecision{Limit: limit, AuthorityLimit: limit}
 	tx, err := d.sql.Begin()
@@ -89,9 +97,10 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		return result, fmt.Errorf("repair observation is not the latest round")
 	}
 	var source string
+	var dispatchState sql.NullString
 	var recordedLimit int
 	var recordedAuthority sql.NullInt64
-	err = tx.QueryRow(`SELECT consumed, repair_limit, authority_limit, source FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ?`, roundID, stepID).Scan(&result.Consumed, &recordedLimit, &recordedAuthority, &source)
+	err = tx.QueryRow(`SELECT consumed, repair_limit, authority_limit, source, dispatch_state FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ?`, roundID, stepID).Scan(&result.Consumed, &recordedLimit, &recordedAuthority, &source, &dispatchState)
 	if err != nil && err != sql.ErrNoRows {
 		return result, err
 	}
@@ -103,6 +112,7 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		}
 		if source != "exhausted" {
 			result.Duplicate = true
+			result.Granted = replayAuthorization && explicit && source == RoundSelectionSourceUser && dispatchState.Valid && dispatchState.String == "fix_authorized"
 			return result, nil
 		}
 		if !explicit {
@@ -145,10 +155,22 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 			source = RoundSelectionSourceUser
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, repair_limit = excluded.repair_limit, authority_limit = excluded.authority_limit, source = excluded.source`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source); err != nil {
+	dispatch := any(nil)
+	if result.Granted && explicit {
+		dispatch = "fix_authorized"
+	}
+	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source, dispatch_state) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, repair_limit = excluded.repair_limit, authority_limit = excluded.authority_limit, source = excluded.source, dispatch_state = excluded.dispatch_state`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source, dispatch); err != nil {
 		return result, err
 	}
-	if result.Granted {
+	if result.Granted && explicit {
+		if _, err := tx.Exec(`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`, selectedFindingIDs, RoundSelectionSourceUser, userFindingsJSON, roundID); err != nil {
+			return result, err
+		}
+		if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_normalized' THEN 'initialized' ELSE auto_fix_limit_provenance END WHERE id = ?`, stepID); err != nil {
+			return result, err
+		}
+	}
+	if result.Granted && !explicit {
 		ts := now()
 		if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, override_reason = NULL, auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_normalized' THEN 'initialized' ELSE auto_fix_limit_provenance END WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair authorized", stepID); err != nil {
 			return result, err
@@ -165,4 +187,89 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 func (d *DB) SetRepairBudgetFindings(roundID, findings string) error {
 	_, err := d.sql.Exec(`UPDATE step_rounds SET findings_json = ? WHERE id = ?`, findings, roundID)
 	return err
+}
+
+func (d *DB) HasRecoverableRepairDispatch(runID string) (bool, error) {
+	var found bool
+	err := d.sql.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM repair_budget_decisions d
+		JOIN step_results s ON s.id = d.step_result_id
+		WHERE s.run_id = ? AND d.dispatch_state IN ('claimed', 'started')
+	)`, runID).Scan(&found)
+	return found, err
+}
+
+func (d *DB) HasStartedRepairDispatch(runID string) (bool, error) {
+	var found bool
+	err := d.sql.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM repair_budget_decisions d
+		JOIN step_results s ON s.id = d.step_result_id
+		WHERE s.run_id = ? AND d.dispatch_state = 'started'
+	)`, runID).Scan(&found)
+	return found, err
+}
+
+func (d *DB) ClaimStepRepair(stepID, roundID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state sql.NullString
+	if err := tx.QueryRow(`SELECT dispatch_state FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ? AND source = ?`, roundID, stepID, RoundSelectionSourceUser).Scan(&state); err != nil {
+		return fmt.Errorf("read repair authorization: %w", err)
+	}
+	if !state.Valid || (state.String != "fix_authorized" && state.String != "claimed" && state.String != "started") {
+		return fmt.Errorf("repair authorization is not dispatchable")
+	}
+	if state.String == "fix_authorized" {
+		if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'claimed' WHERE round_id = ? AND dispatch_state = 'fix_authorized'`, roundID); err != nil {
+			return err
+		}
+	}
+	ts := now()
+	if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair claimed", stepID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE runs SET
+		parked_ms = COALESCE(parked_ms, 0) + CASE WHEN awaiting_agent_since IS NOT NULL AND ? > awaiting_agent_since THEN (? - awaiting_agent_since) * 1000 ELSE 0 END,
+		awaiting_agent_since = NULL, updated_at = ?
+		WHERE id = (SELECT run_id FROM step_results WHERE id = ?)`, ts, ts, ts, stepID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) MarkStepRepairStarted(roundID string) error {
+	_, err := d.sql.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'started' WHERE round_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID)
+	return err
+}
+
+func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, error) {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+	var state sql.NullString
+	var source string
+	if err := tx.QueryRow(`SELECT source, dispatch_state FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ?`, roundID, stepID).Scan(&source, &state); err != nil {
+		if err == sql.ErrNoRows {
+			return "", nil
+		}
+		return "", err
+	}
+	if source == RoundSelectionSourceUser && !state.Valid {
+		state = sql.NullString{String: "fix_authorized", Valid: true}
+		if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = ? WHERE round_id = ?`, state.String, roundID); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(`UPDATE step_results SET status = ? WHERE id = ? AND status = ?`, types.StepStatusAwaitingApproval, stepID, types.StepStatusFixing); err != nil {
+			return "", err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return state.String, nil
 }

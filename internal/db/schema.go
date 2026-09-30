@@ -110,7 +110,8 @@ CREATE TABLE IF NOT EXISTS repair_budget_decisions (
     consumed       INTEGER NOT NULL,
     repair_limit   INTEGER NOT NULL,
     authority_limit INTEGER,
-    source         TEXT NOT NULL
+    source         TEXT NOT NULL,
+    dispatch_state TEXT
 );
 
 CREATE TABLE IF NOT EXISTS agent_invocations (
@@ -322,6 +323,7 @@ var migrationStatements = []string{
 	`UPDATE step_results SET auto_fix_limit_provenance = 'initialized' WHERE auto_fix_limit IS NOT NULL AND auto_fix_limit_provenance = 'legacy_unknown'`,
 	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE repair_budget_decisions ADD COLUMN authority_limit INTEGER`,
+	`ALTER TABLE repair_budget_decisions ADD COLUMN dispatch_state TEXT`,
 	// Non-nil exactly when a human answered ActionApprove on a step whose gate
 	// existed because of an unresolved external condition (currently: the CI
 	// step's live checks were still failing) - see

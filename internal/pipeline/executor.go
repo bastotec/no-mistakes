@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -66,6 +67,7 @@ type Executor struct {
 	waitingStep          types.StepName        // which step is currently awaiting approval
 	waitingStepResultID  string
 	waitingRoundID       string
+	waitingFindings      string
 	waitingAutoFixLimit  int
 	waitingProtectedPath bool // approval would skip work refused by protected_paths
 
@@ -180,8 +182,18 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	}
 	var repairDecision db.RepairBudgetDecision
 	if action == types.ActionFix {
+		selected := repairWorkFindings(filterFindingsJSON(e.waitingFindings, findingIDs))
+		merged := mergeUserOverridesJSON(selected, instructions, addedFindings)
+		allSelectedIDs := combineSelectedFindingIDs(findingIDs, merged)
+		var idsJSON, userFindingsJSON *string
+		if raw := marshalFindingIDs(allSelectedIDs); raw != "" {
+			idsJSON = &raw
+		}
+		if merged != "" && merged != selected {
+			userFindingsJSON = &merged
+		}
 		var err error
-		repairDecision, err = e.db.ReserveStepRepair(e.waitingStepResultID, e.waitingRoundID, e.waitingAutoFixLimit, true)
+		repairDecision, err = e.db.AuthorizeStepRepair(e.waitingStepResultID, e.waitingRoundID, e.waitingAutoFixLimit, idsJSON, userFindingsJSON)
 		if err != nil {
 			e.mu.Unlock()
 			return fmt.Errorf("authorize %s repair: %w", step, err)
@@ -344,20 +356,30 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 }
 
 type recoveredGate struct {
-	index           int
-	step            Step
-	stepResult      *db.StepResult
-	findings        string
-	round           int
-	lastRoundID     string
-	reviewedHeadSHA string
+	index              int
+	step               Step
+	stepResult         *db.StepResult
+	findings           string
+	round              int
+	lastRoundID        string
+	reviewedHeadSHA    string
+	repairAuthorized   bool
+	selectedFindingIDs *string
+	userFindingsJSON   *string
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
-	if run == nil || run.Status != types.RunRunning || run.AwaitingAgentSince == nil {
+	if run == nil || run.Status != types.RunRunning {
+		return fmt.Errorf("run is not recoverable")
+	}
+	repairDispatch, err := database.HasRecoverableRepairDispatch(run.ID)
+	if err != nil {
+		return err
+	}
+	if run.AwaitingAgentSince == nil && !repairDispatch {
 		return fmt.Errorf("run is not a recoverable parked run")
 	}
-	_, err := (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
+	_, err = (&Executor{db: database, steps: steps}).recoveredGate(run.ID)
 	return err
 }
 
@@ -383,7 +405,10 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	e.initializeRunScopes(run.ID)
 
-	parkStart := time.Unix(*run.AwaitingAgentSince, 0)
+	parkStart := time.Now()
+	if run.AwaitingAgentSince != nil {
+		parkStart = time.Unix(*run.AwaitingAgentSince, 0)
+	}
 	duration := recoveredStepDuration(gate.stepResult)
 	completeRecoveredGate := func() error {
 		if gate.step.Name() == types.StepReview {
@@ -451,6 +476,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waitingStep = gate.step.Name()
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
+	e.waitingFindings = gate.findings
 	e.waitingAutoFixLimit = e.autoFixLimit(gate.step.Name())
 	e.waitingProtectedPath = HasProtectedPathRefusal(gate.findings)
 	e.mu.Unlock()
@@ -465,9 +491,23 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		gate.stepResult.DurationMS,
 	)
 
-	response, reconciled, err := e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
-	if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-		slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
+	var response approvalResponse
+	var reconciled bool
+	if gate.repairAuthorized {
+		e.mu.Lock()
+		e.waiting = false
+		e.mu.Unlock()
+		response.action = types.ActionFix
+		if gate.selectedFindingIDs != nil {
+			_ = json.Unmarshal([]byte(*gate.selectedFindingIDs), &response.findingIDs)
+		}
+	} else {
+		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	}
+	if response.action != types.ActionFix {
+		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+			slog.Warn("failed to complete awaiting-agent state in db", "step", gate.step.Name(), "run", run.ID, "error", dbErr)
+		}
 	}
 	if err != nil {
 		if dbErr := e.db.FailStep(gate.stepResult.ID, err.Error(), duration); dbErr != nil {
@@ -518,9 +558,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	case types.ActionFix:
+		if err := e.db.ClaimStepRepair(gate.stepResult.ID, gate.lastRoundID); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("claim recovered %s repair: %w", gate.step.Name(), err), ctx)
+		}
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
 		selected := repairWorkFindings(filterFindingsJSON(gate.findings, response.findingIDs))
 		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
+		if gate.userFindingsJSON != nil {
+			merged = *gate.userFindingsJSON
+		}
 		if gate.lastRoundID != "" {
 			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
 			if idsJSON := marshalFindingIDs(allSelectedIDs); idsJSON != "" {
@@ -588,8 +634,8 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 		if result.StepName != e.steps[index].Name() {
 			return nil, fmt.Errorf("recovered step %d is %q, want %q", index, result.StepName, e.steps[index].Name())
 		}
-		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview {
-			if gate != nil || result.FindingsJSON == nil || result.StartedAt == nil || result.DurationMS == nil || result.AgentPID != nil {
+		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview || result.Status == types.StepStatusFixing {
+			if gate != nil || result.FindingsJSON == nil || result.StartedAt == nil || result.DurationMS == nil {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
 			rounds, err := e.db.GetRoundsByStep(result.ID)
@@ -597,16 +643,33 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				return nil, fmt.Errorf("recovered approval gate has no complete round")
 			}
 			latest := rounds[len(rounds)-1]
+			dispatchState, err := e.db.RestoreLegacyRepairAuthorization(result.ID, latest.ID)
+			if err != nil {
+				return nil, fmt.Errorf("recover repair authorization: %w", err)
+			}
+			repairAuthorized := dispatchState == "fix_authorized" || dispatchState == "claimed" || dispatchState == "started"
+			if result.Status == types.StepStatusFixing && !repairAuthorized {
+				return nil, fmt.Errorf("recovered approval gate is incomplete")
+			}
+			if result.AgentPID != nil && dispatchState != "started" {
+				return nil, fmt.Errorf("recovered approval gate is incomplete")
+			}
+			if dispatchState == "fix_authorized" && result.Status == types.StepStatusFixing {
+				result.Status = types.StepStatusAwaitingApproval
+			}
 			if latest.FindingsJSON == nil || (*latest.FindingsJSON != *result.FindingsJSON && !isRoundCappedForm(*latest.FindingsJSON, *result.FindingsJSON)) {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
 			gate = &recoveredGate{
-				index:       index,
-				step:        e.steps[index],
-				stepResult:  result,
-				findings:    *result.FindingsJSON,
-				round:       latest.Round,
-				lastRoundID: latest.ID,
+				index:              index,
+				step:               e.steps[index],
+				stepResult:         result,
+				findings:           *result.FindingsJSON,
+				round:              latest.Round,
+				lastRoundID:        latest.ID,
+				repairAuthorized:   repairAuthorized,
+				selectedFindingIDs: latest.SelectedFindingIDs,
+				userFindingsJSON:   latest.UserFindingsJSON,
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA
@@ -768,6 +831,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 	}
 	lastLogActivityAt := time.Time{}
+	activeRepairRoundID := ""
+	if state.fixing {
+		activeRepairRoundID = state.currentRoundID
+	}
 	touchLogActivity := func(text string, force bool) {
 		if activity := stepActivityFromLog(text); activity != "" {
 			now := time.Now()
@@ -808,6 +875,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		switch event.Phase {
 		case agent.LifecyclePhaseStart:
+			if activeRepairRoundID != "" {
+				if dbErr := e.db.MarkStepRepairStarted(activeRepairRoundID); dbErr != nil {
+					slog.Warn("failed to bind repair process start", "step", stepName, "error", dbErr)
+				}
+			}
 			pid := event.PID
 			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
@@ -1118,6 +1190,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waitingStep = stepName
 		e.waitingStepResultID = sr.ID
 		e.waitingRoundID = currentRoundID
+		e.waitingFindings = outcome.Findings
 		e.waitingAutoFixLimit = autoFixLimit
 		e.waitingProtectedPath = HasProtectedPathRefusal(outcome.Findings)
 		e.mu.Unlock()
@@ -1141,8 +1214,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, "", &executionMS)
 
 		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, outcome.Findings, true)
-		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
-			slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
+		if response.action != types.ActionFix {
+			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
+				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)
+			}
 		}
 		if err != nil {
 			if dbErr := e.db.FailStep(sr.ID, err.Error(), executionMS); dbErr != nil {
@@ -1198,6 +1273,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
+			if err := e.db.ClaimStepRepair(sr.ID, currentRoundID); err != nil {
+				return false, "", fmt.Errorf("claim %s repair: %w", stepName, err)
+			}
+			activeRepairRoundID = currentRoundID
 			telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0))
 			// Fix - mark step as fixing, resume execution timer, re-execute.
 			phaseStart = time.Now()
