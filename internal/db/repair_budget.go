@@ -11,11 +11,12 @@ import (
 // every started repair, regardless of whether a user or automatic filter chose
 // it. AuthorityLimit is the current configured or response-bounded ceiling.
 type RepairBudgetDecision struct {
-	Consumed       int
-	Limit          int
-	AuthorityLimit int
-	Granted        bool
-	Duplicate      bool
+	Consumed                int
+	Limit                   int
+	AuthorityLimit          int
+	ExplicitRepairAvailable bool
+	Granted                 bool
+	Duplicate               bool
 }
 
 // ReserveStepRepair is the single authorization boundary for all fix launches.
@@ -105,6 +106,7 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 			return result, nil
 		}
 		if !explicit {
+			result.ExplicitRepairAvailable = result.Consumed < limit || legacyExplicitEligible && result.Consumed < configuredLimit
 			return result, nil
 		}
 	}
@@ -132,9 +134,11 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 			result.AuthorityLimit = min(limit, result.Consumed+1)
 		}
 	}
+	result.ExplicitRepairAvailable = result.Consumed < limit || legacyExplicitEligible && result.Consumed < configuredLimit
 	source = "exhausted"
 	if result.Consumed < result.AuthorityLimit {
 		result.Granted = true
+		result.ExplicitRepairAvailable = false
 		result.Consumed++
 		source = RoundSelectionSourceAutoFix
 		if explicit {

@@ -539,7 +539,7 @@ func gateFields(gate stepView) []toon.Field {
 		}
 	} else if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
 		help = []string{
-			"Repair budget exhaustion requires new explicit authority; --yes leaves this gate awaiting a decision.",
+			"The automatic repair budget is exhausted; explicit authority remains available for exactly one additional repair, and --yes leaves this gate awaiting a decision.",
 			"Run `no-mistakes axi respond --action fix --findings <ids>` only after authorizing exactly one additional repair; it does not renew the automatic budget.",
 			"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
 		}

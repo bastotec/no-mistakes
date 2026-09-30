@@ -377,6 +377,26 @@ func TestWriteGateShape(t *testing.T) {
 	}
 }
 
+func TestRepairBudgetGateHelpExposesOneExplicitRepair(t *testing.T) {
+	gate := stepView{
+		Name:   "ci",
+		Status: "fix_review",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "repair-budget-ci", Severity: "warning", Action: types.ActionAskUser, Category: "repair-budget", Description: "automatic budget exhausted at zero"},
+		}, "repair authority required"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{
+		"automatic repair budget is exhausted",
+		"explicit authority remains available for exactly one additional repair",
+		"--action fix --findings <ids>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("repair-budget gate missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
 	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {

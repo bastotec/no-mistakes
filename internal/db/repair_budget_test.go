@@ -309,8 +309,8 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
-	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 {
-		t.Fatalf("legacy NULL gained automatic authority: %+v %v", denied, err)
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || !denied.ExplicitRepairAvailable {
+		t.Fatalf("legacy NULL gained automatic authority or hid explicit authority: %+v %v", denied, err)
 	}
 	persisted, err := d.GetStepResult(step.ID)
 	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
@@ -320,8 +320,17 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "legacy_normalized" {
 		t.Fatalf("legacy NULL provenance after normalization = %q, %v", provenance, err)
 	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retriedBeforeGrant, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	if err != nil || retriedBeforeGrant.Granted || !retriedBeforeGrant.ExplicitRepairAvailable {
+		t.Fatalf("resume hid one-time legacy authority: %+v %v", retriedBeforeGrant, err)
+	}
 	granted, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
-	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 0 || granted.AuthorityLimit != 1 {
+	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 0 || granted.AuthorityLimit != 1 || granted.ExplicitRepairAvailable {
 		t.Fatalf("explicit response did not grant exactly one repair: %+v %v", granted, err)
 	}
 	persisted, err = d.GetStepResult(step.ID)
@@ -344,7 +353,7 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	defer d.Close()
 	for range 2 {
 		retried, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
-		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 0 || retried.AuthorityLimit != 0 {
+		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 0 || retried.AuthorityLimit != 0 || retried.ExplicitRepairAvailable {
 			t.Fatalf("resume or retry widened legacy authority: %+v %v", retried, err)
 		}
 	}
