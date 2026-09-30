@@ -194,7 +194,7 @@ func (d *DB) HasRecoverableRepairDispatch(runID string) (bool, error) {
 	err := d.sql.QueryRow(`SELECT EXISTS(
 		SELECT 1 FROM repair_budget_decisions d
 		JOIN step_results s ON s.id = d.step_result_id
-		WHERE s.run_id = ? AND d.dispatch_state IN ('claimed', 'started')
+		WHERE s.run_id = ? AND d.dispatch_state IN ('claimed', 'started', 'repair_started_unresolved')
 	)`, runID).Scan(&found)
 	return found, err
 }
@@ -219,7 +219,7 @@ func (d *DB) ClaimStepRepair(stepID, roundID string) error {
 	if err := tx.QueryRow(`SELECT dispatch_state FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ? AND source = ?`, roundID, stepID, RoundSelectionSourceUser).Scan(&state); err != nil {
 		return fmt.Errorf("read repair authorization: %w", err)
 	}
-	if !state.Valid || (state.String != "fix_authorized" && state.String != "claimed" && state.String != "started") {
+	if !state.Valid || (state.String != "fix_authorized" && state.String != "claimed") {
 		return fmt.Errorf("repair authorization is not dispatchable")
 	}
 	if state.String == "fix_authorized" {
@@ -258,6 +258,18 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 			return "", nil
 		}
 		return "", err
+	}
+	if state.Valid && state.String == "started" {
+		state.String = "repair_started_unresolved"
+		if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = ? WHERE round_id = ?`, state.String, roundID); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(`UPDATE step_results SET status = ?, agent_pid = NULL, last_activity_at = ?, last_activity = ? WHERE id = ?`, types.StepStatusAwaitingApproval, now(), "repair outcome unresolved after daemon restart", stepID); err != nil {
+			return "", err
+		}
+		if _, err := tx.Exec(`UPDATE runs SET awaiting_agent_since = COALESCE(awaiting_agent_since, ?), updated_at = ? WHERE id = (SELECT run_id FROM step_results WHERE id = ?)`, now(), now(), stepID); err != nil {
+			return "", err
+		}
 	}
 	if source == RoundSelectionSourceUser && !state.Valid {
 		state = sql.NullString{String: "fix_authorized", Valid: true}

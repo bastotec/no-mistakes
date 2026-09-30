@@ -13,6 +13,31 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestExecutor_RepairSelectionMustMatchParkedFindingBeforeAuthorityIsConsumed(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"comma,id","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, nil, nil)
+	exec.waiting = true
+	exec.waitingStep = types.StepReview
+	exec.waitingStepResultID = stepResult.ID
+	exec.waitingRoundID = round.ID
+	exec.waitingFindings = findings
+	exec.waitingAutoFixLimit = 1
+
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"comma", "id"}); err == nil {
+		t.Fatal("mismatched legacy selection unexpectedly authorized")
+	}
+	decision, err := database.ReserveStepRepair(stepResult.ID, round.ID, 1, false)
+	if err != nil || !decision.Granted || decision.Consumed != 1 {
+		t.Fatalf("invalid selection consumed authority: decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestExecutor_ResumeReplaysAuthorizedRepairWithoutAnotherReservation(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
@@ -60,7 +85,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				return &StepOutcome{NeedsApproval: true, Findings: `{"issues":["bug"]}`}, nil
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"bug","severity":"error","description":"bug","action":"ask-user"}]}`}, nil
 			}
 			// After fix, re-evaluate passes
 			return &StepOutcome{NeedsApproval: false, ExitCode: 0}, nil
@@ -68,7 +93,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	}
 
 	steps := []Step{step, newPassStep(types.StepTest)}
-	exec := NewExecutor(database, p, nil, nil, steps, nil)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, steps, nil)
 
 	done := make(chan error, 1)
 	go func() {
@@ -79,7 +104,9 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
 	// Send fix action
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"bug"}); err != nil {
+		t.Fatalf("respond: %v", err)
+	}
 
 	// Wait for step to re-execute and complete (it passes on second call)
 	select {

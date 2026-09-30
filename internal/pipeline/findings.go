@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -331,6 +332,41 @@ func mergeUserOverridesJSON(raw string, instructions map[string]string, added []
 		return raw
 	}
 	return encoded
+}
+
+func validateFindingSelection(raw string, ids []string, added []types.Finding) error {
+	if len(ids) == 0 {
+		if len(added) == 0 {
+			return fmt.Errorf("fix response selected no findings")
+		}
+		return nil
+	}
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return fmt.Errorf("parse parked findings: %w", err)
+	}
+	available := make(map[string]int, len(findings.Items))
+	for _, item := range findings.Items {
+		available[item.ID]++
+	}
+	selected := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		if id == "" {
+			return fmt.Errorf("finding ID must not be empty")
+		}
+		if selected[id] {
+			return fmt.Errorf("finding ID %q was selected more than once", id)
+		}
+		selected[id] = true
+		switch available[id] {
+		case 0:
+			return fmt.Errorf("finding ID %q is not present on the parked gate", id)
+		case 1:
+		default:
+			return fmt.Errorf("finding ID %q is ambiguous on the parked gate", id)
+		}
+	}
+	return nil
 }
 
 func filterFindingsJSON(raw string, ids []string) string {

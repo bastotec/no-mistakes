@@ -1232,6 +1232,7 @@ func successReportHelp(fixes []fixRow) []string {
 
 func newAxiRespondCmd() *cobra.Command {
 	var action, step, findings, instructions, addFinding string
+	var finding []string
 	var autoYes bool
 	var wait time.Duration
 
@@ -1257,6 +1258,7 @@ func newAxiRespondCmd() *cobra.Command {
 					action:       action,
 					step:         step,
 					findings:     findings,
+					finding:      finding,
 					instructions: instructions,
 					addFinding:   addFinding,
 					autoYes:      autoYes,
@@ -1267,7 +1269,8 @@ func newAxiRespondCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip (required)")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
-	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
+	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated legacy finding IDs to fix (with --action fix; use --finding for arbitrary IDs)")
+	cmd.Flags().StringArrayVar(&finding, "finding", nil, "exact finding ID to fix; repeat for multiple findings (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
 	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path refusals and repair-budget exhaustion require an explicit response")
@@ -1279,6 +1282,7 @@ type respondArgs struct {
 	action       string
 	step         string
 	findings     string
+	finding      []string
 	instructions string
 	addFinding   string
 	autoYes      bool
@@ -1353,13 +1357,20 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		stepName = types.StepName(gate.Name)
 	}
 
-	findingIDs := splitCSV(ra.findings)
+	findingIDs := append([]string(nil), ra.finding...)
+	if ra.findings != "" {
+		legacyIDs, legacyErr := parseLegacyFindingIDs(ra.findings)
+		if legacyErr != nil {
+			return emitError(cmd, 2, legacyErr.Error(), "Use repeatable --finding <exact-id> for arbitrary finding IDs")
+		}
+		findingIDs = append(findingIDs, legacyIDs...)
+	}
 	var instructions map[string]string
 	var added []types.Finding
 
 	if act == types.ActionFix {
 		if len(findingIDs) == 0 && ra.addFinding == "" {
-			return emitError(cmd, 2, "--action fix requires --findings <id,...> or --add-finding <json>",
+			return emitError(cmd, 2, "--action fix requires --finding <exact-id>, --findings <legacy-id,...>, or --add-finding <json>",
 				"Run `no-mistakes axi status` to list finding IDs")
 		}
 		if note := strings.TrimSpace(ra.instructions); note != "" && len(findingIDs) > 0 {
@@ -1761,6 +1772,21 @@ func resolveDaemonDownAbortTruth(cmd *cobra.Command, p *paths.Paths, runID strin
 func isExactRunNotFound(err error, runID string) bool {
 	var rpcErr *ipc.RPCError
 	return errors.As(err, &rpcErr) && rpcErr.Message == "run not found: "+runID
+}
+
+func parseLegacyFindingIDs(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part != strings.TrimSpace(part) {
+			return nil, fmt.Errorf("--findings contains an empty or whitespace-ambiguous legacy ID")
+		}
+		out = append(out, part)
+	}
+	return out, nil
 }
 
 func splitCSV(s string) []string {

@@ -389,7 +389,7 @@ func TestRepairBudgetGateHelpExposesOneExplicitRepair(t *testing.T) {
 	for _, want := range []string{
 		"automatic repair budget is exhausted",
 		"explicit authority remains available for exactly one additional repair",
-		"--action fix --findings <ids>",
+		"--action fix --finding <exact-id>",
 	} {
 		if !strings.Contains(out, want) {
 			t.Fatalf("repair-budget gate missing %q:\n%s", want, out)
@@ -420,7 +420,7 @@ func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 			{
 				name:     "ordinary",
 				findings: findingsJSON(t, []types.Finding{{ID: "doc-1", Action: types.ActionAskUser, Description: "clarify documentation"}}, "Documentation decision"),
-				want:     []string{"no-mistakes axi respond --action approve", "--action fix --findings <ids>", "do not edit files yourself"},
+				want:     []string{"no-mistakes axi respond --action approve", "--action fix --finding <exact-id>", "do not edit files yourself"},
 				absent:   []string{"protected-path", "Approve is rejected"},
 			},
 		} {

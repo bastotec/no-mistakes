@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestAxiRespondFindingFlagPreservesExactIDs(t *testing.T) {
+	cmd := newAxiRespondCmd()
+	want := []string{"comma,id", " white space ", `quote"id`, "$()", "-leading"}
+	args := []string{"--finding", want[0], "--finding", want[1], "--finding", want[2], "--finding", want[3], "--finding=-leading"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	got, err := cmd.Flags().GetStringArray("finding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("--finding values = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseLegacyFindingIDsRejectsAmbiguousValues(t *testing.T) {
+	for _, raw := range []string{"one,,two", " one", "two "} {
+		if _, err := parseLegacyFindingIDs(raw); err == nil {
+			t.Fatalf("parseLegacyFindingIDs(%q) unexpectedly succeeded", raw)
+		}
+	}
+	if got, err := parseLegacyFindingIDs("one,two"); err != nil || !slices.Equal(got, []string{"one", "two"}) {
+		t.Fatalf("parseLegacyFindingIDs() = %#v, %v", got, err)
+	}
+}
 
 func ciRunView(ciStatus types.StepStatus) runView {
 	return runView{

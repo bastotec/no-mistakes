@@ -182,6 +182,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	}
 	var repairDecision db.RepairBudgetDecision
 	if action == types.ActionFix {
+		if err := validateFindingSelection(e.waitingFindings, findingIDs, addedFindings); err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("select %s repair findings: %w", step, err)
+		}
 		selected := repairWorkFindings(filterFindingsJSON(e.waitingFindings, findingIDs))
 		merged := mergeUserOverridesJSON(selected, instructions, addedFindings)
 		allSelectedIDs := combineSelectedFindingIDs(findingIDs, merged)
@@ -647,14 +651,14 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 			if err != nil {
 				return nil, fmt.Errorf("recover repair authorization: %w", err)
 			}
-			repairAuthorized := dispatchState == "fix_authorized" || dispatchState == "claimed" || dispatchState == "started"
-			if result.Status == types.StepStatusFixing && !repairAuthorized {
+			repairAuthorized := dispatchState == "fix_authorized" || dispatchState == "claimed"
+			if result.Status == types.StepStatusFixing && !repairAuthorized && dispatchState != "repair_started_unresolved" {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
-			if result.AgentPID != nil && dispatchState != "started" {
+			if result.AgentPID != nil && dispatchState != "repair_started_unresolved" {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
-			if dispatchState == "fix_authorized" && result.Status == types.StepStatusFixing {
+			if (dispatchState == "fix_authorized" || dispatchState == "repair_started_unresolved") && result.Status == types.StepStatusFixing {
 				result.Status = types.StepStatusAwaitingApproval
 			}
 			if latest.FindingsJSON == nil || (*latest.FindingsJSON != *result.FindingsJSON && !isRoundCappedForm(*latest.FindingsJSON, *result.FindingsJSON)) {

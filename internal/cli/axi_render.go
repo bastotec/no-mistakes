@@ -530,7 +530,7 @@ func (rv runView) automaticSkips() []automaticSkipRow {
 func gateFields(gate stepView) []toon.Field {
 	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+		"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) to have the pipeline fix the selected findings (do not edit files yourself)",
 	}
 	if pipeline.HasConfiguredRepairLimitExhaustion(gate.FindingsJSON) {
 		help = []string{
@@ -540,7 +540,7 @@ func gateFields(gate stepView) []toon.Field {
 	} else if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
 		help = []string{
 			"The automatic repair budget is exhausted; explicit authority remains available for exactly one additional repair, and --yes leaves this gate awaiting a decision.",
-			"Run `no-mistakes axi respond --action fix --findings <ids>` only after authorizing exactly one additional repair; it does not renew the automatic budget.",
+			"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) only after authorizing exactly one additional repair; it does not renew the automatic budget.",
 			"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
 		}
 	}

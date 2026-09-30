@@ -194,7 +194,7 @@ Run the pipeline and decide on its findings as they come up:
    no-mistakes axi respond --action approve
 
    # have the pipeline fix specific findings, then continue
-   no-mistakes axi respond --action fix --findings <id1,id2> --instructions "<optional guidance>"
+   no-mistakes axi respond --action fix --finding <exact-id> --instructions "<optional guidance>"
 
    # skip this step
    no-mistakes axi respond --action skip
@@ -375,7 +375,7 @@ findings[2]{id,severity,file,line,action,description}:
   r2,error,cmd/no-mistakes/main.go,,ask-user,New --force flag bypasses the confirm prompt
 help[6]:
   Run ` + "`no-mistakes axi respond --action approve`" + ` to accept this step and continue
-  Run ` + "`no-mistakes axi respond --action fix --findings <ids>`" + ` to have the pipeline fix the selected findings (do not edit files yourself)
+  Run ` + "`no-mistakes axi respond --action fix --finding <exact-id>`" + ` (repeat --finding as needed) to have the pipeline fix the selected findings (do not edit files yourself)
   Run ` + "`no-mistakes axi respond --action skip`" + ` to skip this step
   Run ` + "`no-mistakes axi logs --step review --full`" + ` to read the full step log
   A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a ` + "`gate:`" + `, respond; loop until an ` + "`outcome:`" + `.
