@@ -66,7 +66,7 @@ func TestExecutor_ResponsePinsOneRepairUntilLaterAuthority(t *testing.T) {
 		t.Fatalf("automatic request exceeded response ceiling: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
 	}
 	steps, _ := database.GetStepsByRun(run.ID)
-	if steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, "current authority limit 1") || !strings.Contains(*steps[0].FindingsJSON, "configured maximum 3") {
+	if steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, "current authority limit 1") || !strings.Contains(*steps[0].FindingsJSON, "configured automatic maximum 3") {
 		t.Fatalf("missing bounded authority request: %+v", steps[0])
 	}
 	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
@@ -213,7 +213,7 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 			return &StepOutcome{
 				NeedsApproval: true,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"warning","description":"style issue","action":"auto-fix"}],"summary":"lint issue"}`,
+				Findings:      `{"findings":[{"id":"style","severity":"warning","description":"style issue","action":"auto-fix"}],"summary":"lint issue"}`,
 			}, nil
 		},
 	}
@@ -230,22 +230,13 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		t.Errorf("expected 3 calls (1 initial + 2 auto-fix), got %d", callCount)
 	}
 
-	if err := exec.Respond(types.StepLint, types.ActionFix, nil); err == nil {
-		t.Fatal("configured maximum accepted an impossible repair")
+	if err := exec.Respond(types.StepLint, types.ActionFix, []string{"style"}); err != nil {
+		t.Fatalf("explicit repair after automatic ceiling: %v", err)
 	}
-	updatedRun, err := database.GetRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if updatedRun.Status != types.RunRunning {
-		t.Fatalf("impossible repair response ended active run: %s", updatedRun.Status)
-	}
-	steps, err := database.GetStepsByRun(run.ID)
-	if err != nil || len(steps) != 1 || steps[0].Status != types.StepStatusFixReview {
-		t.Fatalf("impossible repair response did not preserve gate: %+v %v", steps, err)
-	}
-	if steps[0].FindingsJSON == nil || !HasConfiguredRepairLimitExhaustion(*steps[0].FindingsJSON) || strings.Contains(*steps[0].FindingsJSON, "authorize exactly one additional repair") {
-		t.Fatalf("configured ceiling offered another repair: %+v", steps[0].FindingsJSON)
+	waitForStepStatus(t, database, run.ID, types.StepLint, types.StepStatusFixing)
+	waitForStepStatus(t, database, run.ID, types.StepLint, types.StepStatusFixReview)
+	if callCount != 4 {
+		t.Fatalf("explicit response launched %d additional rounds, want one", callCount-3)
 	}
 
 	// Now approve manually to finish
@@ -543,25 +534,68 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 	waitExecutorDone(t, done)
 }
 
-func TestExecutor_AskUserGatePublishesConfiguredLimitExhaustion(t *testing.T) {
+func TestExecutor_AskUserGateAtZeroAutomaticLimitAcceptsOneExplicitRepair(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
-		return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"ask-user"}]}`}, nil
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if calls == 2 && !sctx.Fixing {
+			t.Fatal("explicit repair did not enter fixing mode")
+		}
+		action := "ask-user"
+		if calls > 1 {
+			action = "auto-fix"
+		}
+		return &StepOutcome{NeedsApproval: true, AutoFixable: calls > 1, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"` + action + `"}]}`}, nil
 	}}
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 0}}, nil, []Step{step}, nil)
 	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	steps, err := database.GetStepsByRun(run.ID)
-	if err != nil || len(steps) != 1 || steps[0].FindingsJSON == nil || !HasConfiguredRepairLimitExhaustion(*steps[0].FindingsJSON) {
-		t.Fatalf("parked findings did not publish configured exhaustion: steps=%+v err=%v", steps, err)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err != nil {
+		t.Fatalf("explicit repair at zero automatic limit: %v", err)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err == nil {
-		t.Fatal("configured-exhausted gate accepted fix")
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixing)
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if calls != 2 {
+		t.Fatalf("explicit response launched %d rounds, want exactly one repair", calls-1)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
 	}
 	waitExecutorDone(t, done)
+}
+
+func TestExecutor_CustomGatesRequireOneExplicitResponsePerRepair(t *testing.T) {
+	for _, anchor := range []types.StepName{types.StepReview, types.StepTest} {
+		t.Run(string(anchor), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			stepName := types.CustomGateStepName(anchor, "policy")
+			calls := 0
+			step := &adaptiveCallStep{name: stepName, fn: func(*StepContext) (*StepOutcome, error) {
+				calls++
+				action := "ask-user"
+				if calls > 1 {
+					action = "auto-fix"
+				}
+				return &StepOutcome{NeedsApproval: true, AutoFixable: calls > 1, Findings: `{"findings":[{"id":"policy","severity":"warning","description":"policy failed","action":"` + action + `"}]}`}, nil
+			}}
+			exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 3, Test: 3}}, nil, []Step{step}, nil)
+			done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusAwaitingApproval)
+			if err := exec.Respond(stepName, types.ActionFix, []string{"policy"}); err != nil {
+				t.Fatal(err)
+			}
+			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusFixing)
+			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusFixReview)
+			if calls != 2 {
+				t.Fatalf("custom gate auto-looped after one response: calls=%d", calls)
+			}
+			if err := exec.Respond(stepName, types.ActionApprove, nil); err != nil {
+				t.Fatal(err)
+			}
+			waitExecutorDone(t, done)
+		})
+	}
 }
 
 func TestExecutor_CustomGateDoesNotInheritAnchorRepairBudget(t *testing.T) {

@@ -27,12 +27,15 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 	return d.reserveStepRepair(stepID, roundID, limit, explicit, false, nil, nil)
 }
 
+func (d *DB) ReserveStepRepairWithSelection(stepID, roundID string, limit int, selectedFindingIDs *string) (RepairBudgetDecision, error) {
+	return d.reserveStepRepair(stepID, roundID, limit, false, false, selectedFindingIDs, nil)
+}
+
 func (d *DB) AuthorizeStepRepair(stepID, roundID string, limit int, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
 	return d.reserveStepRepair(stepID, roundID, limit, true, true, selectedFindingIDs, userFindingsJSON)
 }
 
 func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, replayAuthorization bool, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
-	configuredLimit := limit
 	result := RepairBudgetDecision{Limit: limit, AuthorityLimit: limit}
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -45,7 +48,6 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 	if err := tx.QueryRow(`SELECT auto_fix_limit, status, auto_fix_limit_provenance FROM step_results WHERE id = ?`, stepID).Scan(&stepLimit, &stepStatus, &limitProvenance); err != nil {
 		return result, err
 	}
-	legacyExplicitEligible := false
 	switch limitProvenance {
 	case "initialized":
 		if stepLimit.Valid {
@@ -53,7 +55,6 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 		}
 	case "legacy_normalized":
 		limit = 0
-		legacyExplicitEligible = true
 	default:
 		switch stepStatus {
 		case types.StepStatusPending:
@@ -62,7 +63,6 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 			}
 		case types.StepStatusRunning, types.StepStatusAwaitingApproval, types.StepStatusFixing, types.StepStatusFixReview:
 			limit = 0
-			legacyExplicitEligible = true
 			if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = 0, auto_fix_limit_provenance = 'legacy_normalized' WHERE id = ? AND auto_fix_limit_provenance = 'legacy_unknown'`, stepID); err != nil {
 				return result, err
 			}
@@ -87,7 +87,7 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 		return result, err
 	}
 	if recordedLatestAuthority.Valid {
-		result.AuthorityLimit = min(limit, int(recordedLatestAuthority.Int64))
+		result.AuthorityLimit = int(recordedLatestAuthority.Int64)
 	}
 	var latestID string
 	if err := tx.QueryRow(`SELECT id FROM step_rounds WHERE step_result_id = ? ORDER BY round DESC LIMIT 1`, stepID).Scan(&latestID); err != nil {
@@ -108,7 +108,7 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 		limit = min(limit, recordedLimit)
 		result.Limit = limit
 		if recordedAuthority.Valid {
-			result.AuthorityLimit = min(limit, int(recordedAuthority.Int64))
+			result.AuthorityLimit = int(recordedAuthority.Int64)
 		}
 		if source != "exhausted" {
 			result.Duplicate = true
@@ -116,7 +116,7 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 			return result, nil
 		}
 		if !explicit {
-			result.ExplicitRepairAvailable = result.Consumed < limit || legacyExplicitEligible && result.Consumed < configuredLimit
+			result.ExplicitRepairAvailable = true
 			return result, nil
 		}
 	}
@@ -135,18 +135,21 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 	}
 	result.Consumed = max(completed+pending, reserved)
 	if source == "exhausted" && recordedAuthority.Valid {
-		result.AuthorityLimit = min(limit, int(recordedAuthority.Int64))
+		result.AuthorityLimit = int(recordedAuthority.Int64)
 	}
 	if explicit {
-		if legacyExplicitEligible {
-			result.AuthorityLimit = min(configuredLimit, result.Consumed+1)
-		} else {
-			result.AuthorityLimit = min(limit, result.Consumed+1)
+		result.AuthorityLimit = min(limit, result.Consumed+1)
+		if replayAuthorization {
+			result.AuthorityLimit = result.Consumed + 1
 		}
 	}
-	result.ExplicitRepairAvailable = result.Consumed < limit || legacyExplicitEligible && result.Consumed < configuredLimit
+	result.ExplicitRepairAvailable = true
 	source = "exhausted"
-	if result.Consumed < result.AuthorityLimit {
+	authorizedLimit := min(limit, result.AuthorityLimit)
+	if replayAuthorization && explicit {
+		authorizedLimit = result.AuthorityLimit
+	}
+	if result.Consumed < authorizedLimit {
 		result.Granted = true
 		result.ExplicitRepairAvailable = false
 		result.Consumed++
@@ -165,6 +168,12 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source, dispatch_state) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, repair_limit = excluded.repair_limit, authority_limit = excluded.authority_limit, source = excluded.source, dispatch_state = excluded.dispatch_state`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source, dispatch); err != nil {
 		return result, err
 	}
+	if result.Granted {
+		ts := now()
+		if _, err := tx.Exec(`INSERT OR IGNORE INTO repair_invocations(id, round_id, step_result_id, ordinal, state, created_at, updated_at) VALUES (?, ?, ?, 0, 'prepared', ?, ?)`, newID(), roundID, stepID, ts, ts); err != nil {
+			return result, err
+		}
+	}
 	if result.Granted && explicit {
 		if _, err := tx.Exec(`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`, selectedFindingIDs, RoundSelectionSourceUser, userFindingsJSON, roundID); err != nil {
 			return result, err
@@ -174,6 +183,11 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 		}
 	}
 	if result.Granted && !explicit {
+		if selectedFindingIDs != nil {
+			if _, err := tx.Exec(`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ? WHERE id = ?`, selectedFindingIDs, RoundSelectionSourceAutoFix, roundID); err != nil {
+				return result, err
+			}
+		}
 		ts := now()
 		if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, override_reason = NULL, auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_normalized' THEN 'initialized' ELSE auto_fix_limit_provenance END WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair authorized", stepID); err != nil {
 			return result, err
@@ -195,20 +209,30 @@ func (d *DB) SetRepairBudgetFindings(roundID, findings string) error {
 func (d *DB) HasRecoverableRepairDispatch(runID string) (bool, error) {
 	var found bool
 	err := d.sql.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM repair_invocations i
+		JOIN step_results s ON s.id = i.step_result_id
+		WHERE s.run_id = ? AND i.state IN ('prepared', 'registered', 'fixer_started', 'terminal')
+		UNION ALL
 		SELECT 1 FROM repair_budget_decisions d
 		JOIN step_results s ON s.id = d.step_result_id
 		WHERE s.run_id = ? AND d.dispatch_state IN ('claimed', 'started', 'repair_started_unresolved')
-	)`, runID).Scan(&found)
+		AND NOT EXISTS (SELECT 1 FROM repair_invocations i WHERE i.round_id = d.round_id)
+	)`, runID, runID).Scan(&found)
 	return found, err
 }
 
 func (d *DB) HasStartedRepairDispatch(runID string) (bool, error) {
 	var found bool
 	err := d.sql.QueryRow(`SELECT EXISTS(
+		SELECT 1 FROM repair_invocations i
+		JOIN step_results s ON s.id = i.step_result_id
+		WHERE s.run_id = ? AND i.state IN ('registered', 'fixer_started')
+		UNION ALL
 		SELECT 1 FROM repair_budget_decisions d
 		JOIN step_results s ON s.id = d.step_result_id
 		WHERE s.run_id = ? AND d.dispatch_state = 'started'
-	)`, runID).Scan(&found)
+		AND NOT EXISTS (SELECT 1 FROM repair_invocations i WHERE i.round_id = d.round_id)
+	)`, runID, runID).Scan(&found)
 	return found, err
 }
 
@@ -244,24 +268,11 @@ func (d *DB) ClaimStepRepair(stepID, roundID string) error {
 }
 
 func (d *DB) BindStepRepairProcess(stepID, roundID, activity string, pid int) error {
-	tx, err := d.sql.Begin()
+	invocation, err := d.RegisterRepairInvocation(stepID, roundID, 0, "", "", "", pid)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'started' WHERE round_id = ? AND step_result_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID, stepID)
-	if err != nil {
-		return err
-	}
-	if changed, err := result.RowsAffected(); err != nil {
-		return err
-	} else if changed != 1 {
-		return fmt.Errorf("repair dispatch is not claimable")
-	}
-	if _, err := tx.Exec(`UPDATE step_results SET last_activity_at = ?, last_activity = ?, agent_pid = ? WHERE id = ?`, now(), activity, pid, stepID); err != nil {
-		return err
-	}
-	return tx.Commit()
+	return d.BindRepairInvocationProcess(invocation.ID, activity, pid)
 }
 
 func (d *DB) CompleteStepRepair(stepID, roundID string) error {
@@ -270,6 +281,9 @@ func (d *DB) CompleteStepRepair(stepID, roundID string) error {
 		return err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'consumed', updated_at = ? WHERE round_id = ? AND step_result_id = ? AND state = 'terminal'`, now(), roundID, stepID); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'completed' WHERE round_id = ? AND step_result_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID, stepID); err != nil {
 		return err
 	}
@@ -292,6 +306,13 @@ func (d *DB) RetryUnstartedStepRepair(stepID, roundID string) error {
 	}
 	if !state.Valid || state.String != "repair_started_unresolved" {
 		return fmt.Errorf("repair is not awaiting reconciliation")
+	}
+	var invocationEvidence bool
+	if err := tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM repair_invocations WHERE round_id = ? AND state != 'prepared')`, roundID).Scan(&invocationEvidence); err != nil {
+		return err
+	}
+	if invocationEvidence {
+		return fmt.Errorf("repair invocation was registered; abort rather than replaying it")
 	}
 	if pid.Valid {
 		return fmt.Errorf("repair process identity %d was registered; abort rather than replaying it", pid.Int64)
@@ -320,7 +341,7 @@ func (d *DB) StepRepairBudgetStatus(stepID string, configuredLimit int) (RepairB
 		return result, err
 	}
 	result.Consumed = max(reserved, completed)
-	result.ExplicitRepairAvailable = result.Consumed < result.Limit
+	result.ExplicitRepairAvailable = true
 	return result, nil
 }
 
@@ -337,6 +358,24 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 			return "", nil
 		}
 		return "", err
+	}
+	var invocationState sql.NullString
+	if err := tx.QueryRow(`SELECT state FROM repair_invocations WHERE round_id = ? AND step_result_id = ? ORDER BY ordinal DESC LIMIT 1`, roundID, stepID).Scan(&invocationState); err != nil && err != sql.ErrNoRows {
+		return "", err
+	}
+	if invocationState.Valid {
+		switch invocationState.String {
+		case "prepared", "terminal":
+			state = sql.NullString{String: "fix_authorized", Valid: true}
+			if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'fix_authorized' WHERE round_id = ?`, roundID); err != nil {
+				return "", err
+			}
+		case "registered", "fixer_started":
+			state = sql.NullString{String: "repair_started_unresolved", Valid: true}
+			if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE round_id = ?`, roundID); err != nil {
+				return "", err
+			}
+		}
 	}
 	if state.Valid && (state.String == "claimed" || state.String == "started") {
 		state.String = "repair_started_unresolved"

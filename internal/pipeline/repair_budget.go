@@ -60,11 +60,7 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 		return raw
 	} // Caller already normalized the payload.
 	category := repairBudgetFindingCategory
-	description := fmt.Sprintf("Automatic repair budget exhausted for %s: consumed %d repairs, current authority limit %d, configured maximum %d; requested additional repair %d. No further automatic repair is authorized. Explicit authority remains available for exactly one additional repair without increasing the automatic ceiling; run `no-mistakes axi status` from this run's branch for version-matched response guidance (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, decision.Consumed+1, runID)
-	if !decision.ExplicitRepairAvailable {
-		category = repairLimitFindingCategory
-		description = fmt.Sprintf("Configured repair maximum reached for %s: consumed %d repairs out of %d. No additional repair can be authorized for this step lifecycle; approve to accept the unresolved findings, or skip or abort the step.", step, decision.Consumed, decision.Limit)
-	}
+	description := fmt.Sprintf("Automatic repair budget exhausted for %s: consumed %d repairs, current authority limit %d, configured automatic maximum %d; requested additional repair %d. No further automatic repair is authorized. An explicit response can authorize exactly one selected repair without increasing the automatic ceiling; run `no-mistakes axi status` from this run's branch for version-matched response guidance (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, decision.Consumed+1, runID)
 	findings.Items = append(findings.Items, types.Finding{
 		ID:          "repair-budget-" + string(step),
 		Severity:    types.FindingSeverityWarning,
@@ -79,12 +75,8 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 	return result
 }
 
-func configuredRepairLimitFindings(raw string, step types.StepName, decision db.RepairBudgetDecision) string {
-	if decision.Consumed < decision.Limit || HasConfiguredRepairLimitExhaustion(raw) {
-		return raw
-	}
-	decision.ExplicitRepairAvailable = false
-	return exhaustedRepairFindings(raw, step, "", decision)
+func configuredRepairLimitFindings(raw string, _ types.StepName, _ db.RepairBudgetDecision) string {
+	return raw
 }
 
 func repairReconciliationFindings(raw string, step types.StepName, pid *int) string {

@@ -140,7 +140,7 @@ func TestStartedRepairRecoveryStaysFixingWithoutRedispatch(t *testing.T) {
 	}
 }
 
-func TestClaimedRepairRecoveryNeverLaunchesUnboundInvocation(t *testing.T) {
+func TestPreparedRepairRecoveryRestartsTheSameInvocation(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
@@ -158,11 +158,11 @@ func TestClaimedRepairRecoveryNeverLaunchesUnboundInvocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
-	if err != nil || state != "repair_started_unresolved" {
-		t.Fatalf("restored claimed state = %q, %v", state, err)
+	if err != nil || state != "fix_authorized" {
+		t.Fatalf("restored prepared state = %q, %v", state, err)
 	}
-	if err := d.ClaimStepRepair(step.ID, round.ID); err == nil {
-		t.Fatal("claimed repair was dispatchable again")
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatalf("prepared invocation was not dispatchable by its original id: %v", err)
 	}
 }
 
@@ -485,7 +485,8 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	if err != nil || retriedBeforeGrant.Granted || !retriedBeforeGrant.ExplicitRepairAvailable {
 		t.Fatalf("resume hid one-time legacy authority: %+v %v", retriedBeforeGrant, err)
 	}
-	granted, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	ids := `["ci-red"]`
+	granted, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
 	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 0 || granted.AuthorityLimit != 1 || granted.ExplicitRepairAvailable {
 		t.Fatalf("explicit response did not grant exactly one repair: %+v %v", granted, err)
 	}
@@ -509,8 +510,8 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	defer d.Close()
 	for range 2 {
 		retried, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
-		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 0 || retried.AuthorityLimit != 0 || retried.ExplicitRepairAvailable {
-			t.Fatalf("resume or retry widened legacy authority: %+v %v", retried, err)
+		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 0 || retried.AuthorityLimit != 1 || !retried.ExplicitRepairAvailable {
+			t.Fatalf("resume or retry widened legacy automatic authority: %+v %v", retried, err)
 		}
 	}
 }

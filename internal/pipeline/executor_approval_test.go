@@ -13,6 +13,52 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+type repairResultAgent struct{ calls int }
+
+func (a *repairResultAgent) Name() string { return "repair-result" }
+func (a *repairResultAgent) Close() error { return nil }
+func (a *repairResultAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	return &agent.Result{Text: "durable result"}, nil
+}
+
+func TestRepairInvocationAgent_ReplaysTerminalResultWithoutRerunningFixer(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 0, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	inner := &repairResultAgent{}
+	wrapped := &repairInvocationAgent{inner: inner, db: database, stepID: stepResult.ID, worktree: t.TempDir(), roundID: func() string { return round.ID }}
+	first, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review-fix"})
+	if err != nil || first == nil || first.Text != "durable result" {
+		t.Fatalf("first Run() = %+v, %v", first, err)
+	}
+	if state, _, err := database.RepairInvocationRecoveryState(stepResult.ID, round.ID); err != nil || state != "terminal" {
+		t.Fatalf("terminal invocation state = %q, %v", state, err)
+	}
+	if state, err := database.RestoreLegacyRepairAuthorization(stepResult.ID, round.ID); err != nil || state != "fix_authorized" {
+		t.Fatalf("recovery authorization = %q, %v", state, err)
+	}
+	recovered := &repairInvocationAgent{inner: inner, db: database, stepID: stepResult.ID, worktree: t.TempDir(), roundID: func() string { return round.ID }}
+	second, err := recovered.Run(context.Background(), agent.RunOpts{Purpose: "review-fix"})
+	if err != nil || second == nil || second.Text != "durable result" {
+		t.Fatalf("replayed Run() = %+v, %v", second, err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("native fixer calls = %d, want 1", inner.calls)
+	}
+}
+
 func TestExecutor_RepairSelectionMustMatchParkedFindingBeforeAuthorityIsConsumed(t *testing.T) {
 	database, p, run, _ := setupTest(t)
 	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)

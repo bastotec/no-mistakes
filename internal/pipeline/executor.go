@@ -917,14 +917,18 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		case agent.LifecyclePhaseStart:
 			pid := event.PID
 			if activeRepairRoundID != "" {
-				if dbErr := e.db.BindStepRepairProcess(sr.ID, activeRepairRoundID, text, pid); dbErr != nil {
-					slog.Warn("failed to bind repair process start", "step", stepName, "error", dbErr)
+				if dbErr := e.db.TouchStepActivity(sr.ID, text); dbErr != nil {
+					slog.Warn("failed to record repair process activity", "step", stepName, "error", dbErr)
 				}
 			} else if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseExit:
-			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
+			if activeRepairRoundID != "" {
+				if dbErr := e.db.TouchStepActivity(sr.ID, text); dbErr != nil {
+					slog.Warn("failed to retain repair process identity", "step", stepName, "error", dbErr)
+				}
+			} else if dbErr := e.db.SetStepAgentActivity(sr.ID, text, nil); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseActivity:
@@ -960,6 +964,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			runID:    run.ID,
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
+		}
+		stepAgent = &repairInvocationAgent{
+			inner:    stepAgent,
+			db:       e.db,
+			stepID:   sr.ID,
+			worktree: workDir,
+			roundID:  func() string { return activeRepairRoundID },
 		}
 	}
 	ciReady := run.CIReadyAt != nil
@@ -1168,7 +1179,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		if outcome.AutoFixable {
 			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
 			if fixableFindings != "" {
-				decision, dbErr := e.db.ReserveStepRepair(sr.ID, currentRoundID, autoFixLimit, false)
+				var selectedIDs *string
+				if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
+					selectedIDs = &idsJSON
+				}
+				decision, dbErr := e.db.ReserveStepRepairWithSelection(sr.ID, currentRoundID, autoFixLimit, selectedIDs)
 				if dbErr != nil {
 					return false, "", fmt.Errorf("authorize %s repair: %w", stepName, dbErr)
 				}
@@ -1186,13 +1201,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					executionMS += time.Since(phaseStart).Milliseconds()
 					fixCount := findingsCount(fixableFindings)
 					writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", decision.Consumed, decision.Limit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
-					if currentRoundID != "" {
-						if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
-							if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix); dbErr != nil {
-								slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
-							}
-						}
-					}
 					e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
 					phaseStart = time.Now()
 					sctx.Fixing = true
@@ -1651,6 +1659,93 @@ func (a *gateStepBoundaryAgent) ReportsAgentAttempts() bool {
 
 func (a *gateStepBoundaryAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
+}
+
+type repairInvocationAgent struct {
+	inner    agent.Agent
+	db       *db.DB
+	stepID   string
+	worktree string
+	roundID  func() string
+	mu       sync.Mutex
+	ordinals map[string]int
+}
+
+func (a *repairInvocationAgent) Name() string { return a.inner.Name() }
+func (a *repairInvocationAgent) Close() error { return a.inner.Close() }
+func (a *repairInvocationAgent) SupportsSessionResume() bool {
+	return agent.SupportsSessionResume(a.inner)
+}
+func (a *repairInvocationAgent) SupportsSessionProvider(provider string) bool {
+	return agent.SupportsSessionProvider(a.inner, provider)
+}
+func (a *repairInvocationAgent) ReportsAgentAttempts() bool {
+	return agent.ReportsAgentAttempts(a.inner)
+}
+func (a *repairInvocationAgent) NeutralizesGateInstructions() bool {
+	return agent.NeutralizesGateInstructions(a.inner)
+}
+func (a *repairInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	roundID := a.roundID()
+	if roundID == "" {
+		return a.inner.Run(ctx, opts)
+	}
+	a.mu.Lock()
+	if a.ordinals == nil {
+		a.ordinals = make(map[string]int)
+	}
+	ordinal := a.ordinals[roundID]
+	a.ordinals[roundID] = ordinal + 1
+	a.mu.Unlock()
+	invocation, err := a.db.RegisterRepairInvocation(a.stepID, roundID, ordinal, a.worktree, a.inner.Name(), opts.Purpose, os.Getpid())
+	if err != nil {
+		return nil, fmt.Errorf("register repair invocation: %w", err)
+	}
+	if invocation.State == "terminal" {
+		var result *agent.Result
+		if invocation.ResultPresent {
+			result = &agent.Result{}
+			if err := json.Unmarshal(invocation.ResultJSON, result); err != nil {
+				return nil, fmt.Errorf("decode repair invocation result: %w", err)
+			}
+		}
+		if invocation.ErrorText != nil {
+			return result, errors.New(*invocation.ErrorText)
+		}
+		return result, nil
+	}
+	previousLifecycle := opts.OnLifecycle
+	opts.OnLifecycle = func(event agent.LifecycleEvent) {
+		if event.Phase == agent.LifecyclePhaseStart {
+			activity := event.Message
+			if activity == "" {
+				activity = fmt.Sprintf("%s %s", event.Agent, event.Phase)
+			}
+			if err := a.db.BindRepairInvocationProcess(invocation.ID, activity, event.PID); err != nil {
+				slog.Warn("failed to bind native fixer process", "error", err)
+			}
+		}
+		if previousLifecycle != nil {
+			previousLifecycle(event)
+		}
+	}
+	result, runErr := a.inner.Run(ctx, opts)
+	var resultJSON []byte
+	if result != nil {
+		resultJSON, err = json.Marshal(result)
+		if err != nil {
+			return result, fmt.Errorf("encode repair invocation result: %w", err)
+		}
+	}
+	var errorText *string
+	if runErr != nil {
+		text := runErr.Error()
+		errorText = &text
+	}
+	if err := a.db.FinishRepairInvocation(invocation.ID, resultJSON, result != nil, errorText); err != nil {
+		return result, fmt.Errorf("publish repair invocation result: %w", err)
+	}
+	return result, runErr
 }
 
 type lifecycleAgent struct {

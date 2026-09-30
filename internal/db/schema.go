@@ -114,6 +114,25 @@ CREATE TABLE IF NOT EXISTS repair_budget_decisions (
     dispatch_state TEXT
 );
 
+CREATE TABLE IF NOT EXISTS repair_invocations (
+    id             TEXT PRIMARY KEY,
+    round_id       TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+    step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    ordinal        INTEGER NOT NULL,
+    state          TEXT NOT NULL,
+    worktree       TEXT,
+    agent          TEXT,
+    purpose        TEXT,
+    wrapper_pid    INTEGER,
+    fixer_pid      INTEGER,
+    result_json    BLOB,
+    result_present INTEGER NOT NULL DEFAULT 0,
+    error_text     TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    UNIQUE (round_id, ordinal)
+);
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
@@ -324,6 +343,24 @@ var migrationStatements = []string{
 	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE repair_budget_decisions ADD COLUMN authority_limit INTEGER`,
 	`ALTER TABLE repair_budget_decisions ADD COLUMN dispatch_state TEXT`,
+	`CREATE TABLE IF NOT EXISTS repair_invocations (
+		id TEXT PRIMARY KEY,
+		round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+		step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+		ordinal INTEGER NOT NULL,
+		state TEXT NOT NULL,
+		worktree TEXT,
+		agent TEXT,
+		purpose TEXT,
+		wrapper_pid INTEGER,
+		fixer_pid INTEGER,
+		result_json BLOB,
+		result_present INTEGER NOT NULL DEFAULT 0,
+		error_text TEXT,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		UNIQUE (round_id, ordinal)
+	)`,
 	// Non-nil exactly when a human answered ActionApprove on a step whose gate
 	// existed because of an unresolved external condition (currently: the CI
 	// step's live checks were still failing) - see
