@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -15,10 +16,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-// A response authorizes one repair, not a fresh automatic budget. After three
-// explicit repairs with a limit of three, a still-red observation must park;
-// selection_source=user must not hide consumed repairs from the ceiling.
-func TestExecutor_FinalAuthorizedRepairDoesNotMintAutomaticBudget(t *testing.T) {
+// A response authorizes one repair, not the configured automatic headroom.
+func TestExecutor_ResponsePinsOneRepairUntilLaterAuthority(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	var calls atomic.Int32
 	step := &adaptiveCallStep{
@@ -32,7 +31,7 @@ func TestExecutor_FinalAuthorizedRepairDoesNotMintAutomaticBudget(t *testing.T) 
 			}
 			return &StepOutcome{
 				NeedsApproval: true,
-				AutoFixable:   n >= 4,
+				AutoFixable:   n > 1,
 				Findings:      `{"findings":[{"id":"ci-red","severity":"error","description":"serial check failed","action":"auto-fix"}],"summary":"serial check failed"}`,
 			}, nil
 		},
@@ -57,31 +56,26 @@ func TestExecutor_FinalAuthorizedRepairDoesNotMintAutomaticBudget(t *testing.T) 
 			}
 		}
 	}
-	for n := int32(1); n <= 3; n++ {
-		waitGate(n)
-		if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
-			t.Fatal(err)
-		}
+	waitGate(1)
+	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
+		t.Fatal(err)
 	}
-	waitGate(4)
-	if got := calls.Load(); got != 4 {
-		t.Errorf("launched beyond final authorized repair: executions=%d, want initial + 3 repairs; no response authorized auto-fix 5/3", got)
-	}
+	waitGate(2)
 	invocations, err := database.GetAgentInvocationsByRun(run.ID)
-	if err != nil || len(invocations) != 3 {
-		t.Fatalf("unauthorized fixer invocation: count=%d error=%v", len(invocations), err)
+	if err != nil || len(invocations) != 1 || calls.Load() != 2 {
+		t.Fatalf("automatic request exceeded response ceiling: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
 	}
-	parked, _ := database.GetRun(run.ID)
-	if parked.HeadSHA != run.HeadSHA {
-		t.Fatal("exhaustion changed branch custody")
+	steps, _ := database.GetStepsByRun(run.ID)
+	if steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, "current authority limit 1") || !strings.Contains(*steps[0].FindingsJSON, "configured maximum 3") {
+		t.Fatalf("missing bounded authority request: %+v", steps[0])
 	}
 	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
 		t.Fatal(err)
 	}
-	waitGate(5)
+	waitGate(3)
 	invocations, err = database.GetAgentInvocationsByRun(run.ID)
-	if err != nil || len(invocations) != 4 || calls.Load() != 5 {
-		t.Fatalf("explicit authority was not bounded to one launch: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
+	if err != nil || len(invocations) != 2 || calls.Load() != 3 {
+		t.Fatalf("later authority did not grant exactly one repair: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
 	}
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)

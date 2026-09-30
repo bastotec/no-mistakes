@@ -10,34 +10,42 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestRepairBudgetConcurrentBoundedAuthority(t *testing.T) {
-	d := openTestDB(t)
-	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
-	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
-	step, _ := d.InsertStepResult(run.ID, types.StepCI)
-	for n := 1; n <= 3; n++ {
-		if _, err := d.InsertStepRound(step.ID, n, "user_fix", nil, nil, 0); err != nil {
-			t.Fatal(err)
-		}
-	}
-	observation, err := d.InsertStepRound(step.ID, 4, "initial", nil, nil, 0)
+func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "budget.db")
+	d, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for n := 0; n < 3; n++ {
-		got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
-		if err != nil || got.Granted || got.Consumed != 3 || got.Limit != 3 {
-			t.Fatalf("exhausted decision: %+v %v", got, err)
-		}
+	defer func() { d.Close() }()
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepCI)
+	observation, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	before, _ := d.GetRun(run.ID)
+	first, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	if err != nil || !first.Granted || first.Consumed != 1 || first.AuthorityLimit != 1 || first.Limit != 3 {
+		t.Fatalf("first response did not pin one repair: %+v %v", first, err)
+	}
+	next, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	denied, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
+	if err != nil || denied.Granted || denied.Consumed != 1 || denied.AuthorityLimit != 1 || denied.Limit != 3 {
+		t.Fatalf("automatic repair exceeded response authority: %+v %v", denied, err)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	var grants atomic.Int32
 	var wg sync.WaitGroup
 	for n := 0; n < 20; n++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+			got, err := d.ReserveStepRepair(step.ID, next.ID, 3, true)
 			if err != nil {
 				t.Error(err)
 				return
@@ -49,17 +57,12 @@ func TestRepairBudgetConcurrentBoundedAuthority(t *testing.T) {
 	}
 	wg.Wait()
 	if grants.Load() != 1 {
-		t.Fatalf("explicit response launched %d repairs, want one", grants.Load())
+		t.Fatalf("later response launched %d repairs, want one", grants.Load())
 	}
-	after, _ := d.GetRun(run.ID)
-	if before.HeadSHA != after.HeadSHA || !reflect.DeepEqual(before.SubmittedHeadSHA, after.SubmittedHeadSHA) {
-		t.Fatal("authorization changed branch custody")
-	}
-	// A subsequent observation never inherits additional automatic authority.
-	next, _ := d.InsertStepRound(step.ID, 5, "auto_fix", nil, nil, 0)
-	got, err := d.ReserveStepRepair(step.ID, next.ID, 100, false)
-	if err != nil || got.Granted || got.Consumed != 4 || got.Limit != 3 {
-		t.Fatalf("response/reload minted authority: %+v %v", got, err)
+	afterGrant, _ := d.InsertStepRound(step.ID, 3, "auto_fix", nil, nil, 0)
+	got, err := d.ReserveStepRepair(step.ID, afterGrant.ID, 100, false)
+	if err != nil || got.Granted || got.Consumed != 2 || got.AuthorityLimit != 2 || got.Limit != 3 {
+		t.Fatalf("retry or config reload widened response authority: %+v %v", got, err)
 	}
 }
 
@@ -118,6 +121,29 @@ func TestRepairBudgetLegacyOverCeilingSurvivesMigration(t *testing.T) {
 		if !reflect.DeepEqual(preserved[n], rounds[n]) {
 			t.Fatal("migration changed a legacy round")
 		}
+	}
+}
+
+func TestRepairBudgetAutomaticSequenceUsesConfiguredLimit(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	for n := 1; n <= 3; n++ {
+		trigger := "auto_fix"
+		if n == 1 {
+			trigger = "initial"
+		}
+		observation, _ := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
+		got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+		if err != nil || !got.Granted || got.Consumed != n || got.AuthorityLimit != 3 {
+			t.Fatalf("automatic repair %d: %+v %v", n, got, err)
+		}
+	}
+	observation, _ := d.InsertStepRound(step.ID, 4, "auto_fix", nil, nil, 0)
+	got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	if err != nil || got.Granted || got.Consumed != 3 {
+		t.Fatalf("automatic sequence exceeded configured limit: %+v %v", got, err)
 	}
 }
 

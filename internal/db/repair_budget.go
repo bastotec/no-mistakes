@@ -9,12 +9,13 @@ import (
 
 // RepairBudgetDecision is a durable pre-launch decision. Consumed includes
 // every started repair, regardless of whether a user or automatic filter chose
-// it. Explicit responses grant exactly one attempt beyond the ordinary ceiling.
+// it. AuthorityLimit is the current configured or response-bounded ceiling.
 type RepairBudgetDecision struct {
-	Consumed  int
-	Limit     int
-	Granted   bool
-	Duplicate bool
+	Consumed       int
+	Limit          int
+	AuthorityLimit int
+	Granted        bool
+	Duplicate      bool
 }
 
 // ReserveStepRepair is the single authorization boundary for all fix launches.
@@ -22,7 +23,7 @@ type RepairBudgetDecision struct {
 // count before agents/custody mutation, even if execution never returns a round.
 // Legacy completed rounds and pending selections are conservatively retained.
 func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool) (RepairBudgetDecision, error) {
-	result := RepairBudgetDecision{Limit: limit}
+	result := RepairBudgetDecision{Limit: limit, AuthorityLimit: limit}
 	tx, err := d.sql.Begin()
 	if err != nil {
 		return result, err
@@ -35,6 +36,15 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 	if pinnedLimit.Valid {
 		limit = min(limit, int(pinnedLimit.Int64))
 		result.Limit = limit
+		result.AuthorityLimit = limit
+	}
+	var authorityLimit sql.NullInt64
+	err = tx.QueryRow(`SELECT d.authority_limit FROM repair_budget_decisions d JOIN step_rounds r ON r.id = d.round_id WHERE d.step_result_id = ? AND d.authority_limit IS NOT NULL ORDER BY r.round DESC LIMIT 1`, stepID).Scan(&authorityLimit)
+	if err != nil && err != sql.ErrNoRows {
+		return result, err
+	}
+	if authorityLimit.Valid {
+		result.AuthorityLimit = min(limit, int(authorityLimit.Int64))
 	}
 	var latestID string
 	if err := tx.QueryRow(`SELECT id FROM step_rounds WHERE step_result_id = ? ORDER BY round DESC LIMIT 1`, stepID).Scan(&latestID); err != nil {
@@ -45,12 +55,16 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 	}
 	var source string
 	var recordedLimit int
-	err = tx.QueryRow(`SELECT consumed, repair_limit, source FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ?`, roundID, stepID).Scan(&result.Consumed, &recordedLimit, &source)
+	var recordedAuthority sql.NullInt64
+	err = tx.QueryRow(`SELECT consumed, repair_limit, authority_limit, source FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ?`, roundID, stepID).Scan(&result.Consumed, &recordedLimit, &recordedAuthority, &source)
 	if err != nil && err != sql.ErrNoRows {
 		return result, err
 	}
 	if err == nil {
 		result.Limit = recordedLimit
+		if recordedAuthority.Valid {
+			result.AuthorityLimit = int(recordedAuthority.Int64)
+		}
 		if source != "exhausted" {
 			result.Duplicate = true
 			return result, nil
@@ -73,13 +87,18 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		return result, err
 	}
 	result.Consumed = max(completed+pending, reserved)
-	// Once a denial is persisted, config reload or polling cannot enlarge it.
 	if source == "exhausted" {
 		limit = recordedLimit
+		result.Limit = limit
+		if recordedAuthority.Valid {
+			result.AuthorityLimit = int(recordedAuthority.Int64)
+		}
 	}
-	result.Limit = limit
+	if explicit {
+		result.AuthorityLimit = min(limit, result.Consumed+1)
+	}
 	source = "exhausted"
-	if explicit || result.Consumed < limit {
+	if result.Consumed < result.AuthorityLimit {
 		result.Granted = true
 		result.Consumed++
 		source = RoundSelectionSourceAutoFix
@@ -87,7 +106,7 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 			source = RoundSelectionSourceUser
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, source) VALUES (?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, source = excluded.source`, roundID, stepID, result.Consumed, limit, source); err != nil {
+	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, authority_limit = excluded.authority_limit, source = excluded.source`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source); err != nil {
 		return result, err
 	}
 	if result.Granted {

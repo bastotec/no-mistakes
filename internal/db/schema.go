@@ -108,6 +108,7 @@ CREATE TABLE IF NOT EXISTS repair_budget_decisions (
     step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
     consumed       INTEGER NOT NULL,
     repair_limit   INTEGER NOT NULL,
+    authority_limit INTEGER,
     source         TEXT NOT NULL
 );
 
@@ -317,6 +318,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN gates_json TEXT`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
 	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE repair_budget_decisions ADD COLUMN authority_limit INTEGER`,
 	// Non-nil exactly when a human answered ActionApprove on a step whose gate
 	// existed because of an unresolved external condition (currently: the CI
 	// step's live checks were still failing) - see

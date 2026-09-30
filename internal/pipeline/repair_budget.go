@@ -34,7 +34,7 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 		Severity:    types.FindingSeverityWarning,
 		Action:      types.ActionAskUser,
 		Category:    repairBudgetFindingCategory,
-		Description: fmt.Sprintf("Repair budget exhausted for %s findings %s: consumed %d repairs, configured limit %d; requested additional repair %d. No further repair is authorized. From this run's branch, authorize exactly one additional repair of the selected findings with `no-mistakes axi respond --step %s --action fix` (run %s). That response does not renew the automatic budget.", step, findingIDsJSON(raw), decision.Consumed, decision.Limit, decision.Consumed+1, step, runID),
+		Description: fmt.Sprintf("Repair budget exhausted for %s findings %s: consumed %d repairs, current authority limit %d, configured maximum %d; requested additional repair %d. No further repair is authorized. From this run's branch, authorize exactly one additional repair of the selected findings with `no-mistakes axi respond --step %s --action fix` (run %s). That response extends authority by one without exceeding the configured maximum.", step, findingIDsJSON(raw), decision.Consumed, decision.AuthorityLimit, decision.Limit, decision.Consumed+1, step, runID),
 	})
 	result, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
