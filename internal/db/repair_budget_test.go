@@ -10,6 +10,65 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int
+		grant bool
+	}{
+		{name: "lower lifecycle limit", limit: 1, grant: true},
+		{name: "zero lifecycle limit", limit: 0, grant: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+			step, _ := d.InsertStepResult(run.ID, types.StepCI)
+			if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, tc.limit, step.ID); err != nil {
+				t.Fatal(err)
+			}
+			observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+			got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+			if err != nil || got.Granted != tc.grant || got.Limit != tc.limit || got.AuthorityLimit != tc.limit {
+				t.Fatalf("reservation ignored persisted lifecycle limit: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestRepairBudgetLoweredLimitCannotBeRestoredByExhaustedDecision(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= 3; n++ {
+		trigger := "auto_fix"
+		if n == 1 {
+			trigger = "initial"
+		}
+		observation, _ := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
+		got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+		if err != nil || !got.Granted {
+			t.Fatalf("reserve repair %d: %+v %v", n, got, err)
+		}
+	}
+	observation, _ := d.InsertStepRound(step.ID, 4, "auto_fix", nil, nil, 0)
+	if got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false); err != nil || got.Granted {
+		t.Fatalf("expected exhaustion decision: %+v %v", got, err)
+	}
+	lowered, err := d.ReserveStepRepair(step.ID, observation.ID, 1, true)
+	if err != nil || lowered.Granted || lowered.Limit != 1 || lowered.AuthorityLimit != 1 {
+		t.Fatalf("exhausted decision restored larger limit: %+v %v", lowered, err)
+	}
+	retried, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	if err != nil || retried.Granted || retried.Limit != 1 || retried.AuthorityLimit != 1 {
+		t.Fatalf("retry widened lowered limit: %+v %v", retried, err)
+	}
+}
+
 func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "budget.db")
 	d, err := Open(path)

@@ -29,15 +29,22 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		return result, err
 	}
 	defer tx.Rollback()
+	var stepLimit sql.NullInt64
+	if err := tx.QueryRow(`SELECT auto_fix_limit FROM step_results WHERE id = ?`, stepID).Scan(&stepLimit); err != nil {
+		return result, err
+	}
+	if stepLimit.Valid {
+		limit = min(limit, int(stepLimit.Int64))
+	}
 	var pinnedLimit sql.NullInt64
 	if err := tx.QueryRow(`SELECT MIN(repair_limit) FROM repair_budget_decisions WHERE step_result_id = ?`, stepID).Scan(&pinnedLimit); err != nil {
 		return result, err
 	}
 	if pinnedLimit.Valid {
 		limit = min(limit, int(pinnedLimit.Int64))
-		result.Limit = limit
-		result.AuthorityLimit = limit
 	}
+	result.Limit = limit
+	result.AuthorityLimit = limit
 	var authorityLimit sql.NullInt64
 	err = tx.QueryRow(`SELECT d.authority_limit FROM repair_budget_decisions d JOIN step_rounds r ON r.id = d.round_id WHERE d.step_result_id = ? AND d.authority_limit IS NOT NULL ORDER BY r.round DESC LIMIT 1`, stepID).Scan(&authorityLimit)
 	if err != nil && err != sql.ErrNoRows {
@@ -61,9 +68,10 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		return result, err
 	}
 	if err == nil {
-		result.Limit = recordedLimit
+		limit = min(limit, recordedLimit)
+		result.Limit = limit
 		if recordedAuthority.Valid {
-			result.AuthorityLimit = int(recordedAuthority.Int64)
+			result.AuthorityLimit = min(limit, int(recordedAuthority.Int64))
 		}
 		if source != "exhausted" {
 			result.Duplicate = true
@@ -87,12 +95,8 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 		return result, err
 	}
 	result.Consumed = max(completed+pending, reserved)
-	if source == "exhausted" {
-		limit = recordedLimit
-		result.Limit = limit
-		if recordedAuthority.Valid {
-			result.AuthorityLimit = int(recordedAuthority.Int64)
-		}
+	if source == "exhausted" && recordedAuthority.Valid {
+		result.AuthorityLimit = min(limit, int(recordedAuthority.Int64))
 	}
 	if explicit {
 		result.AuthorityLimit = min(limit, result.Consumed+1)
@@ -106,7 +110,7 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 			source = RoundSelectionSourceUser
 		}
 	}
-	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, authority_limit = excluded.authority_limit, source = excluded.source`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source); err != nil {
+	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, repair_limit = excluded.repair_limit, authority_limit = excluded.authority_limit, source = excluded.source`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source); err != nil {
 		return result, err
 	}
 	if result.Granted {
