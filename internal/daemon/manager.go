@@ -335,6 +335,13 @@ func newConfiguredAgent(ctx context.Context, cfg *config.Config, evidenceRoot st
 			Profile:                cfg.AgentProfileFor(name),
 			Environment:            environment,
 		})
+		if err == nil {
+			next = agent.WithRepairFactory(next, agent.RepairFactory{
+				Name: name, Bin: cfg.AgentPathFor(name), ExtraArgs: cfg.AgentArgsFor(name),
+				ACPRegistryOverrides: cfg.ACPRegistryOverrides, DisableProjectSettings: cfg.DisableProjectSettings,
+				Profile: cfg.AgentProfileFor(name), Environment: environment,
+			})
+		}
 		if err != nil {
 			for _, existing := range created {
 				_ = existing.Close()

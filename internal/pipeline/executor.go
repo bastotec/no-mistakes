@@ -355,6 +355,7 @@ func (e *Executor) initializeRunScopes(runID string) {
 
 type stepExecutionState struct {
 	fixing           bool
+	resumeRunning    bool
 	previousFindings string
 	deferredFindings string
 	roundNum         int
@@ -391,6 +392,8 @@ type recoveredGate struct {
 	reviewedHeadSHA    string
 	repairAuthorized   bool
 	repairUnresolved   bool
+	repairWrapperLive  bool
+	postRepairMonitor  bool
 	selectedFindingIDs *string
 	userFindingsJSON   *string
 }
@@ -431,6 +434,60 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 	e.initializeRunScopes(run.ID)
+	if gate.repairWrapperLive {
+		ticker := time.NewTicker(250 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			state, _, stateErr := e.db.RepairInvocationRecoveryState(gate.stepResult.ID, gate.lastRoundID)
+			if stateErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("monitor repair wrapper: %w", stateErr), ctx)
+			}
+			if state == "terminal" {
+				gate.repairAuthorized = true
+				gate.repairWrapperLive = false
+				break
+			}
+			token, pid, resultPath, identityErr := e.db.RepairInvocationWrapperIdentity(gate.stepResult.ID, gate.lastRoundID)
+			if identityErr != nil {
+				return e.failRun(run, repo, fmt.Errorf("read repair wrapper identity: %w", identityErr), ctx)
+			}
+			if !repairWrapperIdentityLive(token, pid, resultPath) {
+				if markErr := e.db.MarkRepairInvocationUnresolved(gate.stepResult.ID, gate.lastRoundID); markErr != nil {
+					return e.failRun(run, repo, fmt.Errorf("mark repair wrapper unresolved: %w", markErr), ctx)
+				}
+				gate.repairWrapperLive = false
+				gate.repairUnresolved = true
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return context.Cause(ctx)
+			case <-ticker.C:
+			}
+		}
+	}
+	if gate.postRepairMonitor {
+		skipRemaining, restartFrom, execErr := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
+			resumeRunning:  true,
+			roundNum:       gate.round,
+			executionMS:    recoveredStepDuration(gate.stepResult),
+			currentRoundID: gate.lastRoundID,
+		})
+		if execErr != nil {
+			return e.failRun(run, repo, execErr, ctx)
+		}
+		if skipRemaining {
+			return e.skipRecoveredRemainder(run, repo, gate.index+1)
+		}
+		if restartFrom != "" {
+			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
+			if indexErr != nil {
+				return e.failRun(run, repo, indexErr, ctx)
+			}
+			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
+	}
 	if gate.repairUnresolved {
 		gate.findings = repairReconciliationFindings(gate.findings, gate.step.Name(), gate.stepResult.AgentPID)
 		if err := e.db.SetRepairBudgetFindings(gate.lastRoundID, gate.findings); err != nil {
@@ -675,7 +732,19 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 		if result.StepName != e.steps[index].Name() {
 			return nil, fmt.Errorf("recovered step %d is %q, want %q", index, result.StepName, e.steps[index].Name())
 		}
-		if result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview || result.Status == types.StepStatusFixing {
+		isApprovalGate := result.Status == types.StepStatusAwaitingApproval || result.Status == types.StepStatusFixReview || result.Status == types.StepStatusFixing
+		isPostRepairMonitor := false
+		if result.Status == types.StepStatusRunning {
+			rounds, roundErr := e.db.GetRoundsByStep(result.ID)
+			if roundErr == nil && len(rounds) > 0 {
+				phase, phaseErr := e.db.RepairInvocationLifecyclePhase(result.ID, rounds[len(rounds)-1].ID)
+				if phaseErr != nil {
+					return nil, fmt.Errorf("recover repair lifecycle phase: %w", phaseErr)
+				}
+				isPostRepairMonitor = phase == "post_repair_monitor"
+			}
+		}
+		if isApprovalGate || isPostRepairMonitor {
 			if gate != nil || result.FindingsJSON == nil || result.StartedAt == nil || result.DurationMS == nil {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
@@ -684,16 +753,20 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				return nil, fmt.Errorf("recovered approval gate has no complete round")
 			}
 			latest := rounds[len(rounds)-1]
-			dispatchState, err := e.db.RestoreLegacyRepairAuthorization(result.ID, latest.ID)
-			if err != nil {
-				return nil, fmt.Errorf("recover repair authorization: %w", err)
+			dispatchState := ""
+			if !isPostRepairMonitor {
+				dispatchState, err = e.db.RestoreLegacyRepairAuthorization(result.ID, latest.ID)
+				if err != nil {
+					return nil, fmt.Errorf("recover repair authorization: %w", err)
+				}
 			}
 			repairAuthorized := dispatchState == "fix_authorized"
 			repairUnresolved := dispatchState == "repair_started_unresolved"
-			if result.Status == types.StepStatusFixing && !repairAuthorized && !repairUnresolved {
+			repairWrapperLive := dispatchState == "repair_wrapper_live"
+			if result.Status == types.StepStatusFixing && !repairAuthorized && !repairUnresolved && !repairWrapperLive {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
-			if result.AgentPID != nil && !repairUnresolved {
+			if result.AgentPID != nil && !repairUnresolved && !repairWrapperLive && !isPostRepairMonitor {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
 			if (dispatchState == "fix_authorized" || dispatchState == "repair_started_unresolved") && result.Status == types.StepStatusFixing {
@@ -711,6 +784,8 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				lastRoundID:        latest.ID,
 				repairAuthorized:   repairAuthorized,
 				repairUnresolved:   repairUnresolved,
+				repairWrapperLive:  repairWrapperLive,
+				postRepairMonitor:  isPostRepairMonitor,
 				selectedFindingIDs: latest.SelectedFindingIDs,
 				userFindingsJSON:   latest.UserFindingsJSON,
 			}
@@ -833,7 +908,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	finalExitCode := 0
 	autoFixLimit := e.autoFixLimit(stepName)
 
-	if !state.fixing {
+	if !state.fixing && !state.resumeRunning {
 		if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
 			return false, "", fmt.Errorf("start step %s: %w", stepName, err)
 		}
@@ -872,7 +947,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	lastLogActivityAt := time.Time{}
 	activeRepairRoundID := ""
-	if state.fixing {
+	if state.fixing || state.resumeRunning {
 		activeRepairRoundID = state.currentRoundID
 	}
 	touchLogActivity := func(text string, force bool) {
@@ -953,6 +1028,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 	stepAgent := e.agent
 	if stepAgent != nil {
+		stepAgent = &repairInvocationAgent{
+			inner:    stepAgent,
+			db:       e.db,
+			root:     e.paths.Root(),
+			stepID:   sr.ID,
+			worktree: workDir,
+			roundID:  func() string { return activeRepairRoundID },
+		}
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
 		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config)}
@@ -964,13 +1047,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			runID:    run.ID,
 			stepName: stepName,
 			round:    func() int { return roundNum + 1 },
-		}
-		stepAgent = &repairInvocationAgent{
-			inner:    stepAgent,
-			db:       e.db,
-			stepID:   sr.ID,
-			worktree: workDir,
-			roundID:  func() string { return activeRepairRoundID },
 		}
 	}
 	ciReady := run.CIReadyAt != nil
@@ -990,6 +1066,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	// that here, so the durable status and every subscriber see running
 	// again; step_started is the event the TUI already maps to running.
 	markRunning := func() error {
+		if activeRepairRoundID != "" {
+			if err := e.db.MarkRepairPostMonitor(sr.ID, activeRepairRoundID); err != nil {
+				return fmt.Errorf("mark repair post-monitor phase: %w", err)
+			}
+		}
 		if err := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); err != nil {
 			return fmt.Errorf("return step status to running: %w", err)
 		}
@@ -1661,9 +1742,47 @@ func (a *gateStepBoundaryAgent) NeutralizesGateInstructions() bool {
 	return agent.NeutralizesGateInstructions(a.inner)
 }
 
+func repairInvocationErrorClass(err error) string {
+	switch {
+	case errors.Is(err, ErrReviewAgentTimeout):
+		return "review_agent_timeout"
+	case errors.Is(err, ErrAgentTimeout):
+		return "agent_timeout"
+	case errors.Is(err, context.Canceled):
+		return "cancellation"
+	case agent.IsStructuredOutputRejected(err):
+		return "structured_output_rejected"
+	case errors.Is(err, ErrAgentBudget), strings.Contains(strings.ToLower(err.Error()), "max turns"), strings.Contains(strings.ToLower(err.Error()), "turn limit"):
+		return "agent_budget"
+	default:
+		return "adapter_failure"
+	}
+}
+
+func restoreRepairInvocationError(class *string, message string) error {
+	if class == nil {
+		return errors.New(message)
+	}
+	switch *class {
+	case "review_agent_timeout":
+		return fmt.Errorf("%s: %w", message, ErrReviewAgentTimeout)
+	case "agent_timeout":
+		return fmt.Errorf("%s: %w", message, ErrAgentTimeout)
+	case "cancellation":
+		return fmt.Errorf("%s: %w", message, context.Canceled)
+	case "structured_output_rejected":
+		return agent.StructuredOutputRejection(errors.New(message))
+	case "agent_budget":
+		return fmt.Errorf("%s: %w", message, ErrAgentBudget)
+	default:
+		return errors.New(message)
+	}
+}
+
 type repairInvocationAgent struct {
 	inner    agent.Agent
 	db       *db.DB
+	root     string
 	stepID   string
 	worktree string
 	roundID  func() string
@@ -1697,7 +1816,7 @@ func (a *repairInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*a
 	ordinal := a.ordinals[roundID]
 	a.ordinals[roundID] = ordinal + 1
 	a.mu.Unlock()
-	invocation, err := a.db.RegisterRepairInvocation(a.stepID, roundID, ordinal, a.worktree, a.inner.Name(), opts.Purpose, os.Getpid())
+	invocation, err := a.db.RegisterRepairInvocation(a.stepID, roundID, ordinal, a.worktree, a.inner.Name(), opts.Purpose, 0)
 	if err != nil {
 		return nil, fmt.Errorf("register repair invocation: %w", err)
 	}
@@ -1710,42 +1829,11 @@ func (a *repairInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*a
 			}
 		}
 		if invocation.ErrorText != nil {
-			return result, errors.New(*invocation.ErrorText)
+			return result, restoreRepairInvocationError(invocation.ErrorClass, *invocation.ErrorText)
 		}
 		return result, nil
 	}
-	previousLifecycle := opts.OnLifecycle
-	opts.OnLifecycle = func(event agent.LifecycleEvent) {
-		if event.Phase == agent.LifecyclePhaseStart {
-			activity := event.Message
-			if activity == "" {
-				activity = fmt.Sprintf("%s %s", event.Agent, event.Phase)
-			}
-			if err := a.db.BindRepairInvocationProcess(invocation.ID, activity, event.PID); err != nil {
-				slog.Warn("failed to bind native fixer process", "error", err)
-			}
-		}
-		if previousLifecycle != nil {
-			previousLifecycle(event)
-		}
-	}
-	result, runErr := a.inner.Run(ctx, opts)
-	var resultJSON []byte
-	if result != nil {
-		resultJSON, err = json.Marshal(result)
-		if err != nil {
-			return result, fmt.Errorf("encode repair invocation result: %w", err)
-		}
-	}
-	var errorText *string
-	if runErr != nil {
-		text := runErr.Error()
-		errorText = &text
-	}
-	if err := a.db.FinishRepairInvocation(invocation.ID, resultJSON, result != nil, errorText); err != nil {
-		return result, fmt.Errorf("publish repair invocation result: %w", err)
-	}
-	return result, runErr
+	return launchIndependentRepair(ctx, a.db, a.root, invocation.ID, a.inner, opts)
 }
 
 type lifecycleAgent struct {

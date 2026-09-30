@@ -79,6 +79,12 @@ func IsStructuredOutputRejected(err error) bool {
 	return errors.As(err, &rejection) && rejection.StructuredOutputRejected()
 }
 
+// StructuredOutputRejection restores the structured-output classification at
+// a process or persistence boundary.
+func StructuredOutputRejection(err error) error {
+	return rejectStructuredOutput(err)
+}
+
 type structuredOutputRejection struct{ err error }
 
 func (e *structuredOutputRejection) Error() string                { return e.err.Error() }

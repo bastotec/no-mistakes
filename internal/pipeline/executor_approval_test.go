@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -20,6 +21,30 @@ func (a *repairResultAgent) Close() error { return nil }
 func (a *repairResultAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
 	a.calls++
 	return &agent.Result{Text: "durable result"}, nil
+}
+
+func TestRepairInvocationErrorClassRoundTrip(t *testing.T) {
+	tests := []struct {
+		name  string
+		err   error
+		match func(error) bool
+	}{
+		{name: "agent timeout", err: fmt.Errorf("timed out: %w", ErrAgentTimeout), match: func(err error) bool { return errors.Is(err, ErrAgentTimeout) }},
+		{name: "review timeout", err: fmt.Errorf("timed out: %w", ErrReviewAgentTimeout), match: func(err error) bool { return errors.Is(err, ErrReviewAgentTimeout) }},
+		{name: "budget", err: fmt.Errorf("max turns: %w", ErrAgentBudget), match: func(err error) bool { return errors.Is(err, ErrAgentBudget) }},
+		{name: "structured", err: agent.StructuredOutputRejection(errors.New("invalid output")), match: agent.IsStructuredOutputRejected},
+		{name: "cancellation", err: context.Canceled, match: func(err error) bool { return errors.Is(err, context.Canceled) }},
+		{name: "adapter", err: errors.New("provider failed"), match: func(err error) bool { return err.Error() == "provider failed" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			class := repairInvocationErrorClass(test.err)
+			restored := restoreRepairInvocationError(&class, test.err.Error())
+			if !test.match(restored) {
+				t.Fatalf("restored error %v lost class %q", restored, class)
+			}
+		})
+	}
 }
 
 func TestRepairInvocationAgent_ReplaysTerminalResultWithoutRerunningFixer(t *testing.T) {

@@ -585,7 +585,7 @@ func (s *ReviewStep) reviewAgentContext(parent context.Context, cfg *config.Conf
 	return ctx, cancel, timeout
 }
 
-var errReviewAgentTimeout = errors.New("review agent timeout")
+var errReviewAgentTimeout = pipeline.ErrReviewAgentTimeout
 
 // reviewAgentError renders one review invocation's absolute wall-clock expiry.
 // The measured activity evidence comes from the shared agent-run seam; the hard

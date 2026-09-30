@@ -281,7 +281,7 @@ func (d *DB) CompleteStepRepair(stepID, roundID string) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'consumed', updated_at = ? WHERE round_id = ? AND step_result_id = ? AND state = 'terminal'`, now(), roundID, stepID); err != nil {
+	if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'consumed', updated_at = ? WHERE round_id = ? AND step_result_id = ? AND (state = 'terminal' OR wrapper_token IS NULL)`, now(), roundID, stepID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'completed' WHERE round_id = ? AND step_result_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID, stepID); err != nil {
@@ -359,8 +359,8 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 		}
 		return "", err
 	}
-	var invocationState sql.NullString
-	if err := tx.QueryRow(`SELECT state FROM repair_invocations WHERE round_id = ? AND step_result_id = ? ORDER BY ordinal DESC LIMIT 1`, roundID, stepID).Scan(&invocationState); err != nil && err != sql.ErrNoRows {
+	var invocationState, wrapperToken sql.NullString
+	if err := tx.QueryRow(`SELECT state, wrapper_token FROM repair_invocations WHERE round_id = ? AND step_result_id = ? ORDER BY ordinal DESC LIMIT 1`, roundID, stepID).Scan(&invocationState, &wrapperToken); err != nil && err != sql.ErrNoRows {
 		return "", err
 	}
 	if invocationState.Valid {
@@ -371,9 +371,13 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 				return "", err
 			}
 		case "registered", "fixer_started":
-			state = sql.NullString{String: "repair_started_unresolved", Valid: true}
-			if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE round_id = ?`, roundID); err != nil {
-				return "", err
+			if wrapperToken.Valid && wrapperToken.String != "" {
+				state = sql.NullString{String: "repair_wrapper_live", Valid: true}
+			} else {
+				state = sql.NullString{String: "repair_started_unresolved", Valid: true}
+				if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE round_id = ?`, roundID); err != nil {
+					return "", err
+				}
 			}
 		}
 	}
