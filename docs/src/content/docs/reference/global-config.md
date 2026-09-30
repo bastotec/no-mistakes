@@ -616,7 +616,7 @@ The key is matched against the checkout path recorded at `init`. After moving a 
 
 ### auto_fix
 
-Maximum follow-up auto-fix attempts per step. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
+Maximum follow-up auto-fix attempts per step. Started user-triggered repairs also consume this ceiling; an explicit response at exhaustion authorizes only one additional repair. The [auto-fix loop](/no-mistakes/concepts/auto-fix/#how-it-works) owns the durable authorization and exhaustion behavior. Set a step to `0` to disable the follow-up auto-fix loop, so findings require manual approval.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
 For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
 

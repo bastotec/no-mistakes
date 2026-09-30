@@ -532,6 +532,13 @@ func gateFields(gate stepView) []toon.Field {
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
 		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
 	}
+	if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
+		help = []string{
+			"Repair budget exhaustion requires new explicit authority; --yes leaves this gate awaiting a decision.",
+			"Run `no-mistakes axi respond --action fix --findings <ids>` only after authorizing exactly one additional repair; it does not renew the automatic budget.",
+			"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
+		}
+	}
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 		help = []string{
 			"Protected-path refusals require an explicit operator response; Approve is rejected.",

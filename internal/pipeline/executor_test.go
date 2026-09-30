@@ -169,14 +169,14 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 			if rounds[0].SelectionSource == nil || *rounds[0].SelectionSource != db.RoundSelectionSourceAutoFix {
 				t.Errorf("observation round selection source = %v, want auto_fix so the attempt survives the restart", rounds[0].SelectionSource)
 			}
-			// The spent attempt is what a restarted or recovered executor
-			// restores: ResetStepsFrom leaves the round history alone.
-			state, err := exec.durableExecutionState(result.ID)
+			// ResetStepsFrom leaves both history and the pre-launch budget
+			// reservation intact; a restarted observation cannot spend it again.
+			decision, err := database.ReserveStepRepair(result.ID, rounds[2].ID, 1, false)
 			if err != nil {
-				t.Fatalf("durableExecutionState() error = %v", err)
+				t.Fatalf("ReserveStepRepair() error = %v", err)
 			}
-			if state.autoFixAttempts != 1 {
-				t.Errorf("durable auto-fix attempts after the restart = %d, want 1", state.autoFixAttempts)
+			if decision.Granted || decision.Consumed != 1 {
+				t.Errorf("durable repair budget after restart = %+v, want exhausted at 1", decision)
 			}
 			continue
 		}

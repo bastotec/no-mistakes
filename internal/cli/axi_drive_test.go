@@ -404,41 +404,46 @@ func TestDriveRun_YesLeavesProtectedPathRefusalAwaitingResponse(t *testing.T) {
 	defer client.Close()
 
 	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
-	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
-		t.Run(string(status), func(t *testing.T) {
-			parked := &ipc.RunInfo{
-				ID: "run-1", Status: types.RunRunning,
-				Steps: []ipc.StepResultInfo{{StepName: types.StepCI, Status: status, FindingsJSON: &refusal.Findings}},
-			}
-			source := &scriptedRunStateSource{
-				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
-				runs:          []*ipc.RunInfo{parked},
-			}
-			reconciler := newRunReconciler(source, parked.ID)
-			defer reconciler.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var progress bytes.Buffer
-			run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
-			if err != nil || run != parked || ciReady || responses.Load() != 0 {
-				t.Fatalf("--yes resolved a protected-path refusal: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
-			}
-			if !strings.Contains(progress.String(), "explicit response") {
-				t.Fatalf("missing explicit-response guidance: %s", progress.String())
-			}
-			var output bytes.Buffer
-			cmd := &cobra.Command{}
-			cmd.SetOut(&output)
-			if err := renderDriveResult(cmd, run, ciReady); err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range []string{"gate:", "1 awaiting", "package.lock", string(status)} {
-				if !strings.Contains(output.String(), want) {
-					t.Errorf("parked output missing %q: %s", want, output.String())
+	for _, gateCase := range []struct{ name, findings, detail string }{
+		{"protected-path", refusal.Findings, "package.lock"},
+		{"repair-budget", `{"findings":[{"id":"repair-budget-ci","severity":"warning","description":"consumed 3 repairs; additional repair 4 needs explicit authority","action":"ask-user","category":"repair-budget"}]}`, "additional repair 4"},
+	} {
+		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(gateCase.name+"/"+string(status), func(t *testing.T) {
+				parked := &ipc.RunInfo{
+					ID: "run-1", Status: types.RunRunning,
+					Steps: []ipc.StepResultInfo{{StepName: types.StepCI, Status: status, FindingsJSON: &gateCase.findings}},
 				}
-			}
-			t.Logf("AXI output with --yes (automatic IPC responses: %d):\n%s%s", responses.Load(), progress.String(), output.String())
-		})
+				source := &scriptedRunStateSource{
+					subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+					runs:          []*ipc.RunInfo{parked},
+				}
+				reconciler := newRunReconciler(source, parked.ID)
+				defer reconciler.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var progress bytes.Buffer
+				run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+				if err != nil || run != parked || ciReady || responses.Load() != 0 {
+					t.Fatalf("--yes resolved a protected-path refusal: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+				}
+				if !strings.Contains(progress.String(), "explicit response") {
+					t.Fatalf("missing explicit-response guidance: %s", progress.String())
+				}
+				var output bytes.Buffer
+				cmd := &cobra.Command{}
+				cmd.SetOut(&output)
+				if err := renderDriveResult(cmd, run, ciReady); err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"gate:", "1 awaiting", gateCase.detail, string(status)} {
+					if !strings.Contains(output.String(), want) {
+						t.Errorf("parked output missing %q: %s", want, output.String())
+					}
+				}
+				t.Logf("AXI output with --yes (automatic IPC responses: %d):\n%s%s", responses.Load(), progress.String(), output.String())
+			})
+		}
 	}
 }
 

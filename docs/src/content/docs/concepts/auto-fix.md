@@ -30,6 +30,8 @@ flowchart TD
    - If issues remain, the step pauses for user approval
    - If everything passes, the step completes and the pipeline moves on
 
+The ceiling counts every started follow-up repair, including user-triggered repairs and repairs that return no changes. Authorization is reserved durably before a fixer starts; revalidation, repeated observations, and daemon recovery do not reset the allowance. An exhausted gate records the remaining failed findings, consumed count, limit, requested next repair, and the exact explicit response needed. That response authorizes **one** additional repair, not another automatic budget. AXI `--yes` and TUI yolo mode leave budget-exhaustion gates awaiting an explicit decision. Existing over-limit round history is retained, not reset, and already-started repairs are not cancelled retroactively.
+
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
 When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.
 The lint step consumes a usable lint result from that pass instead of starting a second cold agent invocation; when the combined pass is skipped, cannot produce trustworthy structured output, or loses its in-memory result across a daemon restart, lint falls back to its own agent pass.

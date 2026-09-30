@@ -336,6 +336,12 @@ reported edit, then send `--action fix` to retry the unfinished step.
 The [protected-path reference](https://kunchenguid.github.io/no-mistakes/reference/repo-config/#protected_paths)
 owns the staging guard's scope and limitations.
 
+A repair-budget exhaustion gate also requires a new explicit authority-bearing
+response, even under `--yes`. Relay the failed findings, consumed limit,
+and requested additional round; do not automatically fix, approve, or skip it.
+An explicit `--action fix` authorizes one additional repair, not a renewed
+automatic budget. Preserve any already-started repair until it returns.
+
 ## Inspecting state
 
 ```sh

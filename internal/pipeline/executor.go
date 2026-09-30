@@ -304,7 +304,6 @@ type stepExecutionState struct {
 	previousFindings string
 	deferredFindings string
 	roundNum         int
-	autoFixAttempts  int
 	executionMS      int64
 	currentRoundID   string
 	// cappedGateFindings is set when a recovered review gate parked at
@@ -324,9 +323,6 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 	state := stepExecutionState{}
 	for _, round := range rounds {
 		state.roundNum = max(state.roundNum, round.Round)
-		if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
-			state.autoFixAttempts++
-		}
 	}
 	return state, nil
 }
@@ -337,7 +333,6 @@ type recoveredGate struct {
 	stepResult      *db.StepResult
 	findings        string
 	round           int
-	autoFixes       int
 	lastRoundID     string
 	reviewedHeadSHA string
 }
@@ -504,8 +499,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFailed), "", "aborted by user", &duration)
 		return e.failRun(run, repo, fmt.Errorf("step %s: aborted by user", gate.step.Name()), ctx)
 	case types.ActionFix:
+		decision, err := e.db.ReserveStepRepair(gate.stepResult.ID, gate.lastRoundID, e.autoFixLimit(gate.step.Name()), true)
+		if err != nil || !decision.Granted {
+			return fmt.Errorf("recovered repair was not newly authorized: duplicate=%t error=%v", decision.Duplicate, err)
+		}
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
-		selected := filterFindingsJSON(gate.findings, response.findingIDs)
+		selected := repairWorkFindings(filterFindingsJSON(gate.findings, response.findingIDs))
 		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
 		if gate.lastRoundID != "" {
 			allSelectedIDs := combineSelectedFindingIDs(response.findingIDs, merged)
@@ -519,16 +518,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				}
 			}
 		}
-		if dbErr := e.db.StartStepFixRound(gate.stepResult.ID, e.autoFixLimit(gate.step.Name())); dbErr != nil {
-			return e.failRun(run, repo, fmt.Errorf("mark recovered step %s fixing: %w", gate.step.Name(), dbErr), ctx)
-		}
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusFixing), "", "", nil)
 		state := stepExecutionState{
 			fixing:           true,
 			previousFindings: merged,
-			deferredFindings: removeMatchingFindingsJSON(gate.findings, selected),
+			deferredFindings: repairWorkFindings(removeMatchingFindingsJSON(gate.findings, selected)),
 			roundNum:         gate.round,
-			autoFixAttempts:  gate.autoFixes,
 			executionMS:      duration,
 			currentRoundID:   gate.lastRoundID,
 		}
@@ -590,19 +585,12 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 			if latest.FindingsJSON == nil || (*latest.FindingsJSON != *result.FindingsJSON && !isRoundCappedForm(*latest.FindingsJSON, *result.FindingsJSON)) {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
-			autoFixes := 0
-			for _, round := range rounds {
-				if round.SelectionSource != nil && *round.SelectionSource == db.RoundSelectionSourceAutoFix {
-					autoFixes++
-				}
-			}
 			gate = &recoveredGate{
 				index:       index,
 				step:        e.steps[index],
 				stepResult:  result,
 				findings:    *result.FindingsJSON,
 				round:       latest.Round,
-				autoFixes:   autoFixes,
 				lastRoundID: latest.ID,
 			}
 			if latest.ReviewedHeadSHA != nil {
@@ -828,7 +816,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	}
 	// roundNum is shared with the perf wrapper's round closure below: an
 	// invocation during execution of round N+1 sees roundNum still at N.
-	autoFixAttempts := state.autoFixAttempts
 	roundNum := state.roundNum
 
 	stepAgent := e.agent
@@ -1043,32 +1030,41 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
 		// levels (including "info") get a chance at automatic fixing.
-		if outcome.AutoFixable && autoFixLimit > 0 && autoFixAttempts < autoFixLimit {
+		if outcome.AutoFixable {
 			fixableFindings := autoFixableFindingsJSON(outcome.Findings)
 			if fixableFindings != "" {
-				autoFixAttempts++
-				telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), autoFixAttempts))
-				slog.Info("auto-fixing step", "step", stepName, "attempt", autoFixAttempts, "max", autoFixLimit)
-				executionMS += time.Since(phaseStart).Milliseconds()
-				fixCount := findingsCount(fixableFindings)
-				writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", autoFixAttempts, autoFixLimit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
-				if dbErr := e.db.StartStepFixRound(sr.ID, autoFixLimit); dbErr != nil {
-					slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
+				decision, dbErr := e.db.ReserveStepRepair(sr.ID, currentRoundID, autoFixLimit, false)
+				if dbErr != nil {
+					return false, "", fmt.Errorf("authorize %s repair: %w", stepName, dbErr)
 				}
-				if currentRoundID != "" {
-					if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
-						if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix); dbErr != nil {
-							slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
+				if !decision.Granted {
+					outcome.Findings = exhaustedRepairFindings(outcome.Findings, stepName, run.ID, decision)
+					outcome.NeedsApproval = true
+					findingsPtr = &outcome.Findings
+					if err := e.db.SetRepairBudgetFindings(currentRoundID, outcome.Findings); err != nil {
+						return false, "", fmt.Errorf("persist %s repair budget gate: %w", stepName, err)
+					}
+				} else {
+					telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), decision.Consumed))
+					slog.Info("auto-fixing step", "step", stepName, "attempt", decision.Consumed, "max", decision.Limit)
+					executionMS += time.Since(phaseStart).Milliseconds()
+					fixCount := findingsCount(fixableFindings)
+					writeLog(fmt.Sprintf("auto-fix round %d/%d starting after round %d (%d %s)", decision.Consumed, decision.Limit, roundNum, fixCount, pluralize(fixCount, "finding", "findings")))
+					if currentRoundID != "" {
+						if idsJSON := findingIDsJSON(fixableFindings); idsJSON != "" {
+							if dbErr := e.db.SetStepRoundSelection(currentRoundID, &idsJSON, db.RoundSelectionSourceAutoFix); dbErr != nil {
+								slog.Warn("failed to record selected finding ids", "step", stepName, "round", roundNum, "error", dbErr)
+							}
 						}
 					}
+					e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
+					phaseStart = time.Now()
+					sctx.Fixing = true
+					sctx.PreviousFindings = fixableFindings
+					sctx.DeferredFindings = removeMatchingFindingsJSON(outcome.Findings, fixableFindings)
+					nextTrigger = "auto_fix"
+					continue
 				}
-				e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFixing), "", "", nil)
-				phaseStart = time.Now()
-				sctx.Fixing = true
-				sctx.PreviousFindings = fixableFindings
-				sctx.DeferredFindings = removeMatchingFindingsJSON(outcome.Findings, fixableFindings)
-				nextTrigger = "auto_fix"
-				continue
 			}
 		}
 
@@ -1181,19 +1177,20 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			return false, "", fmt.Errorf("step %s: aborted by user", stepName)
 
 		case types.ActionFix:
+			decision, err := e.db.ReserveStepRepair(sr.ID, currentRoundID, autoFixLimit, true)
+			if err != nil || !decision.Granted {
+				return false, "", fmt.Errorf("repair was not newly authorized: duplicate=%t error=%v", decision.Duplicate, err)
+			}
 			telemetry.Track("fix", e.fixTelemetryFields("user", stepName, selectedFindingCount(outcome.Findings, response.findingIDs), 0))
 			// Fix - mark step as fixing, resume execution timer, re-execute.
 			phaseStart = time.Now()
 			selectedCount := selectedFindingCount(outcome.Findings, response.findingIDs)
 			writeLog(fmt.Sprintf("user-fix round starting after round %d (%d %s selected)", roundNum, selectedCount, pluralize(selectedCount, "finding", "findings")))
-			if dbErr := e.db.StartStepFixRound(sr.ID, autoFixLimit); dbErr != nil {
-				slog.Warn("failed to start step fix round in db", "step", stepName, "error", dbErr)
-			}
 			sctx.Fixing = true
-			selectedFindings := filterFindingsJSON(outcome.Findings, response.findingIDs)
+			selectedFindings := repairWorkFindings(filterFindingsJSON(outcome.Findings, response.findingIDs))
 			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
 			sctx.PreviousFindings = mergedFindings
-			sctx.DeferredFindings = removeMatchingFindingsJSON(outcome.Findings, selectedFindings)
+			sctx.DeferredFindings = repairWorkFindings(removeMatchingFindingsJSON(outcome.Findings, selectedFindings))
 			// review.max_rounds caps rereviews, not fixes: at a capped gate
 			// the accepted fix still runs once, and the review then ends.
 			if roundCap := reviewRoundCapOf(outcome.Findings); stepName == types.StepReview && roundCap > 0 {

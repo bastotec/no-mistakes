@@ -101,6 +101,16 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     created_at           INTEGER NOT NULL
 );
 
+-- One gate observation can dispatch at most one repair. A denied decision
+-- remains available for one explicit response, never a renewed automatic budget.
+CREATE TABLE IF NOT EXISTS repair_budget_decisions (
+    round_id       TEXT PRIMARY KEY REFERENCES step_rounds(id) ON DELETE CASCADE,
+    step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    consumed       INTEGER NOT NULL,
+    repair_limit   INTEGER NOT NULL,
+    source         TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agent_invocations (
     id                    TEXT PRIMARY KEY,
     run_id                TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,

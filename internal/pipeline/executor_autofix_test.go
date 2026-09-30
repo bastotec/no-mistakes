@@ -5,13 +5,89 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// A response authorizes one repair, not a fresh automatic budget. After three
+// explicit repairs with a limit of three, a still-red observation must park;
+// selection_source=user must not hide consumed repairs from the ceiling.
+func TestExecutor_FinalAuthorizedRepairDoesNotMintAutomaticBudget(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	var calls atomic.Int32
+	step := &adaptiveCallStep{
+		name: types.StepCI,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			n := calls.Add(1)
+			if sctx.Fixing {
+				if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "authorized repair"}); err != nil {
+					return nil, err
+				}
+			}
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   n >= 4,
+				Findings:      `{"findings":[{"id":"ci-red","severity":"error","description":"serial check failed","action":"auto-fix"}],"summary":"serial check failed"}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 3}}, &usageAgent{}, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	waitGate := func(minCalls int32) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() >= minCalls && len(steps) == 1 && (steps[0].Status == types.StepStatusAwaitingApproval || steps[0].Status == types.StepStatusFixReview) {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal("repair did not settle at a gate")
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	for n := int32(1); n <= 3; n++ {
+		waitGate(n)
+		if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	waitGate(4)
+	if got := calls.Load(); got != 4 {
+		t.Errorf("launched beyond final authorized repair: executions=%d, want initial + 3 repairs; no response authorized auto-fix 5/3", got)
+	}
+	invocations, err := database.GetAgentInvocationsByRun(run.ID)
+	if err != nil || len(invocations) != 3 {
+		t.Fatalf("unauthorized fixer invocation: count=%d error=%v", len(invocations), err)
+	}
+	parked, _ := database.GetRun(run.ID)
+	if parked.HeadSHA != run.HeadSHA {
+		t.Fatal("exhaustion changed branch custody")
+	}
+	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
+		t.Fatal(err)
+	}
+	waitGate(5)
+	invocations, err = database.GetAgentInvocationsByRun(run.ID)
+	if err != nil || len(invocations) != 4 || calls.Load() != 5 {
+		t.Fatalf("explicit authority was not bounded to one launch: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
+	}
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
 
 func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
