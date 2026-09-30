@@ -187,7 +187,11 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 			return fmt.Errorf("select %s repair findings: %w", step, err)
 		}
 		selected := repairWorkFindings(filterFindingsJSON(e.waitingFindings, findingIDs))
-		merged := mergeUserOverridesJSON(selected, instructions, addedFindings)
+		merged := repairWorkFindings(mergeUserOverridesJSON(selected, instructions, addedFindings))
+		if err := validateRepairPayload(merged); err != nil {
+			e.mu.Unlock()
+			return fmt.Errorf("select %s repair findings: %w", step, err)
+		}
 		allSelectedIDs := combineSelectedFindingIDs(findingIDs, merged)
 		var idsJSON, userFindingsJSON *string
 		if raw := marshalFindingIDs(allSelectedIDs); raw != "" {
@@ -368,6 +372,7 @@ type recoveredGate struct {
 	lastRoundID        string
 	reviewedHeadSHA    string
 	repairAuthorized   bool
+	repairUnresolved   bool
 	selectedFindingIDs *string
 	userFindingsJSON   *string
 }
@@ -408,6 +413,20 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 	e.initializeRunScopes(run.ID)
+	if gate.repairUnresolved {
+		e.emitStepEventWithFindingsAndError(
+			ipc.EventStepCompleted,
+			run,
+			repo,
+			gate.step.Name(),
+			string(types.StepStatusFixing),
+			gate.findings,
+			"repair outcome unresolved after daemon restart",
+			gate.stepResult.DurationMS,
+		)
+		<-ctx.Done()
+		return context.Cause(ctx)
+	}
 
 	parkStart := time.Now()
 	if run.AwaitingAgentSince != nil {
@@ -567,7 +586,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 		telemetry.Track("fix", e.fixTelemetryFields("user", gate.step.Name(), selectedFindingCount(gate.findings, response.findingIDs), 0))
 		selected := repairWorkFindings(filterFindingsJSON(gate.findings, response.findingIDs))
-		merged := mergeUserOverridesJSON(selected, response.instructions, response.addedFindings)
+		merged := repairWorkFindings(mergeUserOverridesJSON(selected, response.instructions, response.addedFindings))
 		if gate.userFindingsJSON != nil {
 			merged = *gate.userFindingsJSON
 		}
@@ -651,11 +670,12 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 			if err != nil {
 				return nil, fmt.Errorf("recover repair authorization: %w", err)
 			}
-			repairAuthorized := dispatchState == "fix_authorized" || dispatchState == "claimed"
-			if result.Status == types.StepStatusFixing && !repairAuthorized && dispatchState != "repair_started_unresolved" {
+			repairAuthorized := dispatchState == "fix_authorized"
+			repairUnresolved := dispatchState == "repair_started_unresolved"
+			if result.Status == types.StepStatusFixing && !repairAuthorized && !repairUnresolved {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
-			if result.AgentPID != nil && dispatchState != "repair_started_unresolved" {
+			if result.AgentPID != nil && !repairUnresolved {
 				return nil, fmt.Errorf("recovered approval gate is incomplete")
 			}
 			if (dispatchState == "fix_authorized" || dispatchState == "repair_started_unresolved") && result.Status == types.StepStatusFixing {
@@ -672,6 +692,7 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				round:              latest.Round,
 				lastRoundID:        latest.ID,
 				repairAuthorized:   repairAuthorized,
+				repairUnresolved:   repairUnresolved,
 				selectedFindingIDs: latest.SelectedFindingIDs,
 				userFindingsJSON:   latest.UserFindingsJSON,
 			}
@@ -1288,7 +1309,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			writeLog(fmt.Sprintf("user-fix round starting after round %d (%d %s selected)", roundNum, selectedCount, pluralize(selectedCount, "finding", "findings")))
 			sctx.Fixing = true
 			selectedFindings := repairWorkFindings(filterFindingsJSON(outcome.Findings, response.findingIDs))
-			mergedFindings := mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings)
+			mergedFindings := repairWorkFindings(mergeUserOverridesJSON(selectedFindings, response.instructions, response.addedFindings))
 			sctx.PreviousFindings = mergedFindings
 			sctx.DeferredFindings = repairWorkFindings(removeMatchingFindingsJSON(outcome.Findings, selectedFindings))
 			// review.max_rounds caps rereviews, not fixes: at a capped gate

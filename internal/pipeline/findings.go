@@ -369,6 +369,17 @@ func validateFindingSelection(raw string, ids []string, added []types.Finding) e
 	return nil
 }
 
+func validateRepairPayload(raw string) error {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return fmt.Errorf("parse selected repair findings: %w", err)
+	}
+	if len(findings.Items) == 0 {
+		return fmt.Errorf("fix response selected no repairable findings")
+	}
+	return nil
+}
+
 func filterFindingsJSON(raw string, ids []string) string {
 	if raw == "" {
 		return raw

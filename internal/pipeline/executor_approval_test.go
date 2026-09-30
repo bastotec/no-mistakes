@@ -38,6 +38,31 @@ func TestExecutor_RepairSelectionMustMatchParkedFindingBeforeAuthorityIsConsumed
 	}
 }
 
+func TestExecutor_RepairSelectionMustContainEffectiveWorkBeforeAuthorityIsConsumed(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"repair-budget-review","severity":"warning","description":"budget exhausted","action":"ask-user","category":"repair-budget"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, nil, nil)
+	exec.waiting = true
+	exec.waitingStep = types.StepReview
+	exec.waitingStepResultID = stepResult.ID
+	exec.waitingRoundID = round.ID
+	exec.waitingFindings = findings
+	exec.waitingAutoFixLimit = 1
+
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"repair-budget-review"}); err == nil {
+		t.Fatal("control-plane-only selection unexpectedly authorized")
+	}
+	decision, err := database.ReserveStepRepair(stepResult.ID, round.ID, 1, false)
+	if err != nil || !decision.Granted || decision.Consumed != 1 {
+		t.Fatalf("empty effective selection consumed authority: decision=%+v err=%v", decision, err)
+	}
+}
+
 func TestExecutor_ResumeReplaysAuthorizedRepairWithoutAnotherReservation(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
@@ -71,6 +96,69 @@ func TestExecutor_ResumeReplaysAuthorizedRepairWithoutAnotherReservation(t *test
 	}
 	if calls != 1 {
 		t.Fatalf("fixer calls = %d, want 1", calls)
+	}
+}
+
+func TestExecutor_ResumeKeepsUnresolvedRepairActiveWithoutGateOrReplay(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	if err := database.ParkStepForApproval(run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("authorize repair = %+v, %v", decision, err)
+	}
+	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkStepRepairStarted(round.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		calls++
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(ctx, run, repo, t.TempDir()) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		stored, err := database.GetStepResult(stepResult.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if stored.LastActivity != nil && *stored.LastActivity == "repair outcome unresolved after daemon restart" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("resume did not preserve unresolved repair")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exec.mu.Lock()
+	waiting := exec.waiting
+	exec.mu.Unlock()
+	if waiting {
+		t.Fatal("unresolved repair was exposed as an approval gate")
+	}
+	cancel(fmt.Errorf("test complete"))
+	if err := <-done; err == nil || err.Error() != "test complete" {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("repair replayed %d times", calls)
 	}
 }
 

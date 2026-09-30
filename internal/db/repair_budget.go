@@ -259,15 +259,12 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 		}
 		return "", err
 	}
-	if state.Valid && state.String == "started" {
+	if state.Valid && (state.String == "claimed" || state.String == "started") {
 		state.String = "repair_started_unresolved"
 		if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = ? WHERE round_id = ?`, state.String, roundID); err != nil {
 			return "", err
 		}
-		if _, err := tx.Exec(`UPDATE step_results SET status = ?, agent_pid = NULL, last_activity_at = ?, last_activity = ? WHERE id = ?`, types.StepStatusAwaitingApproval, now(), "repair outcome unresolved after daemon restart", stepID); err != nil {
-			return "", err
-		}
-		if _, err := tx.Exec(`UPDATE runs SET awaiting_agent_since = COALESCE(awaiting_agent_since, ?), updated_at = ? WHERE id = (SELECT run_id FROM step_results WHERE id = ?)`, now(), now(), stepID); err != nil {
+		if _, err := tx.Exec(`UPDATE step_results SET status = ?, last_activity_at = ?, last_activity = ? WHERE id = ?`, types.StepStatusFixing, now(), "repair outcome unresolved after daemon restart", stepID); err != nil {
 			return "", err
 		}
 	}

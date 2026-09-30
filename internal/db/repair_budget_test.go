@@ -59,7 +59,7 @@ func TestExplicitRepairAuthorizationStaysRecoverablyParkedUntilClaim(t *testing.
 	}
 }
 
-func TestStartedRepairRecoveryParksWithoutRedispatch(t *testing.T) {
+func TestStartedRepairRecoveryStaysFixingWithoutRedispatch(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
@@ -85,6 +85,10 @@ func TestStartedRepairRecoveryParksWithoutRedispatch(t *testing.T) {
 	if err := d.MarkStepRepairStarted(round.ID); err != nil {
 		t.Fatal(err)
 	}
+	pid := 4242
+	if err := d.SetStepAgentActivity(step.ID, "repair process active", &pid); err != nil {
+		t.Fatal(err)
+	}
 	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
 	if err != nil || state != "repair_started_unresolved" {
 		t.Fatalf("restored state = %q, %v", state, err)
@@ -92,13 +96,42 @@ func TestStartedRepairRecoveryParksWithoutRedispatch(t *testing.T) {
 	if err := d.ClaimStepRepair(step.ID, round.ID); err == nil {
 		t.Fatal("started repair was dispatchable again")
 	}
-	parked, _ := d.GetStepResult(step.ID)
-	if parked.Status != types.StepStatusAwaitingApproval {
-		t.Fatalf("step status = %s, want awaiting approval", parked.Status)
+	preserved, _ := d.GetStepResult(step.ID)
+	if preserved.Status != types.StepStatusFixing {
+		t.Fatalf("step status = %s, want fixing", preserved.Status)
+	}
+	if preserved.AgentPID == nil || *preserved.AgentPID != pid {
+		t.Fatalf("agent pid = %v, want %d", preserved.AgentPID, pid)
 	}
 	storedRun, _ := d.GetRun(run.ID)
-	if storedRun.AwaitingAgentSince == nil {
-		t.Fatal("unresolved started repair did not restore parked marker")
+	if storedRun.AwaitingAgentSince != nil {
+		t.Fatal("unresolved active repair was exposed as an approval gate")
+	}
+}
+
+func TestClaimedRepairRecoveryNeverLaunchesUnboundInvocation(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","action":"ask-user"}]}`
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	ids := `["review-1"]`
+	if decision, err := d.AuthorizeStepRepair(step.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
+	if err != nil || state != "repair_started_unresolved" {
+		t.Fatalf("restored claimed state = %q, %v", state, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err == nil {
+		t.Fatal("claimed repair was dispatchable again")
 	}
 }
 
