@@ -129,15 +129,38 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 }
 
 func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
-	_, err := d.sql.Exec(`
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reset steps for revalidation: %w", err)
+	}
+	defer tx.Rollback()
+
+	legacyArgs := []any{runID, stepOrder, types.StepStatusPending, types.StepStatusSkipped}
+	legacySteps := `SELECT id FROM step_results
+		WHERE run_id = ? AND step_order >= ? AND status != ? AND status != ?
+			AND auto_fix_limit_provenance = 'legacy_unknown'`
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions
+		SET repair_limit = 0,
+			authority_limit = CASE WHEN authority_limit IS NULL THEN NULL ELSE 0 END
+		WHERE step_result_id IN (`+legacySteps+`)`, legacyArgs...); err != nil {
+		return fmt.Errorf("cap reset step repair budgets: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE step_results
+		SET auto_fix_limit = 0, auto_fix_limit_provenance = 'initialized'
+		WHERE id IN (`+legacySteps+`)`, legacyArgs...); err != nil {
+		return fmt.Errorf("normalize reset step auto-fix limits: %w", err)
+	}
+	if _, err := tx.Exec(`
 		UPDATE step_results
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
 			agent_pid = NULL, override_reason = NULL
-		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
-	if err != nil {
+		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped); err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reset steps for revalidation: %w", err)
 	}
 	return nil
 }
