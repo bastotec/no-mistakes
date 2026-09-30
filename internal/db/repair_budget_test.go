@@ -178,6 +178,70 @@ func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
 	}
 }
 
+func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-null.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepCI)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-red","severity":"error","description":"check failed","action":"auto-fix"}],"summary":"check failed"}`
+	observation, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 1, 10, &findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = NULL WHERE id = ?`, step.ID); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	if err != nil || denied.Granted || denied.Limit != 3 || denied.AuthorityLimit != 0 {
+		t.Fatalf("legacy NULL gained automatic authority: %+v %v", denied, err)
+	}
+	persisted, err := d.GetStepResult(step.ID)
+	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
+		t.Fatalf("legacy NULL was not normalized to zero: %+v %v", persisted, err)
+	}
+	granted, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 3 || granted.AuthorityLimit != 1 {
+		t.Fatalf("explicit response did not grant exactly one repair: %+v %v", granted, err)
+	}
+	persisted, err = d.GetStepResult(step.ID)
+	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
+		t.Fatalf("explicit response widened automatic limit: %+v %v", persisted, err)
+	}
+	next, err := d.InsertStepRound(step.ID, 2, "user_fix", &findings, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for range 2 {
+		retried, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
+		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 3 || retried.AuthorityLimit != 1 {
+			t.Fatalf("resume or retry widened legacy authority: %+v %v", retried, err)
+		}
+	}
+}
+
 func TestRepairBudgetLegacyOverCeilingSurvivesMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "old.db")
 	d, err := Open(path)
