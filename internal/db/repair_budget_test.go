@@ -24,7 +24,16 @@ func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) 
 			repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
 			run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
 			step, _ := d.InsertStepResult(run.ID, types.StepCI)
-			if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, tc.limit, step.ID); err != nil {
+			if err := d.StartStepWithAutoFixLimit(step.ID, tc.limit); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.ResetStepsFrom(run.ID, types.StepCI.Order()); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
 				t.Fatal(err)
 			}
 			observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
@@ -33,6 +42,50 @@ func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) 
 				t.Fatalf("reservation ignored persisted lifecycle limit: %+v %v", got, err)
 			}
 		})
+	}
+}
+
+func TestRepairBudgetRevalidationPreservesReviewLifecycleLimit(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	review, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if _, err := d.InsertStepResult(run.ID, types.StepCI); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStepWithAutoFixLimit(review.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStep(review.ID, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := d.StartStepWithAutoFixLimit(review.ID, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.StartStepFixRound(review.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetStepResult(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoFixLimit == nil || *got.AutoFixLimit != 1 {
+		t.Fatalf("review lifecycle limit after revalidation = %v, want 1", got.AutoFixLimit)
+	}
+	observation, _ := d.InsertStepRound(review.ID, 1, "initial", nil, nil, 0)
+	first, err := d.ReserveStepRepair(review.ID, observation.ID, 3, false)
+	if err != nil || !first.Granted || first.Limit != 1 {
+		t.Fatalf("first reservation after revalidation = %+v, %v", first, err)
+	}
+	next, _ := d.InsertStepRound(review.ID, 2, "auto_fix", nil, nil, 0)
+	denied, err := d.ReserveStepRepair(review.ID, next.ID, 3, false)
+	if err != nil || denied.Granted || denied.Limit != 1 || denied.Consumed != 1 {
+		t.Fatalf("repeated reservation widened lifecycle limit: %+v, %v", denied, err)
 	}
 }
 

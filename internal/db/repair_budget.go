@@ -115,7 +115,7 @@ func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool)
 	}
 	if result.Granted {
 		ts := now()
-		if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair authorized", autoFixLimitDBValue(limit), stepID); err != nil {
+		if _, err := tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, "repair authorized", limit, limit, stepID); err != nil {
 			return result, err
 		}
 	}

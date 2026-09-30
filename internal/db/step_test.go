@@ -172,7 +172,7 @@ func TestStartStep(t *testing.T) {
 	}
 }
 
-func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
+func TestStartStepFixRoundResetsRoundClockAndPreservesLowerLimit(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
@@ -202,8 +202,8 @@ func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
 	if got.RoundStartedAt == nil || *got.RoundStartedAt == stepStarted {
 		t.Errorf("round_started_at = %v, want reset", got.RoundStartedAt)
 	}
-	if got.AutoFixLimit == nil || *got.AutoFixLimit != 2 {
-		t.Errorf("auto-fix limit = %v, want newly configured 2 instead of prior %d", got.AutoFixLimit, priorAutoFixLimit)
+	if got.AutoFixLimit == nil || *got.AutoFixLimit != priorAutoFixLimit {
+		t.Errorf("auto-fix limit = %v, want preserved %d", got.AutoFixLimit, priorAutoFixLimit)
 	}
 	if got.OverrideReason != nil {
 		t.Errorf("override reason = %q, want nil", *got.OverrideReason)

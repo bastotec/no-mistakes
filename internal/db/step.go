@@ -134,7 +134,7 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
-			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL
+			agent_pid = NULL, override_reason = NULL
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
 	if err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
@@ -211,7 +211,7 @@ func (d *DB) StartStep(id string) error {
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ? WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimit, autoFixLimit, id)
 	if err != nil {
 		return fmt.Errorf("start step: %w", err)
 	}
@@ -219,12 +219,10 @@ func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 }
 
 // StartStepFixRound marks the beginning of a distinct fix execution while
-// preserving started_at as the clock for the enclosing step. Recovery can use
-// a newly loaded trusted configuration, so its supplied limit replaces the
-// one recorded by an earlier execution.
+// preserving started_at as the clock for the enclosing step.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimit, autoFixLimit, id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
 	}
@@ -232,7 +230,7 @@ func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 }
 
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {
-	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimitDBValue(autoFixLimit), id); err != nil {
+	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimit, id); err != nil {
 		return fmt.Errorf("set step auto-fix limit: %w", err)
 	}
 	return nil
@@ -253,13 +251,6 @@ func (d *DB) SetStepOverrideReason(id string, reason string) error {
 		return fmt.Errorf("set step override reason: %w", err)
 	}
 	return nil
-}
-
-func autoFixLimitDBValue(autoFixLimit int) any {
-	if autoFixLimit <= 0 {
-		return nil
-	}
-	return autoFixLimit
 }
 
 // CompleteStep marks a step as completed with timing and result info.
