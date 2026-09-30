@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -16,28 +17,30 @@ import (
 	"github.com/muesli/termenv"
 )
 
-func TestModel_Yolo_RepairBudgetRequiresExplicitAuthority(t *testing.T) {
-	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
-		t.Run(string(status), func(t *testing.T) {
-			sock, client, snapshot := captureRespond(t)
-			run := testRun()
-			findings := `{"findings":[{"id":"repair-budget-ci","severity":"warning","description":"repair budget exhausted","action":"ask-user","category":"repair-budget"}]}`
-			run.Steps = []ipc.StepResultInfo{{StepName: types.StepCI, Status: status, FindingsJSON: &findings}}
-			m := NewModel(sock, client, run)
-			m.yoloMode = true
-			m.stepDiffLoaded[types.StepCI] = true
-			for range 2 {
-				if cmd := m.maybeAutoApproveCmd(); cmd != nil {
-					t.Fatal("unattended driver responded to exhausted repair budget")
+func TestModel_Yolo_RepairAuthorityGatesRequireExplicitResponse(t *testing.T) {
+	for _, category := range []string{"repair-budget", "repair-reconciliation"} {
+		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(category+"/"+string(status), func(t *testing.T) {
+				sock, client, snapshot := captureRespond(t)
+				run := testRun()
+				findings := fmt.Sprintf(`{"findings":[{"id":"%s-ci","severity":"warning","description":"repair authority required","action":"ask-user","category":"%s"}]}`, category, category)
+				run.Steps = []ipc.StepResultInfo{{StepName: types.StepCI, Status: status, FindingsJSON: &findings}}
+				m := NewModel(sock, client, run)
+				m.yoloMode = true
+				m.stepDiffLoaded[types.StepCI] = true
+				for range 2 {
+					if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+						t.Fatal("unattended driver responded to repair authority gate")
+					}
 				}
-			}
-			if calls := snapshot(); len(calls) != 0 {
-				t.Fatalf("unexpected automatic responses: %+v", calls)
-			}
-			if m.yoloFixed[types.StepCI] || m.yoloApproved[types.StepCI] {
-				t.Fatal("budget refusal consumed unattended authority")
-			}
-		})
+				if calls := snapshot(); len(calls) != 0 {
+					t.Fatalf("unexpected automatic responses: %+v", calls)
+				}
+				if m.yoloFixed[types.StepCI] || m.yoloApproved[types.StepCI] {
+					t.Fatal("repair authority gate consumed unattended authority")
+				}
+			})
+		}
 	}
 }
 

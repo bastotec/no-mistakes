@@ -435,6 +435,7 @@ func TestDriveRun_YesLeavesProtectedPathRefusalAwaitingResponse(t *testing.T) {
 	for _, gateCase := range []struct{ name, findings, detail string }{
 		{"protected-path", refusal.Findings, "package.lock"},
 		{"repair-budget", `{"findings":[{"id":"repair-budget-ci","severity":"warning","description":"consumed 3 repairs; additional repair 4 needs explicit authority","action":"ask-user","category":"repair-budget"}]}`, "additional repair 4"},
+		{"repair-reconciliation", `{"findings":[{"id":"repair-reconciliation-ci","severity":"error","description":"repair outcome requires reconciliation","action":"ask-user","category":"repair-reconciliation"}]}`, "requires reconciliation"},
 	} {
 		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
 			t.Run(gateCase.name+"/"+string(status), func(t *testing.T) {

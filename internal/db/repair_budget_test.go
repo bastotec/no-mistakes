@@ -10,6 +10,40 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
+func TestAutomaticRepairReservationIsRecoverableUntilCompletion(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 1)
+	decision, err := d.ReserveStepRepair(step.ID, round.ID, 1, false)
+	if err != nil || !decision.Granted {
+		t.Fatalf("ReserveStepRepair() = %+v, %v", decision, err)
+	}
+	if recoverable, err := d.HasRecoverableRepairDispatch(run.ID); err != nil || !recoverable {
+		t.Fatalf("reserved automatic repair is not recoverable: %v, %v", recoverable, err)
+	}
+	if err := d.BindStepRepairProcess(step.ID, round.ID, "repair process active", 4242); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	if recoverable, err := d.HasRecoverableRepairDispatch(run.ID); err != nil || recoverable {
+		t.Fatalf("completed automatic repair remained recoverable: %v, %v", recoverable, err)
+	}
+	stored, _ := d.GetStepResult(step.ID)
+	if stored.AgentPID != nil {
+		t.Fatalf("completed repair retained process identity %v", *stored.AgentPID)
+	}
+}
+
 func TestExplicitRepairAuthorizationStaysRecoverablyParkedUntilClaim(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
@@ -82,11 +116,8 @@ func TestStartedRepairRecoveryStaysFixingWithoutRedispatch(t *testing.T) {
 	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.MarkStepRepairStarted(round.ID); err != nil {
-		t.Fatal(err)
-	}
 	pid := 4242
-	if err := d.SetStepAgentActivity(step.ID, "repair process active", &pid); err != nil {
+	if err := d.BindStepRepairProcess(step.ID, round.ID, "repair process active", pid); err != nil {
 		t.Fatal(err)
 	}
 	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)

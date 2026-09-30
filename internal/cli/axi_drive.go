@@ -990,8 +990,8 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			if !autoApprove {
 				return run, false, nil
 			}
-			if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
-				fmt.Fprintf(progress, "%s: repair budget exhausted; an explicit response is required to authorize one additional repair; --yes leaves this gate awaiting a response\n", gate.Name)
+			if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) || pipeline.HasRepairReconciliation(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: repair authority decision required; --yes leaves this gate awaiting an explicit response\n", gate.Name)
 				return run, false, nil
 			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
@@ -1267,7 +1267,7 @@ func newAxiRespondCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | abort (required)")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
 	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated legacy finding IDs to fix (with --action fix; use --finding for arbitrary IDs)")
 	cmd.Flags().StringArrayVar(&finding, "finding", nil, "exact finding ID to fix; repeat for multiple findings (with --action fix)")
@@ -1302,13 +1302,13 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort:
 	case "":
 		return emitError(cmd, 2, "--action is required",
-			"Run `no-mistakes axi respond --action approve|fix|skip`")
+			"Run `no-mistakes axi respond --action approve|fix|skip|abort`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip")
+			"Valid actions: approve, fix, skip, abort")
 	}
 
 	env, err := openAxiDaemonEnv()
@@ -1356,6 +1356,17 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 		stepName = types.StepName(gate.Name)
 	}
+	var reconciliation bool
+	for _, candidate := range rv.Steps {
+		if candidate.Name == string(stepName) {
+			reconciliation = pipeline.HasRepairReconciliation(candidate.FindingsJSON)
+			break
+		}
+	}
+	if act == types.ActionAbort && !reconciliation {
+		return emitError(cmd, 2, "--action abort is only valid at a repair reconciliation gate",
+			"Use `no-mistakes axi abort` to stop an ordinary active run")
+	}
 
 	findingIDs := append([]string(nil), ra.finding...)
 	if ra.findings != "" {
@@ -1369,7 +1380,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	var added []types.Finding
 
 	if act == types.ActionFix {
-		if len(findingIDs) == 0 && ra.addFinding == "" {
+		if len(findingIDs) == 0 && ra.addFinding == "" && !reconciliation {
 			return emitError(cmd, 2, "--action fix requires --finding <exact-id>, --findings <legacy-id,...>, or --add-finding <json>",
 				"Run `no-mistakes axi status` to list finding IDs")
 		}

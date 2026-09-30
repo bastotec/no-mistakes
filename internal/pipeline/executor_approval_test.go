@@ -120,11 +120,7 @@ func TestExecutor_ResumeParksUnresolvedRepairAtReconciliationGate(t *testing.T) 
 	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.MarkStepRepairStarted(round.ID); err != nil {
-		t.Fatal(err)
-	}
-	pid := 4242
-	if err := database.SetStepAgentActivity(stepResult.ID, "repair process active", &pid); err != nil {
+	if err := database.BindStepRepairProcess(stepResult.ID, round.ID, "repair process active", 4242); err != nil {
 		t.Fatal(err)
 	}
 	run, _ = database.GetRun(run.ID)

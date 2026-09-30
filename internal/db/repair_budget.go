@@ -156,8 +156,11 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 		}
 	}
 	dispatch := any(nil)
-	if result.Granted && explicit {
-		dispatch = "fix_authorized"
+	if result.Granted {
+		dispatch = "claimed"
+		if explicit {
+			dispatch = "fix_authorized"
+		}
 	}
 	if _, err := tx.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source, dispatch_state) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(round_id) DO UPDATE SET consumed = excluded.consumed, repair_limit = excluded.repair_limit, authority_limit = excluded.authority_limit, source = excluded.source, dispatch_state = excluded.dispatch_state`, roundID, stepID, result.Consumed, limit, result.AuthorityLimit, source, dispatch); err != nil {
 		return result, err
@@ -216,7 +219,7 @@ func (d *DB) ClaimStepRepair(stepID, roundID string) error {
 	}
 	defer tx.Rollback()
 	var state sql.NullString
-	if err := tx.QueryRow(`SELECT dispatch_state FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ? AND source = ?`, roundID, stepID, RoundSelectionSourceUser).Scan(&state); err != nil {
+	if err := tx.QueryRow(`SELECT dispatch_state FROM repair_budget_decisions WHERE round_id = ? AND step_result_id = ?`, roundID, stepID).Scan(&state); err != nil {
 		return fmt.Errorf("read repair authorization: %w", err)
 	}
 	if !state.Valid || (state.String != "fix_authorized" && state.String != "claimed") {
@@ -240,9 +243,40 @@ func (d *DB) ClaimStepRepair(stepID, roundID string) error {
 	return tx.Commit()
 }
 
-func (d *DB) MarkStepRepairStarted(roundID string) error {
-	_, err := d.sql.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'started' WHERE round_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID)
-	return err
+func (d *DB) BindStepRepairProcess(stepID, roundID, activity string, pid int) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'started' WHERE round_id = ? AND step_result_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID, stepID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil {
+		return err
+	} else if changed != 1 {
+		return fmt.Errorf("repair dispatch is not claimable")
+	}
+	if _, err := tx.Exec(`UPDATE step_results SET last_activity_at = ?, last_activity = ?, agent_pid = ? WHERE id = ?`, now(), activity, pid, stepID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (d *DB) CompleteStepRepair(stepID, roundID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'completed' WHERE round_id = ? AND step_result_id = ? AND dispatch_state IN ('claimed', 'started')`, roundID, stepID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE step_results SET agent_pid = NULL WHERE id = ?`, stepID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) RetryUnstartedStepRepair(stepID, roundID string) error {
@@ -253,7 +287,7 @@ func (d *DB) RetryUnstartedStepRepair(stepID, roundID string) error {
 	defer tx.Rollback()
 	var state sql.NullString
 	var pid sql.NullInt64
-	if err := tx.QueryRow(`SELECT d.dispatch_state, s.agent_pid FROM repair_budget_decisions d JOIN step_results s ON s.id = d.step_result_id WHERE d.round_id = ? AND d.step_result_id = ? AND d.source = ?`, roundID, stepID, RoundSelectionSourceUser).Scan(&state, &pid); err != nil {
+	if err := tx.QueryRow(`SELECT d.dispatch_state, s.agent_pid FROM repair_budget_decisions d JOIN step_results s ON s.id = d.step_result_id WHERE d.round_id = ? AND d.step_result_id = ?`, roundID, stepID).Scan(&state, &pid); err != nil {
 		return fmt.Errorf("read unresolved repair: %w", err)
 	}
 	if !state.Valid || state.String != "repair_started_unresolved" {

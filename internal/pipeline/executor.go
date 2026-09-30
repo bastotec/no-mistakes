@@ -915,13 +915,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		switch event.Phase {
 		case agent.LifecyclePhaseStart:
+			pid := event.PID
 			if activeRepairRoundID != "" {
-				if dbErr := e.db.MarkStepRepairStarted(activeRepairRoundID); dbErr != nil {
+				if dbErr := e.db.BindStepRepairProcess(sr.ID, activeRepairRoundID, text, pid); dbErr != nil {
 					slog.Warn("failed to bind repair process start", "step", stepName, "error", dbErr)
 				}
-			}
-			pid := event.PID
-			if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
+			} else if dbErr := e.db.SetStepAgentActivity(sr.ID, text, &pid); dbErr != nil {
 				slog.Warn("failed to set step agent activity in db", "step", stepName, "error", dbErr)
 			}
 		case agent.LifecyclePhaseExit:
@@ -1131,6 +1130,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			slog.Warn("failed to insert step round", "step", stepName, "round", roundNum, "error", dbErr)
 		} else {
 			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
+			if activeRepairRoundID != "" {
+				if completeErr := e.db.CompleteStepRepair(sr.ID, activeRepairRoundID); completeErr != nil {
+					return false, "", fmt.Errorf("complete %s repair dispatch: %w", stepName, completeErr)
+				}
+				activeRepairRoundID = ""
+			}
 		}
 
 		// If the step produced a PR URL, propagate it to the run and emit an update.
@@ -1175,6 +1180,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 						return false, "", fmt.Errorf("persist %s repair budget gate: %w", stepName, err)
 					}
 				} else {
+					activeRepairRoundID = currentRoundID
 					telemetry.Track("fix", e.fixTelemetryFields("auto", stepName, findingsCount(fixableFindings), decision.Consumed))
 					slog.Info("auto-fixing step", "step", stepName, "attempt", decision.Consumed, "max", decision.Limit)
 					executionMS += time.Since(phaseStart).Milliseconds()
