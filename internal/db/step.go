@@ -230,6 +230,15 @@ func (d *DB) StartStep(id string) error {
 	return d.StartStepWithAutoFixLimit(id, 0)
 }
 
+func (d *DB) StartStepWithoutAutoFixPolicy(id string) error {
+	ts := now()
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = NULL, auto_fix_limit_provenance = 'unconfigured' WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", id)
+	if err != nil {
+		return fmt.Errorf("start unconfigured step: %w", err)
+	}
+	return nil
+}
+
 // StartStepWithAutoFixLimit marks a step as running and records the effective
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
@@ -273,11 +282,16 @@ func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	defer tx.Rollback()
 	_, err = tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?,
 		auto_fix_limit = CASE
+			WHEN auto_fix_limit_provenance = 'unconfigured' THEN NULL
 			WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 0
 			WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ?
 			ELSE auto_fix_limit
 		END,
-		auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 'legacy_normalized' ELSE 'initialized' END,
+		auto_fix_limit_provenance = CASE
+			WHEN auto_fix_limit_provenance = 'unconfigured' THEN 'unconfigured'
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 'legacy_normalized'
+			ELSE 'initialized'
+		END,
 		override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimit, autoFixLimit, id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
@@ -292,14 +306,17 @@ func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 }
 
 func capRepairBudgetToStepLimit(tx *sql.Tx, id string) error {
-	var limit int
+	var limit sql.NullInt64
 	if err := tx.QueryRow(`SELECT auto_fix_limit FROM step_results WHERE id = ?`, id).Scan(&limit); err != nil {
 		return err
+	}
+	if !limit.Valid {
+		return nil
 	}
 	_, err := tx.Exec(`UPDATE repair_budget_decisions
 		SET repair_limit = MIN(repair_limit, ?),
 			authority_limit = CASE WHEN authority_limit IS NULL THEN NULL ELSE MIN(authority_limit, ?) END
-		WHERE step_result_id = ?`, limit, limit, id)
+		WHERE step_result_id = ?`, limit.Int64, limit.Int64, id)
 	return err
 }
 

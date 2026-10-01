@@ -50,13 +50,13 @@ func TestRepairInvocationErrorClassRoundTrip(t *testing.T) {
 func TestRepairInvocationAgent_ReplaysTerminalResultWithoutRerunningFixer(t *testing.T) {
 	database, _, run, _ := setupTest(t)
 	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
-	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 0); err != nil {
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
 		t.Fatal(err)
 	}
 	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
 	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
 	ids := `["review-1"]`
-	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 0, &ids, nil); err != nil || !decision.Granted {
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
 		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
 	}
 	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {

@@ -464,11 +464,13 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				continue
 			}
 			if !repairWrapperIdentityLive(token, pid, resultPath) {
-				if markErr := e.db.MarkRepairInvocationUnresolved(gate.stepResult.ID, gate.lastRoundID); markErr != nil {
+				retryable, markErr := e.db.MarkRepairInvocationUnresolved(gate.stepResult.ID, gate.lastRoundID)
+				if markErr != nil {
 					return e.failRun(run, repo, fmt.Errorf("mark repair wrapper unresolved: %w", markErr), ctx)
 				}
 				gate.repairWrapperLive = false
-				gate.repairUnresolved = true
+				gate.repairAuthorized = retryable
+				gate.repairUnresolved = !retryable
 				break
 			}
 			select {
@@ -921,7 +923,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	autoFixLimit := e.autoFixLimit(stepName)
 
 	if !state.fixing && !state.resumeRunning {
-		if err := e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit); err != nil {
+		var err error
+		if stepName.IsCustomGate() {
+			err = e.db.StartStepWithoutAutoFixPolicy(sr.ID)
+		} else {
+			err = e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit)
+		}
+		if err != nil {
 			return false, "", fmt.Errorf("start step %s: %w", stepName, err)
 		}
 		e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
@@ -1149,6 +1157,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
+			if errors.Is(err, ErrDaemonShutdown) {
+				return false, "", ErrDaemonShutdown
+			}
 			durationMS := executionMS + roundDuration
 			// Persist the failure reason to the step's own log file. The error
 			// often carries the only detail of why the step failed (e.g. git
@@ -1234,8 +1245,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		} else {
 			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
 			if activeRepairRoundID != "" {
-				if completeErr := e.db.CompleteStepRepair(sr.ID, activeRepairRoundID); completeErr != nil {
+				completedRoundID := activeRepairRoundID
+				if completeErr := e.db.CompleteStepRepair(sr.ID, completedRoundID); completeErr != nil {
 					return false, "", fmt.Errorf("complete %s repair dispatch: %w", stepName, completeErr)
+				}
+				if invocationID, lookupErr := e.db.RepairInvocationForRound(sr.ID, completedRoundID); lookupErr == nil {
+					if cleanupErr := e.db.CleanupRepairInvocationFiles(invocationID); cleanupErr != nil {
+						slog.Warn("repair invocation payload cleanup remains pending", "step", stepName, "error", cleanupErr)
+					}
+				} else if lookupErr != nil {
+					slog.Warn("failed to locate completed repair invocation for cleanup", "step", stepName, "error", lookupErr)
 				}
 				activeRepairRoundID = ""
 			}
@@ -2042,6 +2061,9 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 	} else if verified {
 		run.HeadSHA = verifiedHead
 	}
+	if cleanupErr := e.db.CleanupRunRepairInvocationFiles(run.ID); cleanupErr != nil {
+		slog.Warn("terminal repair invocation payload cleanup remains pending", "run", run.ID, "error", cleanupErr)
+	}
 	run.Status = runStatus
 	run.Error = &errMsg
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
@@ -2061,6 +2083,9 @@ func (e *Executor) completeRun(run *db.Run, repo *db.Repo) error {
 	}
 	if verified {
 		run.HeadSHA = verifiedHead
+	}
+	if cleanupErr := e.db.CleanupRunRepairInvocationFiles(run.ID); cleanupErr != nil {
+		slog.Warn("terminal repair invocation payload cleanup remains pending", "run", run.ID, "error", cleanupErr)
 	}
 	run.Status = types.RunCompleted
 	e.emitRunEvent(ipc.EventRunCompleted, run, repo)

@@ -85,6 +85,11 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 	if stepFactory == nil {
 		stepFactory = func() []pipeline.Step { return steps.AllSteps() }
 	}
+	if database != nil {
+		if err := database.CleanupPendingRepairInvocationFiles(); err != nil {
+			slog.Warn("repair invocation payload cleanup remains pending", "error", err)
+		}
+	}
 	return &RunManager{
 		executors:     make(map[string]*pipeline.Executor),
 		cancels:       make(map[string]context.CancelCauseFunc),

@@ -30,9 +30,10 @@ func TestExhaustedRepairFindingsKeepsUnsafeIDsOutOfGuidance(t *testing.T) {
 	}
 	got := exhaustedRepairFindings(raw, types.StepCI, "run-1", db.RepairBudgetDecision{
 		Consumed:                0,
-		Limit:                   0,
+		Limit:                   1,
 		AuthorityLimit:          0,
 		ExplicitRepairAvailable: true,
+		PolicyConfigured:        true,
 	})
 	findings, err := types.ParseFindingsJSON(got)
 	if err != nil {
@@ -44,7 +45,7 @@ func TestExhaustedRepairFindingsKeepsUnsafeIDsOutOfGuidance(t *testing.T) {
 		}
 	}
 	budget := findings.Items[len(findings.Items)-1]
-	if budget.Category != repairBudgetFindingCategory || !strings.Contains(budget.Description, "Automatic repair budget exhausted") || !strings.Contains(budget.Description, "axi status") {
+	if budget.Category != repairBudgetFindingCategory || !strings.Contains(budget.Description, "Automatic repair authority exhausted") || !strings.Contains(budget.Description, "axi status") {
 		t.Fatalf("legacy authority guidance = %+v", budget)
 	}
 	for _, id := range ids {

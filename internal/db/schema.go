@@ -134,6 +134,9 @@ CREATE TABLE IF NOT EXISTS repair_invocations (
     error_text     TEXT,
     lifecycle_phase TEXT NOT NULL DEFAULT 'repair',
     control_state  TEXT NOT NULL DEFAULT 'active',
+    cleanup_state  TEXT NOT NULL DEFAULT 'active',
+    cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+    cleanup_error  TEXT,
     created_at     INTEGER NOT NULL,
     updated_at     INTEGER NOT NULL,
     UNIQUE (round_id, ordinal)
@@ -369,6 +372,9 @@ var migrationStatements = []string{
 		error_text TEXT,
 		lifecycle_phase TEXT NOT NULL DEFAULT 'repair',
 		control_state TEXT NOT NULL DEFAULT 'active',
+		cleanup_state TEXT NOT NULL DEFAULT 'active',
+		cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+		cleanup_error TEXT,
 		created_at INTEGER NOT NULL,
 		updated_at INTEGER NOT NULL,
 		UNIQUE (round_id, ordinal)
@@ -379,6 +385,9 @@ var migrationStatements = []string{
 	`ALTER TABLE repair_invocations ADD COLUMN descriptor_path TEXT`,
 	`ALTER TABLE repair_invocations ADD COLUMN result_path TEXT`,
 	`ALTER TABLE repair_invocations ADD COLUMN control_state TEXT NOT NULL DEFAULT 'active'`,
+	`ALTER TABLE repair_invocations ADD COLUMN cleanup_state TEXT NOT NULL DEFAULT 'active'`,
+	`ALTER TABLE repair_invocations ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE repair_invocations ADD COLUMN cleanup_error TEXT`,
 	// Non-nil exactly when a human answered ActionApprove on a step whose gate
 	// existed because of an unresolved external condition (currently: the CI
 	// step's live checks were still failing) - see

@@ -1,6 +1,7 @@
 package db
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"sync"
@@ -137,6 +138,42 @@ func TestStartedRepairRecoveryStaysFixingWithoutRedispatch(t *testing.T) {
 	storedRun, _ := d.GetRun(run.ID)
 	if storedRun.AwaitingAgentSince != nil {
 		t.Fatal("unresolved active repair was exposed as an approval gate")
+	}
+}
+
+func TestMissingUnstartedWrapperReturnsToPreparedAuthorization(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if decision, err := d.ReserveStepRepair(step.ID, round.ID, 1, false); err != nil || !decision.Granted {
+		t.Fatalf("reserve repair = %+v, %v", decision, err)
+	}
+	invocationID, err := d.RepairInvocationForRound(step.ID, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.RegisterRepairInvocation(step.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PrepareRepairInvocationWrapper(invocationID, "token"); err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := d.MarkRepairInvocationUnresolved(step.ID, round.ID)
+	if err != nil || !retryable {
+		t.Fatalf("unstarted wrapper reconciliation = %v, %v", retryable, err)
+	}
+	state, _, err := d.RepairInvocationRecoveryState(step.ID, round.ID)
+	if err != nil || state != "prepared" {
+		t.Fatalf("reconciled state = %q, %v", state, err)
+	}
+	restored, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
+	if err != nil || restored != "fix_authorized" {
+		t.Fatalf("restored authorization = %q, %v", restored, err)
 	}
 }
 
@@ -465,8 +502,8 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
-	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || !denied.ExplicitRepairAvailable {
-		t.Fatalf("legacy NULL gained automatic authority or hid explicit authority: %+v %v", denied, err)
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.ExplicitRepairAvailable {
+		t.Fatalf("legacy NULL gained repair authority: %+v %v", denied, err)
 	}
 	persisted, err := d.GetStepResult(step.ID)
 	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
@@ -481,25 +518,14 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retriedBeforeGrant, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
-	if err != nil || retriedBeforeGrant.Granted || !retriedBeforeGrant.ExplicitRepairAvailable {
-		t.Fatalf("resume hid one-time legacy authority: %+v %v", retriedBeforeGrant, err)
+	retried, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	if err != nil || retried.Granted || retried.ExplicitRepairAvailable {
+		t.Fatalf("legacy zero advertised repair authority: %+v %v", retried, err)
 	}
 	ids := `["ci-red"]`
-	granted, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
-	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.Limit != 0 || granted.AuthorityLimit != 1 || granted.ExplicitRepairAvailable {
-		t.Fatalf("explicit response did not grant exactly one repair: %+v %v", granted, err)
-	}
-	persisted, err = d.GetStepResult(step.ID)
-	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
-		t.Fatalf("explicit response widened automatic limit: %+v %v", persisted, err)
-	}
-	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "initialized" {
-		t.Fatalf("legacy authority was not consumed exactly once: %q, %v", provenance, err)
-	}
-	next, err := d.InsertStepRound(step.ID, 2, "user_fix", &findings, nil, 0)
-	if err != nil {
-		t.Fatal(err)
+	denied, err = d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
+	if err != nil || denied.Granted || denied.Consumed != 0 || denied.Limit != 0 || denied.AuthorityLimit != 0 {
+		t.Fatalf("legacy zero accepted explicit repair: %+v %v", denied, err)
 	}
 	d.Close()
 
@@ -508,11 +534,9 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	for range 2 {
-		retried, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
-		if err != nil || retried.Granted || retried.Consumed != 1 || retried.Limit != 0 || retried.AuthorityLimit != 1 || !retried.ExplicitRepairAvailable {
-			t.Fatalf("resume or retry widened legacy automatic authority: %+v %v", retried, err)
-		}
+	denied, err = d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
+	if err != nil || denied.Granted || denied.Consumed != 0 || denied.Limit != 0 || denied.AuthorityLimit != 0 {
+		t.Fatalf("restart reopened legacy zero authority: %+v %v", denied, err)
 	}
 }
 
@@ -663,6 +687,80 @@ func TestRepairBudgetOneRemainingLaunchesTwoOfThree(t *testing.T) {
 	retry, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
 	if err != nil || retry.Granted || !retry.Duplicate {
 		t.Fatalf("retry launched duplicate: %+v %v", retry, err)
+	}
+}
+
+func TestUnconfiguredRepairPolicyRequiresOneExplicitGrantPerRepair(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.CustomGateStepName(types.StepReview, "policy"))
+	if err := d.StartStepWithoutAutoFixPolicy(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	denied, err := d.ReserveStepRepair(step.ID, first.ID, 0, false)
+	if err != nil || denied.Granted || !denied.ExplicitRepairAvailable || denied.PolicyConfigured {
+		t.Fatalf("unconfigured automatic decision = %+v, %v", denied, err)
+	}
+	ids := `["policy"]`
+	granted, err := d.AuthorizeStepRepair(step.ID, first.ID, 0, &ids, nil)
+	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.AuthorityLimit != 1 {
+		t.Fatalf("first explicit grant = %+v, %v", granted, err)
+	}
+	next, _ := d.InsertStepRound(step.ID, 2, "user_fix", nil, nil, 0)
+	automatic, err := d.ReserveStepRepair(step.ID, next.ID, 0, false)
+	if err != nil || automatic.Granted || automatic.Consumed != 1 || automatic.AuthorityLimit != 1 {
+		t.Fatalf("unconfigured gate auto-looped = %+v, %v", automatic, err)
+	}
+}
+
+func TestConsumedRepairPayloadCleanupIsDurableAndRemovesFiles(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	decision, err := d.ReserveStepRepair(step.ID, round.ID, 1, false)
+	if err != nil || !decision.Granted {
+		t.Fatalf("reserve repair: %+v, %v", decision, err)
+	}
+	invocationID, err := d.RepairInvocationForRound(step.ID, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	descriptor := filepath.Join(dir, "prompt.json")
+	result := filepath.Join(dir, "result.json")
+	for _, path := range []string{descriptor, result, result + ".heartbeat"} {
+		if err := os.WriteFile(path, []byte("sensitive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'terminal', descriptor_path = ?, result_path = ?, result_json = ?, result_present = 1, error_text = 'secret' WHERE id = ?`, descriptor, result, []byte(`{"text":"secret"}`), invocationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	var state, cleanupState string
+	var payload, errorText []byte
+	if err := d.sql.QueryRow(`SELECT state, cleanup_state, result_json, error_text FROM repair_invocations WHERE id = ?`, invocationID).Scan(&state, &cleanupState, &payload, &errorText); err != nil {
+		t.Fatal(err)
+	}
+	if state != "consumed" || cleanupState != "pending" || payload != nil || errorText != nil {
+		t.Fatalf("consumption did not clear payload: state=%s cleanup=%s payload=%q error=%q", state, cleanupState, payload, errorText)
+	}
+	if err := d.CleanupPendingRepairInvocationFiles(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{descriptor, result, result + ".heartbeat"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("payload survived cleanup: %s (%v)", path, err)
+		}
 	}
 }
 

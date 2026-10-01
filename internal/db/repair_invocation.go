@@ -125,7 +125,8 @@ func (d *DB) RepairInvocationWrapperIdentity(stepID, roundID string) (string, in
 }
 
 func (d *DB) RecoverRepairInvocationResult(stepID, roundID string) (bool, error) {
-	var invocationID, state, resultPath string
+	var invocationID, state string
+	var resultPath sql.NullString
 	err := d.sql.QueryRow(`SELECT id, state, result_path FROM repair_invocations WHERE step_result_id = ? AND round_id = ? ORDER BY ordinal DESC LIMIT 1`, stepID, roundID).Scan(&invocationID, &state, &resultPath)
 	if err == sql.ErrNoRows {
 		return false, nil
@@ -133,16 +134,17 @@ func (d *DB) RecoverRepairInvocationResult(stepID, roundID string) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	return d.recoverRepairInvocationResult(invocationID, state, resultPath)
+	return d.recoverRepairInvocationResult(invocationID, state, resultPath.String)
 }
 
 func (d *DB) RecoverRepairInvocationResultByID(invocationID string) (bool, error) {
-	var state, resultPath string
+	var state string
+	var resultPath sql.NullString
 	err := d.sql.QueryRow(`SELECT state, result_path FROM repair_invocations WHERE id = ?`, invocationID).Scan(&state, &resultPath)
 	if err != nil {
 		return false, err
 	}
-	return d.recoverRepairInvocationResult(invocationID, state, resultPath)
+	return d.recoverRepairInvocationResult(invocationID, state, resultPath.String)
 }
 
 func (d *DB) recoverRepairInvocationResult(invocationID, state, resultPath string) (bool, error) {
@@ -217,19 +219,137 @@ func (d *DB) RepairInvocationCancellationRequested(invocationID string) (bool, e
 	return requested, err
 }
 
-func (d *DB) MarkRepairInvocationUnresolved(stepID, roundID string) error {
+func (d *DB) MarkRepairInvocationUnresolved(stepID, roundID string) (bool, error) {
 	tx, err := d.sql.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	var invocationID, state string
+	var wrapperPID, fixerPID sql.NullInt64
+	var resultPresent int
+	if err := tx.QueryRow(`SELECT id, state, wrapper_pid, fixer_pid, result_present FROM repair_invocations WHERE step_result_id = ? AND round_id = ? ORDER BY ordinal DESC LIMIT 1`, stepID, roundID).Scan(&invocationID, &state, &wrapperPID, &fixerPID, &resultPresent); err != nil {
+		return false, err
+	}
+	if state == "launching" && !wrapperPID.Valid && !fixerPID.Valid && resultPresent == 0 {
+		if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'prepared', wrapper_token = NULL, control_state = 'active', updated_at = ? WHERE id = ?`, now(), invocationID); err != nil {
+			return false, err
+		}
+		if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'fix_authorized' WHERE step_result_id = ? AND round_id = ?`, stepID, roundID); err != nil {
+			return false, err
+		}
+		return true, tx.Commit()
+	}
+	if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'unresolved', control_state = 'cancel_requested', updated_at = ? WHERE id = ? AND state IN ('registered', 'fixer_started', 'launching')`, now(), invocationID); err != nil {
+		return false, err
+	}
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE step_result_id = ? AND round_id = ?`, stepID, roundID); err != nil {
+		return false, err
+	}
+	return false, tx.Commit()
+}
+
+func (d *DB) ResetUnstartedRepairInvocation(invocationID string) error {
+	result, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'prepared', wrapper_token = NULL, control_state = 'active', updated_at = ? WHERE id = ? AND state = 'launching' AND wrapper_pid IS NULL AND fixer_pid IS NULL AND result_present = 0`, now(), invocationID)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
-	if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'unresolved', control_state = 'cancel_requested', updated_at = ? WHERE step_result_id = ? AND round_id = ? AND state IN ('launching', 'registered', 'fixer_started')`, now(), stepID, roundID); err != nil {
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("repair wrapper launch could not be reset safely")
+	}
+	return nil
+}
+
+func (d *DB) CleanupRepairInvocationFiles(invocationID string) error {
+	var descriptorPath, resultPath, cleanupState string
+	var attempts int
+	if err := d.sql.QueryRow(`SELECT COALESCE(descriptor_path, ''), COALESCE(result_path, ''), cleanup_state, cleanup_attempts FROM repair_invocations WHERE id = ? AND state = 'consumed'`, invocationID).Scan(&descriptorPath, &resultPath, &cleanupState, &attempts); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE step_result_id = ? AND round_id = ?`, stepID, roundID); err != nil {
+	if cleanupState == "complete" {
+		return nil
+	}
+	if attempts >= 3 {
+		return fmt.Errorf("repair invocation payload cleanup exhausted after %d attempts", attempts)
+	}
+	for _, path := range []string{descriptorPath, resultPath, repairHeartbeatPath(resultPath)} {
+		if path == "" {
+			continue
+		}
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			message := err.Error()
+			_, _ = d.sql.Exec(`UPDATE repair_invocations SET cleanup_state = 'failed', cleanup_attempts = cleanup_attempts + 1, cleanup_error = ?, updated_at = ? WHERE id = ?`, message, now(), invocationID)
+			return fmt.Errorf("remove repair invocation payload: %w", err)
+		}
+	}
+	_, err := d.sql.Exec(`UPDATE repair_invocations SET cleanup_state = 'complete', cleanup_attempts = cleanup_attempts + 1, cleanup_error = NULL, descriptor_path = NULL, result_path = NULL, wrapper_token = NULL, wrapper_pid = NULL, fixer_pid = NULL, updated_at = ? WHERE id = ? AND state = 'consumed'`, now(), invocationID)
+	return err
+}
+
+func repairHeartbeatPath(resultPath string) string {
+	if resultPath == "" {
+		return ""
+	}
+	return resultPath + ".heartbeat"
+}
+
+func (d *DB) CleanupPendingRepairInvocationFiles() error {
+	rows, err := d.sql.Query(`SELECT id FROM repair_invocations WHERE state = 'consumed' AND cleanup_state != 'complete' AND cleanup_attempts < 3 ORDER BY created_at`)
+	if err != nil {
 		return err
 	}
-	return tx.Commit()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := d.CleanupRepairInvocationFiles(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) CleanupRunRepairInvocationFiles(runID string) error {
+	if _, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'consumed', result_json = NULL, result_present = 0, error_text = NULL, cleanup_state = 'pending', cleanup_error = NULL, updated_at = ? WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?) AND state IN ('prepared', 'terminal')`, now(), runID); err != nil {
+		return err
+	}
+	rows, err := d.sql.Query(`SELECT id FROM repair_invocations WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?) AND state = 'consumed' AND cleanup_state != 'complete' AND cleanup_attempts < 3`, runID)
+	if err != nil {
+		return err
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, id := range ids {
+		if err := d.CleanupRepairInvocationFiles(id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (d *DB) RepairInvocationForRound(stepID, roundID string) (string, error) {
+	var id string
+	err := d.sql.QueryRow(`SELECT id FROM repair_invocations WHERE step_result_id = ? AND round_id = ? ORDER BY ordinal DESC LIMIT 1`, stepID, roundID).Scan(&id)
+	return id, err
 }
 
 func (d *DB) BindRepairInvocationProcess(invocationID, activity string, pid int) error {

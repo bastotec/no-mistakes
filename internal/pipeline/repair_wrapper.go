@@ -146,6 +146,9 @@ func launchIndependentRepair(ctx context.Context, database *db.DB, root, invocat
 	cmd.Dir = opts.CWD
 	shellenv.ConfigureShellCommand(cmd)
 	if err := shellenv.StartShellCommand(cmd); err != nil {
+		if resetErr := database.ResetUnstartedRepairInvocation(invocationID); resetErr != nil {
+			return nil, fmt.Errorf("start repair invocation wrapper: %w (reset failed: %v)", err, resetErr)
+		}
 		return nil, fmt.Errorf("start repair invocation wrapper: %w", err)
 	}
 	if opts.OnLifecycle != nil {

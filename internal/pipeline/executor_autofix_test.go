@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +18,28 @@ import (
 )
 
 // A response authorizes one repair, not the configured automatic headroom.
+func TestExecutor_DaemonShutdownPreservesActiveStepState(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, ErrDaemonShutdown
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); !errors.Is(err, ErrDaemonShutdown) {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("steps = %+v, %v", steps, err)
+	}
+	if steps[0].Status != types.StepStatusRunning {
+		t.Fatalf("shutdown changed active step to %s", steps[0].Status)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunRunning {
+		t.Fatalf("shutdown changed active run: %+v, %v", stored, err)
+	}
+}
+
 func TestExecutor_ResponsePinsOneRepairUntilLaterAuthority(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	var calls atomic.Int32
@@ -230,13 +253,11 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		t.Errorf("expected 3 calls (1 initial + 2 auto-fix), got %d", callCount)
 	}
 
-	if err := exec.Respond(types.StepLint, types.ActionFix, []string{"style"}); err != nil {
-		t.Fatalf("explicit repair after automatic ceiling: %v", err)
+	if err := exec.Respond(types.StepLint, types.ActionFix, []string{"style"}); err == nil {
+		t.Fatal("configured hard ceiling accepted another repair")
 	}
-	waitForStepStatus(t, database, run.ID, types.StepLint, types.StepStatusFixing)
-	waitForStepStatus(t, database, run.ID, types.StepLint, types.StepStatusFixReview)
-	if callCount != 4 {
-		t.Fatalf("explicit response launched %d additional rounds, want one", callCount-3)
+	if callCount != 3 {
+		t.Fatalf("configured hard ceiling launched %d extra rounds", callCount-3)
 	}
 
 	// Now approve manually to finish
@@ -534,30 +555,21 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 	waitExecutorDone(t, done)
 }
 
-func TestExecutor_AskUserGateAtZeroAutomaticLimitAcceptsOneExplicitRepair(t *testing.T) {
+func TestExecutor_ConfiguredZeroRejectsExplicitRepair(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	calls := 0
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		calls++
-		if calls == 2 && !sctx.Fixing {
-			t.Fatal("explicit repair did not enter fixing mode")
-		}
-		action := "ask-user"
-		if calls > 1 {
-			action = "auto-fix"
-		}
-		return &StepOutcome{NeedsApproval: true, AutoFixable: calls > 1, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"` + action + `"}]}`}, nil
+		return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"ask-user"}]}`}, nil
 	}}
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 0}}, nil, []Step{step}, nil)
 	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err != nil {
-		t.Fatalf("explicit repair at zero automatic limit: %v", err)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err == nil {
+		t.Fatal("configured zero accepted an explicit repair")
 	}
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixing)
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
-	if calls != 2 {
-		t.Fatalf("explicit response launched %d rounds, want exactly one repair", calls-1)
+	if calls != 1 {
+		t.Fatalf("configured zero launched %d repair rounds", calls-1)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)

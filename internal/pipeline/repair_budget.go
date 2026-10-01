@@ -46,7 +46,14 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 		return raw
 	} // Caller already normalized the payload.
 	category := repairBudgetFindingCategory
-	description := fmt.Sprintf("Automatic repair budget exhausted for %s: consumed %d repairs, current authority limit %d, configured automatic maximum %d; requested additional repair %d. No further automatic repair is authorized. An explicit response can authorize exactly one selected repair without increasing the automatic ceiling; run `no-mistakes axi status` from this run's branch for version-matched response guidance (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, decision.Consumed+1, runID)
+	description := fmt.Sprintf("Automatic repair budget exhausted for %s: consumed %d repairs, current authority limit %d, configured automatic maximum %d. No further repair is authorized by the configured ceiling; approve or abort after reviewing the remaining findings (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, runID)
+	if decision.ExplicitRepairAvailable {
+		if decision.PolicyConfigured {
+			description = fmt.Sprintf("Automatic repair authority exhausted for %s: consumed %d repairs, current authority limit %d, configured automatic maximum %d; requested additional repair %d. No further automatic repair is authorized. An explicit response can authorize exactly one selected repair without increasing the automatic ceiling; run `no-mistakes axi status` from this run's branch for version-matched response guidance (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, decision.Consumed+1, runID)
+		} else {
+			description = fmt.Sprintf("The unconfigured %s gate has no automatic repair authority. An explicit response can authorize exactly one selected repair; another response is required for every later repair (run %s).", step, runID)
+		}
+	}
 	findings.Items = append(findings.Items, types.Finding{
 		ID:          "repair-budget-" + string(step),
 		Severity:    types.FindingSeverityWarning,
