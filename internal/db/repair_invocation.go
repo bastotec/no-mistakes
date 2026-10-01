@@ -2,7 +2,11 @@ package db
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
+	"os"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 type RepairInvocation struct {
@@ -67,8 +71,19 @@ func (d *DB) SetRepairInvocationFiles(invocationID, descriptorPath, resultPath s
 	return nil
 }
 
+func (d *DB) PrepareRepairInvocationWrapper(invocationID, token string) error {
+	result, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'launching', wrapper_token = ?, updated_at = ? WHERE id = ? AND state = 'registered' AND wrapper_token IS NULL`, token, now(), invocationID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("repair wrapper launch was not accepted")
+	}
+	return nil
+}
+
 func (d *DB) BindRepairInvocationWrapper(invocationID, token string, pid int) error {
-	result, err := d.sql.Exec(`UPDATE repair_invocations SET wrapper_pid = ?, wrapper_token = ?, updated_at = ? WHERE id = ? AND state = 'registered' AND (wrapper_token IS NULL OR wrapper_token = ?)`, pid, token, now(), invocationID, token)
+	result, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'registered', wrapper_pid = ?, updated_at = ? WHERE id = ? AND state = 'launching' AND wrapper_token = ?`, pid, now(), invocationID, token)
 	if err != nil {
 		return err
 	}
@@ -104,14 +119,117 @@ func (d *DB) RepairInvocationFiles(invocationID string) (string, string, error) 
 
 func (d *DB) RepairInvocationWrapperIdentity(stepID, roundID string) (string, int, string, error) {
 	var token, resultPath string
-	var pid int
+	var pid sql.NullInt64
 	err := d.sql.QueryRow(`SELECT wrapper_token, wrapper_pid, result_path FROM repair_invocations WHERE step_result_id = ? AND round_id = ? ORDER BY ordinal DESC LIMIT 1`, stepID, roundID).Scan(&token, &pid, &resultPath)
-	return token, pid, resultPath, err
+	return token, int(pid.Int64), resultPath, err
+}
+
+func (d *DB) RecoverRepairInvocationResult(stepID, roundID string) (bool, error) {
+	var invocationID, state, resultPath string
+	err := d.sql.QueryRow(`SELECT id, state, result_path FROM repair_invocations WHERE step_result_id = ? AND round_id = ? ORDER BY ordinal DESC LIMIT 1`, stepID, roundID).Scan(&invocationID, &state, &resultPath)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return d.recoverRepairInvocationResult(invocationID, state, resultPath)
+}
+
+func (d *DB) RecoverRepairInvocationResultByID(invocationID string) (bool, error) {
+	var state, resultPath string
+	err := d.sql.QueryRow(`SELECT state, result_path FROM repair_invocations WHERE id = ?`, invocationID).Scan(&state, &resultPath)
+	if err != nil {
+		return false, err
+	}
+	return d.recoverRepairInvocationResult(invocationID, state, resultPath)
+}
+
+func (d *DB) recoverRepairInvocationResult(invocationID, state, resultPath string) (bool, error) {
+	if state == "terminal" || state == "consumed" || resultPath == "" {
+		return false, nil
+	}
+	payload, err := os.ReadFile(resultPath)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	var wire struct {
+		Result        json.RawMessage `json:"result"`
+		ResultPresent bool            `json:"result_present"`
+		ErrorClass    string          `json:"error_class"`
+		ErrorMessage  string          `json:"error_message"`
+	}
+	if err := json.Unmarshal(payload, &wire); err != nil {
+		return false, fmt.Errorf("decode repair invocation result: %w", err)
+	}
+	if wire.ResultPresent && len(wire.Result) == 0 {
+		return false, fmt.Errorf("repair invocation result is missing")
+	}
+	var class, message *string
+	if wire.ErrorClass != "" || wire.ErrorMessage != "" {
+		class, message = &wire.ErrorClass, &wire.ErrorMessage
+	}
+	if err := d.FinishRepairInvocation(invocationID, wire.Result, wire.ResultPresent, class, message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (d *DB) AuthorizeCompletedRepair(stepID, roundID string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var state string
+	if err := tx.QueryRow(`SELECT state FROM repair_invocations WHERE step_result_id = ? AND round_id = ? ORDER BY ordinal DESC LIMIT 1`, stepID, roundID).Scan(&state); err != nil {
+		return err
+	}
+	if state != "terminal" {
+		return fmt.Errorf("repair invocation is not terminal")
+	}
+	result, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'fix_authorized' WHERE step_result_id = ? AND round_id = ? AND dispatch_state IN ('started', 'claimed')`, stepID, roundID)
+	if err != nil {
+		return err
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("completed repair authorization was not accepted")
+	}
+	return tx.Commit()
+}
+
+func (d *DB) RequestRepairInvocationCancellation(invocationID string) error {
+	_, err := d.sql.Exec(`UPDATE repair_invocations SET control_state = 'cancel_requested', updated_at = ? WHERE id = ? AND state IN ('launching', 'registered', 'fixer_started')`, now(), invocationID)
+	return err
+}
+
+func (d *DB) RequestRepairCancellation(runID string) error {
+	_, err := d.sql.Exec(`UPDATE repair_invocations SET control_state = 'cancel_requested', updated_at = ? WHERE step_result_id IN (SELECT id FROM step_results WHERE run_id = ?) AND state IN ('launching', 'registered', 'fixer_started')`, now(), runID)
+	return err
+}
+
+func (d *DB) RepairInvocationCancellationRequested(invocationID string) (bool, error) {
+	var requested bool
+	err := d.sql.QueryRow(`SELECT control_state = 'cancel_requested' FROM repair_invocations WHERE id = ?`, invocationID).Scan(&requested)
+	return requested, err
 }
 
 func (d *DB) MarkRepairInvocationUnresolved(stepID, roundID string) error {
-	_, err := d.sql.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE step_result_id = ? AND round_id = ?`, stepID, roundID)
-	return err
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE repair_invocations SET state = 'unresolved', control_state = 'cancel_requested', updated_at = ? WHERE step_result_id = ? AND round_id = ? AND state IN ('launching', 'registered', 'fixer_started')`, now(), stepID, roundID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'repair_started_unresolved' WHERE step_result_id = ? AND round_id = ?`, stepID, roundID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) BindRepairInvocationProcess(invocationID, activity string, pid int) error {
@@ -156,16 +274,22 @@ func (d *DB) FinishRepairInvocation(invocationID string, resultJSON []byte, resu
 }
 
 func (d *DB) MarkRepairPostMonitor(stepID, roundID string) error {
-	result, err := d.sql.Exec(`UPDATE repair_invocations SET lifecycle_phase = 'post_repair_monitor', updated_at = ? WHERE step_result_id = ? AND round_id = ? AND state = 'terminal'`, now(), stepID, roundID)
+	tx, err := d.sql.Begin()
 	if err != nil {
 		return err
 	}
-	if changed, err := result.RowsAffected(); err != nil {
+	defer tx.Rollback()
+	result, err := tx.Exec(`UPDATE repair_invocations SET lifecycle_phase = 'post_repair_monitor', updated_at = ? WHERE step_result_id = ? AND round_id = ? AND state = 'terminal'`, now(), stepID, roundID)
+	if err != nil {
 		return err
-	} else if changed < 1 {
-		return nil
 	}
-	return nil
+	if _, err := result.RowsAffected(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE step_results SET status = ? WHERE id = ?`, types.StepStatusRunning, stepID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (d *DB) RepairInvocationLifecyclePhase(stepID, roundID string) (string, error) {

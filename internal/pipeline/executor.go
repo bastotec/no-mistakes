@@ -437,12 +437,16 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	if gate.repairWrapperLive {
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
+		monitorStarted := time.Now()
 		for {
 			state, _, stateErr := e.db.RepairInvocationRecoveryState(gate.stepResult.ID, gate.lastRoundID)
 			if stateErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("monitor repair wrapper: %w", stateErr), ctx)
 			}
 			if state == "terminal" {
+				if authErr := e.db.AuthorizeCompletedRepair(gate.stepResult.ID, gate.lastRoundID); authErr != nil {
+					return e.failRun(run, repo, fmt.Errorf("authorize completed repair: %w", authErr), ctx)
+				}
 				gate.repairAuthorized = true
 				gate.repairWrapperLive = false
 				break
@@ -450,6 +454,14 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			token, pid, resultPath, identityErr := e.db.RepairInvocationWrapperIdentity(gate.stepResult.ID, gate.lastRoundID)
 			if identityErr != nil {
 				return e.failRun(run, repo, fmt.Errorf("read repair wrapper identity: %w", identityErr), ctx)
+			}
+			if pid == 0 && time.Since(monitorStarted) < 3*time.Second {
+				select {
+				case <-ctx.Done():
+					return context.Cause(ctx)
+				case <-ticker.C:
+				}
+				continue
 			}
 			if !repairWrapperIdentityLive(token, pid, resultPath) {
 				if markErr := e.db.MarkRepairInvocationUnresolved(gate.stepResult.ID, gate.lastRoundID); markErr != nil {
@@ -1070,8 +1082,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if err := e.db.MarkRepairPostMonitor(sr.ID, activeRepairRoundID); err != nil {
 				return fmt.Errorf("mark repair post-monitor phase: %w", err)
 			}
-		}
-		if err := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); err != nil {
+		} else if err := e.db.UpdateStepStatus(sr.ID, types.StepStatusRunning); err != nil {
 			return fmt.Errorf("return step status to running: %w", err)
 		}
 		e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
@@ -1301,22 +1312,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			stepSkipped = outcome.Skipped
 			skipReason = safeurl.RedactText(outcome.SkipReason)
 			break
-		}
-
-		budgetStatus, dbErr := e.db.StepRepairBudgetStatus(sr.ID, autoFixLimit)
-		if dbErr != nil {
-			return false, "", fmt.Errorf("read %s repair budget: %w", stepName, dbErr)
-		}
-		limitedFindings := configuredRepairLimitFindings(outcome.Findings, stepName, budgetStatus)
-		if limitedFindings != outcome.Findings {
-			outcome.Findings = limitedFindings
-			findingsPtr = &outcome.Findings
-			if err := e.db.SetRepairBudgetFindings(currentRoundID, outcome.Findings); err != nil {
-				return false, "", fmt.Errorf("persist %s configured repair limit gate: %w", stepName, err)
-			}
-			if err := e.db.SetStepFindings(sr.ID, outcome.Findings); err != nil {
-				return false, "", fmt.Errorf("persist %s configured repair limit findings: %w", stepName, err)
-			}
 		}
 
 		// Freeze execution timer before entering approval wait.
@@ -2016,6 +2011,14 @@ func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *S
 // It accepts an optional context; if the context was cancelled with a cause,
 // the cause message is used as the run's error (more informative than "context canceled").
 func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...context.Context) error {
+	if errors.Is(err, ErrDaemonShutdown) {
+		return ErrDaemonShutdown
+	}
+	for _, ctx := range ctxs {
+		if errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			return ErrDaemonShutdown
+		}
+	}
 	errMsg := err.Error()
 	for _, ctx := range ctxs {
 		if cause := context.Cause(ctx); cause != nil && cause != context.Canceled {

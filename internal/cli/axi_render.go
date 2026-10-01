@@ -538,11 +538,6 @@ func gateFields(gate stepView) []toon.Field {
 			"Run `no-mistakes axi respond --action fix` only to declare that no repair process started and retry the already-authorized repair; this is refused when a process identity was registered.",
 			"Run `no-mistakes axi respond --action abort` to stop the run without replaying the repair.",
 		}
-	} else if pipeline.HasConfiguredRepairLimitExhaustion(gate.FindingsJSON) {
-		help = []string{
-			"The configured repair maximum is exhausted; no additional fix can be authorized for this step lifecycle.",
-			"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
-		}
 	} else if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
 		help = []string{
 			"The automatic repair budget is exhausted; explicit authority remains available for exactly one additional repair, and --yes leaves this gate awaiting a decision.",

@@ -9,7 +9,6 @@ import (
 
 const (
 	repairBudgetFindingCategory         = "repair-budget"
-	repairLimitFindingCategory          = "repair-limit"
 	repairReconciliationFindingCategory = "repair-reconciliation"
 )
 
@@ -21,7 +20,7 @@ func HasRepairBudgetExhaustion(raw string) bool {
 		return false
 	}
 	for _, item := range findings.Items {
-		if item.Category == repairBudgetFindingCategory || item.Category == repairLimitFindingCategory {
+		if item.Category == repairBudgetFindingCategory {
 			return true
 		}
 	}
@@ -35,19 +34,6 @@ func HasRepairReconciliation(raw string) bool {
 	}
 	for _, item := range findings.Items {
 		if item.Category == repairReconciliationFindingCategory {
-			return true
-		}
-	}
-	return false
-}
-
-func HasConfiguredRepairLimitExhaustion(raw string) bool {
-	findings, err := types.ParseFindingsJSON(raw)
-	if err != nil {
-		return false
-	}
-	for _, item := range findings.Items {
-		if item.Category == repairLimitFindingCategory {
 			return true
 		}
 	}
@@ -73,10 +59,6 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 		return raw
 	}
 	return result
-}
-
-func configuredRepairLimitFindings(raw string, _ types.StepName, _ db.RepairBudgetDecision) string {
-	return raw
 }
 
 func repairReconciliationFindings(raw string, step types.StepName, pid *int) string {
@@ -111,7 +93,7 @@ func repairWorkFindings(raw string) string {
 	}
 	items := findings.Items[:0]
 	for _, item := range findings.Items {
-		if item.Category != repairBudgetFindingCategory && item.Category != repairLimitFindingCategory && item.Category != repairReconciliationFindingCategory {
+		if item.Category != repairBudgetFindingCategory && item.Category != repairReconciliationFindingCategory {
 			items = append(items, item)
 		}
 	}

@@ -211,7 +211,7 @@ func (d *DB) HasRecoverableRepairDispatch(runID string) (bool, error) {
 	err := d.sql.QueryRow(`SELECT EXISTS(
 		SELECT 1 FROM repair_invocations i
 		JOIN step_results s ON s.id = i.step_result_id
-		WHERE s.run_id = ? AND i.state IN ('prepared', 'registered', 'fixer_started', 'terminal')
+		WHERE s.run_id = ? AND i.state IN ('prepared', 'launching', 'registered', 'fixer_started', 'terminal')
 		UNION ALL
 		SELECT 1 FROM repair_budget_decisions d
 		JOIN step_results s ON s.id = d.step_result_id
@@ -226,7 +226,7 @@ func (d *DB) HasStartedRepairDispatch(runID string) (bool, error) {
 	err := d.sql.QueryRow(`SELECT EXISTS(
 		SELECT 1 FROM repair_invocations i
 		JOIN step_results s ON s.id = i.step_result_id
-		WHERE s.run_id = ? AND i.state IN ('registered', 'fixer_started')
+		WHERE s.run_id = ? AND i.state IN ('launching', 'registered', 'fixer_started')
 		UNION ALL
 		SELECT 1 FROM repair_budget_decisions d
 		JOIN step_results s ON s.id = d.step_result_id
@@ -359,6 +359,9 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 		}
 		return "", err
 	}
+	if _, err := d.RecoverRepairInvocationResult(stepID, roundID); err != nil {
+		return "", err
+	}
 	var invocationState, wrapperToken sql.NullString
 	if err := tx.QueryRow(`SELECT state, wrapper_token FROM repair_invocations WHERE round_id = ? AND step_result_id = ? ORDER BY ordinal DESC LIMIT 1`, roundID, stepID).Scan(&invocationState, &wrapperToken); err != nil && err != sql.ErrNoRows {
 		return "", err
@@ -370,7 +373,7 @@ func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, e
 			if _, err := tx.Exec(`UPDATE repair_budget_decisions SET dispatch_state = 'fix_authorized' WHERE round_id = ?`, roundID); err != nil {
 				return "", err
 			}
-		case "registered", "fixer_started":
+		case "launching", "registered", "fixer_started":
 			if wrapperToken.Valid && wrapperToken.String != "" {
 				state = sql.NullString{String: "repair_wrapper_live", Valid: true}
 			} else {

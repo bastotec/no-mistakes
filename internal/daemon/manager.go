@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -449,6 +450,9 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 		}()
 
 		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+			if errors.Is(err, pipeline.ErrDaemonShutdown) {
+				return
+			}
 			if plan.run.Status == types.RunRunning {
 				errMsg := err.Error()
 				plan.run.Status = types.RunFailed
@@ -632,6 +636,15 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 // execution returned, or which was resumed after a crash all reach this point by
 // different routes. reason distinguishes the routes in the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
+	if m.shuttingDown.Load() {
+		slog.Info("preserving run worktree during daemon shutdown", "run_id", runID)
+		return
+	}
+	activeRepair, err := m.db.HasStartedRepairDispatch(runID)
+	if err != nil || activeRepair {
+		slog.Warn("preserving run worktree: repair process may still mutate it", "run_id", runID, "error", err)
+		return
+	}
 	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
 	run, err := m.db.GetRun(runID)
 	if err != nil {
@@ -1947,8 +1960,8 @@ func (m *RunManager) Shutdown() {
 	m.mu.Unlock()
 
 	for id, cancel := range cancels {
-		cancel(fmt.Errorf("daemon shutting down"))
-		slog.Info("cancelled run on shutdown", "run_id", id)
+		cancel(pipeline.ErrDaemonShutdown)
+		slog.Info("detached active run on shutdown", "run_id", id)
 	}
 
 	done := make(chan struct{})
@@ -1973,6 +1986,9 @@ func (m *RunManager) HandleCancel(runID string) error {
 		return fmt.Errorf("no active run %s", runID)
 	}
 
+	if err := m.db.RequestRepairCancellation(runID); err != nil {
+		return fmt.Errorf("request repair cancellation: %w", err)
+	}
 	cancel(fmt.Errorf(types.RunCancelReasonAbortedByUser))
 	return nil
 }
@@ -2006,6 +2022,10 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 			continue
 		}
 
+		if err := m.db.RequestRepairCancellation(run.ID); err != nil {
+			slog.Error("failed to request repair cancellation", "run_id", run.ID, "error", err)
+			continue
+		}
 		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
 		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
 		if done != nil {
