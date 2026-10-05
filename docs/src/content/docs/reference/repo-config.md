@@ -49,6 +49,7 @@ review:
     - path: "docs/**"
       instructions: |
         Prose changes only. Do not request test coverage.
+  # max_rounds: 2
 
 # For orchestration repos whose project instructions would misidentify gate agents.
 # Read only from the trusted default branch. Defaults to false.
@@ -446,6 +447,17 @@ These checks run on whichever copy of the file is parsed, including the pushed b
 
 Like `document.instructions`, this field steers gate behavior, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of [`allow_repo_commands`](#allow_repo_commands): a value present only on a pushed branch is ignored, so a contributor cannot inject instructions into the review that gates them.
 
+### review.max_rounds
+
+Overrides the global [`review.max_rounds`](/no-mistakes/reference/global-config/#reviewmax_rounds) for this repository; `0` restores the unlimited review loop.
+
+| | |
+| --- | --- |
+| Type | `int` |
+| Default | Inherits from global (default `0`, unlimited) |
+
+Like the rest of the `review` block it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`, so a pushed branch cannot shorten its own review.
+
 ### gates
 
 Extra repository-declared checks that run inside the pipeline, in addition to the core steps.
@@ -801,6 +813,27 @@ Recorded reason that opts this repository into letting the `PR must be raised vi
 Off by default. When a Test step is approved while `commands.test` exited non-zero, no-mistakes records that as an override on the step and copies it onto the PR attestation as `steps[].override_reason`. The required check then refuses that attestation unless this field is a non-empty reason, which is copied into the attestation as `allow_test_command_override`.
 
 Like `no_ci`, this field weakens a merge gate, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`. A contributor's pushed branch cannot waive the configured-test check that certifies it. The string is the recorded reason; whitespace-only is treated as unset.
+
+### test.skip
+
+Records the Test step as skipped instead of running it, for a repository whose own CI already runs its complete suite after the pipeline.
+
+| | |
+| --- | --- |
+| Type | `bool` |
+| Default | `false` |
+
+```yaml
+test:
+  skip: true
+  skip_reason: "GitHub CI runs the full suite on every PR"
+```
+
+Neither `commands.test` nor the test agent runs. The step is recorded as `skipped` with the reason `test.skip: <skip_reason>`, which the pull request's pipeline summary shows; it is never reported as a pass. `skip_reason` defaults to a note that `test.skip` is set.
+
+This waives the gate that validates the branch, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`; the global config's value is ignored.
+
+The [`require-no-mistakes`](/no-mistakes/reference/pipeline-steps/#pipeline-step-attestation) check requires a `completed` Test step, so a repository that enforces that check fails it on a skipped Test step.
 
 ### test.evidence
 

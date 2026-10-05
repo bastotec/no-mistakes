@@ -65,6 +65,7 @@ type Executor struct {
 	waiting              bool                  // true when blocked on approval
 	waitingStep          types.StepName        // which step is currently awaiting approval
 	waitingProtectedPath bool                  // approval would skip work refused by protected_paths
+	waitingRoundCap      int                   // review.max_rounds this gate was parked under; refuses another fix
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -174,6 +175,10 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if action == types.ActionApprove && e.waitingProtectedPath {
 		e.mu.Unlock()
 		return fmt.Errorf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
+	}
+	if action == types.ActionFix && e.waitingRoundCap > 0 {
+		e.mu.Unlock()
+		return fmt.Errorf("cannot fix %s: review.max_rounds (%d) is reached and a fix would start another rereview; approve to continue with the remaining findings, or skip or abort", step, e.waitingRoundCap)
 	}
 	e.waiting = false
 	e.mu.Unlock()
@@ -432,6 +437,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
 	e.waitingProtectedPath = HasProtectedPathRefusal(gate.findings)
+	e.waitingRoundCap = reviewRoundCapOf(gate.findings)
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -907,6 +913,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	for {
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
+		fixRound := sctx.Fixing
 		outcome, err := step.Execute(sctx)
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
@@ -984,6 +991,23 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitRunEvent(ipc.EventRunUpdated, run, repo)
 		}
 
+		if stepName == types.StepReview {
+			e.applyReviewRoundCap(sr.ID, outcome, roundNum, writeLog)
+		}
+
+		// A fix round that changed nothing will not fare better on the next
+		// attempt at the same failure: the agent already looked and left the
+		// tree as it was. Spending the rest of the auto-fix budget there is
+		// what burned hours per run, so the budget is treated as spent and
+		// the outcome goes where an exhausted budget sends it - its approval
+		// gate when it needs one. HEAD is the measure because every fix path
+		// (commitAgentFixes, a published CI repair, a rebase resolution)
+		// records its result by advancing run.HeadSHA.
+		if fixRound && run.HeadSHA == reviewStartingHeadSHA && outcome.AutoFixable && autoFixableFindingsJSON(outcome.Findings) != "" && autoFixAttempts < autoFixLimit {
+			writeLog(fmt.Sprintf("auto-fix made no changes; not spending the remaining %d auto-fix %s on the same failure", autoFixLimit-autoFixAttempts, pluralize(autoFixLimit-autoFixAttempts, "attempt", "attempts")))
+			autoFixAttempts = autoFixLimit
+		}
+
 		// Check if auto-fix should be attempted.
 		// Only auto-fix findings whose action is "auto-fix".
 		// This runs before the NeedsApproval check so that all severity
@@ -1048,6 +1072,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waiting = true
 		e.waitingStep = stepName
 		e.waitingProtectedPath = HasProtectedPathRefusal(outcome.Findings)
+		e.waitingRoundCap = reviewRoundCapOf(outcome.Findings)
 		e.mu.Unlock()
 
 		// Parking starts before the gate becomes observable. This includes the
@@ -1188,6 +1213,60 @@ done:
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, restartFrom, nil
+}
+
+// applyReviewRoundCap enforces review.max_rounds on one review outcome. Once
+// round roundNum has reached the cap and still has findings, the review stops
+// asking for fixes: blocking findings (severity error) stay in the outcome and
+// park at the approval gate, which then refuses another fix (see
+// RespondWithOverrides), and every other finding moves to UnresolvedNotes so
+// it neither parks nor gets fixed but is still recorded on the step and
+// rendered on the pull request. With no blocking finding left the review
+// completes and the pipeline continues.
+//
+// The round record keeps the reviewer's full findings; only the step's own
+// findings - what the gate, axi and the PR summary read - are rewritten.
+func (e *Executor) applyReviewRoundCap(stepResultID string, outcome *StepOutcome, roundNum int, log func(string)) {
+	if e.config == nil || e.config.Review.MaxRounds <= 0 || roundNum < e.config.Review.MaxRounds || outcome.Findings == "" {
+		return
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || len(findings.Items) == 0 {
+		return
+	}
+	blocking, notes := types.SplitBlockingFindings(findings.Items)
+	findings.Items = blocking
+	findings.UnresolvedNotes = append(findings.UnresolvedNotes, notes...)
+	findings.RoundCap = e.config.Review.MaxRounds
+	capped, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		slog.Warn("failed to apply review round cap", "round", roundNum, "error", err)
+		return
+	}
+	outcome.Findings = capped
+	outcome.AutoFixable = false
+	outcome.NeedsApproval = len(blocking) > 0
+	if dbErr := e.db.SetStepFindings(stepResultID, capped); dbErr != nil {
+		slog.Warn("failed to set capped review findings in db", "round", roundNum, "error", dbErr)
+	}
+	next := "review completes"
+	if len(blocking) > 0 {
+		next = fmt.Sprintf("%d blocking %s park for approve, skip or abort", len(blocking), pluralize(len(blocking), "finding", "findings"))
+	}
+	log(fmt.Sprintf("review.max_rounds (%d) reached at round %d: %d non-blocking %s carried as unresolved review notes; %s", e.config.Review.MaxRounds, roundNum, len(notes), pluralize(len(notes), "finding", "findings"), next))
+}
+
+// reviewRoundCapOf reports the review.max_rounds a gate's findings were capped
+// under, or 0 for an uncapped gate.
+func reviewRoundCapOf(findingsJSON string) int {
+	if findingsJSON == "" {
+		return 0
+	}
+	findings, err := types.ParseFindingsJSON(findingsJSON)
+	if err != nil {
+		return 0
+	}
+	return findings.RoundCap
 }
 
 // recordDeclinedRound persists an approve, skip, or abort resolution as a real

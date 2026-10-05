@@ -1251,6 +1251,17 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
+	// A review stopped by review.max_rounds is neither "fixed" nor "passed":
+	// say how many notes it left unresolved, after any blocking findings the
+	// gate approved over.
+	if finalFindings != nil && len(finalFindings.UnresolvedNotes) > 0 {
+		notes := unresolvedNotesLabel(len(finalFindings.UnresolvedNotes))
+		if hasFinalFindings {
+			return buildDetail(fmt.Sprintf("⚠️ **%s** - %s, %s (round cap %d reached)", name, countFindingsBySeverity(finalFindings), notes, finalFindings.RoundCap))
+		}
+		return buildDetail(fmt.Sprintf("⚠️ **%s** - %s (round cap %d reached)", name, notes, finalFindings.RoundCap))
+	}
+
 	if findingsCleared {
 		result := buildFixResultText(rounds)
 		line := fmt.Sprintf("🔧 **%s** - %s ✅", name, result)
@@ -1470,8 +1481,32 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		writeFindingItems(&inner, sr, &findings, flavor)
 		inner.WriteString("\n")
 	}
+	writeUnresolvedNotes(&inner, sr, flavor)
 
 	return foldPRBlock(summaryLine, inner.String(), flavor)
+}
+
+func unresolvedNotesLabel(n int) string {
+	if n == 1 {
+		return "1 unresolved review note"
+	}
+	return fmt.Sprintf("%d unresolved review notes", n)
+}
+
+// writeUnresolvedNotes lists the non-blocking findings review.max_rounds left
+// unresolved on the step, so they reach the PR as follow-ups instead of
+// another rereview round.
+func writeUnresolvedNotes(b *strings.Builder, sr *db.StepResult, flavor prBodyFlavor) {
+	if sr.FindingsJSON == nil {
+		return
+	}
+	final, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+	if err != nil || len(final.UnresolvedNotes) == 0 {
+		return
+	}
+	b.WriteString(fmt.Sprintf("Unresolved review notes (review.max_rounds %d reached, not fixed):\n\n", final.RoundCap))
+	writeFindingItems(b, sr, &types.Findings{Items: final.UnresolvedNotes}, flavor)
+	b.WriteString("\n")
 }
 
 func foldPRBlock(summaryLine, inner string, flavor prBodyFlavor) string {

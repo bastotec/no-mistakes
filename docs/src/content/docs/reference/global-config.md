@@ -637,6 +637,29 @@ Legacy alias: `auto_fix.babysit`.
 
 These are global defaults. Per-repo config can override individual steps.
 
+A fix round that leaves the branch head where it was - the agent committed nothing - ends the step's auto-fix loop: the step log says `auto-fix made no changes`, the remaining attempts are not spent on the same failure, and the findings go to the step's approval gate (or the step completes when they do not need one).
+
+### review.max_rounds
+
+Maximum review rounds - the initial review plus each fix-and-rereview round - before the review stops asking for fixes.
+
+| | |
+|---|---|
+| Type | `int` |
+| Default | `0` (unlimited) |
+
+```yaml
+review:
+  max_rounds: 2
+```
+
+When round N reaches the cap and still has findings:
+
+- non-blocking findings (`warning`, `info`) are moved off the gate into the step's unresolved review notes; they are rendered on the pull request and the pipeline continues;
+- blocking findings (`error`) still park at the Review approval gate. That gate refuses another `fix`, because a fix would start another rereview; approve continues with the findings recorded, or skip or abort.
+
+The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single provider-attributed check before that check reaches an approval gate.

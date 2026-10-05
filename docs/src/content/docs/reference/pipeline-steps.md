@@ -138,6 +138,8 @@ It applies all selected fixes before running one focused verification limited to
 The dedicated Test and Lint steps after review remain the authoritative gates, although their coverage may be focused when commands are unconfigured.
 Follow-up review passes use the history to avoid re-reporting user-ignored findings unless the code now has a materially different problem.
 
+**Round cap:** with [`review.max_rounds`](/no-mistakes/reference/global-config/#reviewmax_rounds) set, a round that reaches the cap and still has findings ends the loop. Its `warning` and `info` findings become unresolved review notes on the step (rendered on the PR as `N unresolved review notes (round cap N reached)`) and the pipeline continues; its `error` findings still park at the approval gate, which then refuses `fix` and takes approve, skip, or abort. The round record keeps the reviewer's full findings.
+
 **Default auto-fix limit:** `0`.
 
 ### Pipeline HEAD continuity
@@ -170,6 +172,7 @@ Local Test is never a repository-wide regression-suite substitute; broad regress
 
 **Behavior:**
 
+- When trusted [`test.skip`](/no-mistakes/reference/repo-config/#testskip) is set, runs nothing - neither `commands.test` nor the evidence agent - and records the step as `skipped` with its reason
 - Before a configured test command, runs [`commands.prepare`](/no-mistakes/reference/repo-config/#commandsprepare) once for the isolated worktree if configured; later configured lint/format commands share that successful preparation
 - If `commands.test` is set in repo config, runs it first as a baseline via the platform shell (`sh -c` on POSIX, `cmd.exe /c` on Windows) and captures output. Non-zero exit produces `error` findings and parks the Test step. Approving that gate records an explicit override on the step (`step_results.override_reason`) and copies it onto the PR attestation as `steps[].override_reason`; the [`require-no-mistakes`](#pipeline-step-attestation) check treats that as non-compliant unless trusted [`test.allow_approve_over_failure`](/no-mistakes/reference/repo-config/#testallow_approve_over_failure) is set. Configure a **targeted** command here (see repo-config); do not treat this field as CI-parity complete-suite configuration.
 - After the baseline passes, fails, or is absent, always invokes the evidence agent. The agent derives a proportionate list of named end-user scenarios from user intent and the change, stands up the real product, and drives each scenario end to end. Repository-specific startup guidance can be supplied through trusted [`test.instructions`](/no-mistakes/reference/repo-config/#testinstructions).
