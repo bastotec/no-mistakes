@@ -599,7 +599,7 @@ Final diff paths and statuses:
 	}
 
 	var content prContent
-	if err := decodePRDraftOutput(result.Output, &content, "decode PR content", true); err != nil {
+	if err := decodePRDraftOutput(result.Output, &content, "decode PR content", false); err != nil {
 		return prContent{}, err
 	}
 	content.Title = strings.TrimSpace(content.Title)
