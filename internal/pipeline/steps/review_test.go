@@ -229,6 +229,11 @@ func TestReviewStep_EachAgentInvocationGetsItsOwnBudget(t *testing.T) {
 			calls = append(calls, call{fixTurn: isFix, deadline: dl, started: fakeNow})
 			if isFix {
 				fakeNow = fakeNow.Add(fixerWork)
+				// Edit the worktree like a real fixer: a fix round that
+				// changes nothing ends the auto-fix loop.
+				if err := os.WriteFile(filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", len(calls))), []byte("fixed\n"), 0o644); err != nil {
+					return nil, err
+				}
 				return &agent.Result{Output: json.RawMessage(`{"summary":"fixed it"}`)}, nil
 			}
 			fakeNow = fakeNow.Add(reviewWork)

@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -38,6 +39,15 @@ func (m *sessionMockAgent) Run(_ context.Context, opts agent.RunOpts) (*agent.Re
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.calls = append(m.calls, opts)
+
+	// A fixer turn edits the worktree, as a real one does: the executor
+	// stops auto-fixing after a fix round that changed nothing.
+	if opts.Purpose == "review-fix" && opts.CWD != "" {
+		name := filepath.Join(opts.CWD, fmt.Sprintf("fix-%d.txt", len(m.calls)))
+		if err := os.WriteFile(name, []byte("fixed\n"), 0o644); err != nil {
+			return nil, err
+		}
+	}
 
 	result := m.respond(opts)
 	if opts.Session != nil {
