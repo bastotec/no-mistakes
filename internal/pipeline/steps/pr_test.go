@@ -2095,7 +2095,7 @@ func TestPRStep_StripsAgentEmittedIntentBeforePrepend(t *testing.T) {
 	}
 }
 
-func TestPRStep_ProseOnlyRepositoryFormatFailsClosed(t *testing.T) {
+func TestPRStep_ProseOnlyRepositoryFormatStillPublishes(t *testing.T) {
 	t.Parallel()
 	dir, _, _ := setupGitRepo(t)
 	rule := "Pull request descriptions must contain ## Summary, ## Testing, and ## Rollback in that order. Write pull request titles and bodies in Portuguese.\n"
@@ -2127,15 +2127,17 @@ func TestPRStep_ProseOnlyRepositoryFormatFailsClosed(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
-	if _, err := (&PRStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "not mechanically supported") {
-		t.Fatalf("Execute() error = %v, want unsupported-rule refusal", err)
+	// Prose-only rules can't be enforced mechanically, but they must not block
+	// publication: the agent reports them and the PR is still opened.
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatalf("Execute() error = %v, want publication despite prose-only rules", err)
 	}
 	data, err := os.ReadFile(logFile)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), "pr create") || strings.Contains(string(data), "pr edit") {
-		t.Fatalf("unsupported prose-only rules reached publication:\n%s", data)
+	if !strings.Contains(string(data), "pr create") {
+		t.Fatalf("prose-only rules blocked publication:\n%s", data)
 	}
 }
 
