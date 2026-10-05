@@ -25,7 +25,7 @@ flowchart TD
 2. If `auto_fix` is enabled for that step (limit > 0) and the attempt count is below the limit, the executor re-runs the step with `fixing=true`
 3. The agent receives the previous findings and applies fixes
 4. The step re-runs to verify the fixes
-5. If issues remain and attempts are left, the loop continues
+5. If issues remain and attempts are left, the loop continues - unless that fix round left the branch head where it was. A fix that committed nothing is not retried on the same failure: the step log says `auto-fix made no changes` and the remaining attempts are treated as spent
 6. Once the limit is reached or all issues are resolved:
    - If issues remain, the step pauses for user approval
    - If everything passes, the step completes and the pipeline moves on

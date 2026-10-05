@@ -280,21 +280,30 @@ type Findings struct {
 	RiskLevel      string         `json:"risk_level"`
 	RiskRationale  string         `json:"risk_rationale"`
 	RiskScope      string         `json:"risk_scope,omitempty"`
+	// UnresolvedNotes and RoundCap are written only by the executor when a
+	// review round reaches review.max_rounds: the non-blocking findings of
+	// that round leave Items (so they neither park nor get fixed) and are
+	// carried here, and RoundCap records the cap that moved them. Both are
+	// omitempty, so every other payload is unchanged.
+	UnresolvedNotes []Finding `json:"unresolved_notes,omitempty"`
+	RoundCap        int       `json:"round_cap,omitempty"`
 }
 
 type findingsWire struct {
-	Items          []Finding      `json:"findings"`
-	Legacy         []Finding      `json:"items"`
-	Summary        string         `json:"summary"`
-	Tested         []string       `json:"tested"`
-	TestingSummary string         `json:"testing_summary"`
-	Artifacts      []TestArtifact `json:"artifacts"`
-	Scenarios      []TestScenario `json:"scenarios"`
-	Verdict        string         `json:"verdict"`
-	TestedHeadSHA  string         `json:"tested_head_sha"`
-	RiskLevel      string         `json:"risk_level"`
-	RiskRationale  string         `json:"risk_rationale"`
-	RiskScope      string         `json:"risk_scope"`
+	Items           []Finding      `json:"findings"`
+	Legacy          []Finding      `json:"items"`
+	Summary         string         `json:"summary"`
+	Tested          []string       `json:"tested"`
+	TestingSummary  string         `json:"testing_summary"`
+	Artifacts       []TestArtifact `json:"artifacts"`
+	Scenarios       []TestScenario `json:"scenarios"`
+	Verdict         string         `json:"verdict"`
+	TestedHeadSHA   string         `json:"tested_head_sha"`
+	RiskLevel       string         `json:"risk_level"`
+	RiskRationale   string         `json:"risk_rationale"`
+	RiskScope       string         `json:"risk_scope"`
+	UnresolvedNotes []Finding      `json:"unresolved_notes"`
+	RoundCap        int            `json:"round_cap"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -309,17 +318,19 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		items = wire.Legacy
 	}
 	return Findings{
-		Items:          items,
-		Summary:        wire.Summary,
-		Tested:         wire.Tested,
-		TestingSummary: wire.TestingSummary,
-		Artifacts:      wire.Artifacts,
-		Scenarios:      wire.Scenarios,
-		Verdict:        wire.Verdict,
-		TestedHeadSHA:  wire.TestedHeadSHA,
-		RiskLevel:      wire.RiskLevel,
-		RiskRationale:  wire.RiskRationale,
-		RiskScope:      wire.RiskScope,
+		Items:           items,
+		Summary:         wire.Summary,
+		Tested:          wire.Tested,
+		TestingSummary:  wire.TestingSummary,
+		Artifacts:       wire.Artifacts,
+		Scenarios:       wire.Scenarios,
+		Verdict:         wire.Verdict,
+		TestedHeadSHA:   wire.TestedHeadSHA,
+		RiskLevel:       wire.RiskLevel,
+		RiskRationale:   wire.RiskRationale,
+		RiskScope:       wire.RiskScope,
+		UnresolvedNotes: wire.UnresolvedNotes,
+		RoundCap:        wire.RoundCap,
 	}, nil
 }
 
@@ -577,4 +588,19 @@ func (f Finding) ActionOrDefault() string {
 		return ActionAskUser
 	}
 	return f.Action
+}
+
+// SplitBlockingFindings separates the findings a review must not merge with
+// (severity "error", the review prompt's "should absolutely not get merged")
+// from everything else. It is what review.max_rounds uses to decide which
+// findings still reach the approval gate once the round cap is reached.
+func SplitBlockingFindings(items []Finding) (blocking, nonBlocking []Finding) {
+	for _, item := range items {
+		if NormalizeFindingSeverity(item.Severity) == FindingSeverityError {
+			blocking = append(blocking, item)
+			continue
+		}
+		nonBlocking = append(nonBlocking, item)
+	}
+	return blocking, nonBlocking
 }

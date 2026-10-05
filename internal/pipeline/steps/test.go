@@ -27,6 +27,15 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
+	// test.skip is the trusted repository's own decision that its CI owns
+	// testing; Merge already resolved it from the default-branch copy only.
+	// Nothing runs - neither commands.test nor the test agent - and the step
+	// is recorded as skipped with the reason, never as a pass.
+	if sctx.Config.Test.Skip {
+		reason := "test.skip: " + sctx.Config.Test.SkipReason
+		sctx.Log("skipping the test step (" + reason + ")")
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: reason}, nil
+	}
 	ctx := sctx.Ctx
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, runIntegrationBranch(sctx))
 	if err != nil {

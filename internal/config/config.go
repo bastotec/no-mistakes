@@ -212,6 +212,9 @@ type GlobalConfig struct {
 	Commit GlobalCommitRaw
 	Intent IntentRaw
 	Test   TestRaw
+	// Review is the operator's own review-step default (review.max_rounds).
+	// A trusted repo value still wins over it.
+	Review GlobalReviewRaw
 	// Eval is resolved at load time because it is global-only: it describes
 	// this machine's local eval corpus (disk, retention, whether review rounds
 	// record replay provenance), never a repository policy. Keeping it out of
@@ -253,6 +256,7 @@ type globalConfigRaw struct {
 	Commit                  GlobalCommitRaw            `yaml:"commit"`
 	Intent                  IntentRaw                  `yaml:"intent"`
 	Test                    TestRaw                    `yaml:"test"`
+	Review                  GlobalReviewRaw            `yaml:"review"`
 	Eval                    EvalRaw                    `yaml:"eval"`
 	Jev                     JevRaw                     `yaml:"jev"`
 	ForgeProfiles           ForgeProfiles              `yaml:"forge_profiles"`
@@ -374,6 +378,24 @@ type ReviewRaw struct {
 	// at least one changed file; a run that touches nothing matching leaves
 	// the review prompt exactly as it is without this setting.
 	PathInstructions []PathInstruction `yaml:"path_instructions"`
+	// MaxRounds caps how many review rounds (the initial review plus every
+	// fix-and-rereview round) run before the review stops asking for more
+	// fixes. See GlobalReviewRaw.MaxRounds for the semantics. Like the rest of
+	// the review block it is honored only from the trusted default-branch
+	// copy, so a pushed branch cannot shorten its own review.
+	MaxRounds *int `yaml:"max_rounds"`
+}
+
+// GlobalReviewRaw is the global-config half of the review settings. Only the
+// round cap is machine-wide; path_instructions describe one repository.
+type GlobalReviewRaw struct {
+	// MaxRounds caps review rounds. 0 or unset keeps the unlimited loop. Once
+	// round N >= MaxRounds still has findings, the executor stops
+	// rereviewing: non-blocking findings (warning/info) are carried on the
+	// step as unresolved review notes and rendered on the PR, blocking
+	// findings (error) still park at the approval gate, and that gate
+	// refuses another fix - approve, skip, or abort decides it.
+	MaxRounds *int `yaml:"max_rounds"`
 }
 
 // PRRaw is the YAML representation of pull-request settings.
@@ -804,6 +826,9 @@ type Document struct {
 // changed paths each glob matches.
 type Review struct {
 	PathInstructions []PathInstruction
+	// MaxRounds is the resolved review.max_rounds: the global value, overridden
+	// by the trusted repository value when set. 0 means unlimited.
+	MaxRounds int
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -826,6 +851,15 @@ type TestRaw struct {
 	// (see EffectiveRepoConfig): a contributor's pushed branch must not be able
 	// to waive the configured-test gate that validates it.
 	AllowApproveOverFailure string `yaml:"allow_approve_over_failure"`
+	// Skip records the Test step as skipped, with SkipReason, instead of
+	// running the configured test command and the test agent. It exists for
+	// repositories whose own CI already runs the complete suite after the
+	// pipeline. It waives the gate that validates the branch, so it is
+	// repository-only and honored ONLY from the trusted default-branch copy
+	// of .no-mistakes.yaml (see EffectiveRepoConfig); the global config's
+	// value is ignored.
+	Skip       bool   `yaml:"skip"`
+	SkipReason string `yaml:"skip_reason"`
 }
 
 // EvidenceRaw is the YAML representation of test-evidence settings.
@@ -868,6 +902,10 @@ type Test struct {
 	Evidence                Evidence
 	Instructions            string
 	AllowApproveOverFailure string
+	// Skip and SkipReason are the resolved, trusted-only test.skip and
+	// test.skip_reason (see TestRaw.Skip).
+	Skip       bool
+	SkipReason string
 }
 
 // Evidence is the resolved test-evidence config. When StoreInRepo is true, the
@@ -1201,6 +1239,16 @@ auto_fix:
   review: 0
   document: 3
   ci: 3
+
+# Maximum review rounds (the initial review plus each fix-and-rereview round)
+# before the review stops asking for fixes. 0 keeps the unlimited loop. Once the
+# cap is reached, non-blocking findings (warning/info) are carried onto the PR
+# as unresolved review notes and the pipeline continues; blocking findings
+# (error) still park at the approval gate, which then takes approve, skip or
+# abort but not another fix. A repository that sets review.max_rounds on its
+# own default branch overrides this value.
+# review:
+#   max_rounds: 2
 
 # How many times the CI step may re-run a single check the provider reported as
 # cancelled before that check reaches an approval gate instead of the fix agent.
@@ -2267,6 +2315,10 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	cfg.Commit = raw.Commit
 	cfg.Intent = raw.Intent
 	cfg.Test = raw.Test
+	if err := validateMaxRounds(raw.Review.MaxRounds); err != nil {
+		return nil, err
+	}
+	cfg.Review = raw.Review
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
 	if err := applyJevOverrides(&cfg.Jev, &raw.Jev); err != nil {
@@ -2461,6 +2513,9 @@ func validatePRRaw(pr PRRaw) error {
 // invalid block has to fail here, before it merges, rather than brick the
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
+	if err := validateMaxRounds(review.MaxRounds); err != nil {
+		return err
+	}
 	if len(review.PathInstructions) > MaxReviewPathInstructions {
 		return fmt.Errorf("review.path_instructions has %d entries, at most %d are allowed", len(review.PathInstructions), MaxReviewPathInstructions)
 	}
@@ -2481,6 +2536,15 @@ func validateReviewRaw(review ReviewRaw) error {
 	}
 	if total := ReviewPathInstructionsBytes(review.PathInstructions); total > MaxReviewPathInstructionsBytes {
 		return fmt.Errorf("review.path_instructions would add up to %d bytes to the review prompt, at most %d are allowed so the prompt stays within budget", total, MaxReviewPathInstructionsBytes)
+	}
+	return nil
+}
+
+// validateMaxRounds fails the config closed on a negative review.max_rounds:
+// 0 already means unlimited, so a negative value can only be a typo.
+func validateMaxRounds(maxRounds *int) error {
+	if maxRounds != nil && *maxRounds < 0 {
+		return fmt.Errorf("review.max_rounds must be 0 (unlimited) or greater, got %d", *maxRounds)
 	}
 	return nil
 }
@@ -2616,6 +2680,10 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		// trusted-only for the same reason no_ci is: a pushed branch must not
 		// waive the gate that certifies it.
 		effective.Test.AllowApproveOverFailure = trusted.Test.AllowApproveOverFailure
+		// test.skip waives the Test gate outright, so it is trusted-only for
+		// the same reason allow_approve_over_failure is.
+		effective.Test.Skip = trusted.Test.Skip
+		effective.Test.SkipReason = trusted.Test.SkipReason
 		// pr.base_branch controls where the contributor's PR lands, so it is
 		// trusted-only unless the repository explicitly opts into pushed
 		// settings alongside commands and agent selection. TitleFormat is a
@@ -2639,6 +2707,8 @@ func EffectiveRepoConfig(pushed, trusted *RepoConfig, allowRepoCommands bool) *R
 		effective.Test.Evidence.Branch = nil
 		effective.Test.Instructions = ""
 		effective.Test.AllowApproveOverFailure = ""
+		effective.Test.Skip = false
+		effective.Test.SkipReason = ""
 		if !allowRepoCommands {
 			effective.PR.BaseBranch = ""
 		}
@@ -3104,6 +3174,23 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 	// is already trusted-only.
 	test.Instructions = strings.TrimSpace(repo.Test.Instructions)
 	test.AllowApproveOverFailure = strings.TrimSpace(repo.Test.AllowApproveOverFailure)
+	// Repository-only and trusted-only like the runbook: a machine-wide
+	// "never test" switch is not a thing this setting is for.
+	test.Skip = repo.Test.Skip
+	test.SkipReason = strings.TrimSpace(repo.Test.SkipReason)
+	if test.Skip && test.SkipReason == "" {
+		test.SkipReason = "test.skip is set in .no-mistakes.yaml"
+	}
+
+	// The operator's global value is the default; a trusted repository value
+	// (EffectiveRepoConfig sourced it from the default branch) wins.
+	maxRounds := 0
+	if global.Review.MaxRounds != nil {
+		maxRounds = *global.Review.MaxRounds
+	}
+	if repo.Review.MaxRounds != nil {
+		maxRounds = *repo.Review.MaxRounds
+	}
 
 	commit := Commit{FixMessage: DefaultFixMessageTemplate}
 	if global.Commit.FixMessage != nil {
@@ -3173,7 +3260,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:         intent,
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
-		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions)},
+		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions), MaxRounds: maxRounds},
 		PR:             pr,
 		ForgeProfiles:  global.ForgeProfiles,
 		Providers:      providers,

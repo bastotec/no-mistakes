@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -133,6 +134,11 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		name: types.StepLint,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
+			// Each fix commits something (the head advances) but never clears
+			// the finding, so the whole budget is spent.
+			if sctx.Fixing {
+				sctx.Run.HeadSHA = fmt.Sprintf("fix-%d", callCount)
+			}
 			// Always return NeedsApproval to exhaust auto-fix attempts
 			return &StepOutcome{
 				NeedsApproval: true,
