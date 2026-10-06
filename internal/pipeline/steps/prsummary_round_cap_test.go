@@ -51,3 +51,33 @@ func TestBuildPipelineSummary_ReviewRoundCapApprovedOverBlockingFinding(t *testi
 		t.Fatalf("status line does not name both the approved error and the note:\n%s", md)
 	}
 }
+
+func TestBuildPipelineSummary_ReviewRoundCapFixWithoutRereview(t *testing.T) {
+	t.Parallel()
+	round1 := `{"findings":[{"id":"review-1","severity":"error","file":"a.go","line":3,"description":"real bug"},{"id":"review-2","severity":"warning","description":"rename this helper"}],"summary":"2 issues","risk_level":"high","risk_rationale":"r"}`
+	final := `{"findings":[],"summary":"2 issues","risk_level":"high","risk_rationale":"r","unresolved_notes":[{"id":"review-2","severity":"warning","description":"rename this helper"}],"resolved_by_fix":[{"id":"review-1","severity":"error","file":"a.go","line":3,"description":"real bug"}],"round_cap":1}`
+	fixSummary := "changes applied"
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &final},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {
+			{Round: 1, Trigger: "initial", FindingsJSON: &round1, DurationMS: 800},
+			{Round: 2, Trigger: "auto_fix", FindingsJSON: &final, FixSummary: &fixSummary, DurationMS: 600},
+		},
+	}
+
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	if !strings.Contains(md, "⚠️ **Review** - 1 finding fixed without rereview, 1 unresolved review note (round cap 1 reached)") {
+		t.Fatalf("status line does not name the unreviewed fix and the note:\n%s", md)
+	}
+	if strings.Contains(md, "Re-checked") || strings.Contains(md, "✅</summary>") {
+		t.Fatalf("a fix made at the round cap must not read as re-checked:\n%s", md)
+	}
+	if !strings.Contains(md, "Fixed without rereview (review.max_rounds 1 reached):") || !strings.Contains(md, "real bug") {
+		t.Fatalf("details do not list the findings resolved by the fix:\n%s", md)
+	}
+	if !strings.Contains(md, "Unresolved review notes (review.max_rounds 1 reached, not fixed):") {
+		t.Fatalf("details do not list the unresolved notes:\n%s", md)
+	}
+}

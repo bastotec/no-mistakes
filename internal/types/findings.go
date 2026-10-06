@@ -280,12 +280,15 @@ type Findings struct {
 	RiskLevel      string         `json:"risk_level"`
 	RiskRationale  string         `json:"risk_rationale"`
 	RiskScope      string         `json:"risk_scope,omitempty"`
-	// UnresolvedNotes and RoundCap are written only by the executor when a
-	// review round reaches review.max_rounds: the non-blocking findings of
-	// that round leave Items (so they neither park nor get fixed) and are
-	// carried here, and RoundCap records the cap that moved them. Both are
+	// UnresolvedNotes, ResolvedByFix and RoundCap are written only by the
+	// executor once a review reaches review.max_rounds. Findings that will not
+	// be fixed leave Items (so they neither park nor get fixed) and are
+	// carried in UnresolvedNotes; findings a fix accepted at the cap committed
+	// a change for are carried in ResolvedByFix, since no rereview follows
+	// that fix to confirm them. RoundCap records the cap. All three are
 	// omitempty, so every other payload is unchanged.
 	UnresolvedNotes []Finding `json:"unresolved_notes,omitempty"`
+	ResolvedByFix   []Finding `json:"resolved_by_fix,omitempty"`
 	RoundCap        int       `json:"round_cap,omitempty"`
 }
 
@@ -303,6 +306,7 @@ type findingsWire struct {
 	RiskRationale   string         `json:"risk_rationale"`
 	RiskScope       string         `json:"risk_scope"`
 	UnresolvedNotes []Finding      `json:"unresolved_notes"`
+	ResolvedByFix   []Finding      `json:"resolved_by_fix"`
 	RoundCap        int            `json:"round_cap"`
 }
 
@@ -330,6 +334,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		RiskRationale:   wire.RiskRationale,
 		RiskScope:       wire.RiskScope,
 		UnresolvedNotes: wire.UnresolvedNotes,
+		ResolvedByFix:   wire.ResolvedByFix,
 		RoundCap:        wire.RoundCap,
 	}, nil
 }

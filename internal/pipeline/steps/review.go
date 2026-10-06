@@ -148,6 +148,13 @@ Previous review findings to address:
 		}
 		fixSummary = summary
 	}
+	// review.max_rounds caps rereviews, not fixes: a fix accepted at the cap
+	// is committed and the review ends here. The executor records which gate
+	// findings that fix resolved and which stay unresolved review notes.
+	if sctx.Fixing && sctx.FixWithoutRereview {
+		sctx.Log("review.max_rounds reached: no rereview after this fix")
+		return &pipeline.StepOutcome{FixSummary: fixSummary}, nil
+	}
 	reviewTargetSHA := sctx.Run.HeadSHA
 
 	// The changed-file set is read once and viewed two ways on purpose: the
