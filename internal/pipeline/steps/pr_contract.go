@@ -156,7 +156,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	case runWroteNarrative:
 		skill = prCreationSkill
 	}
-	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty. If no template is supplied, set it false when committed prose-only or ambiguous PR body rules make compliance mechanically unsupported."
+	formatRule := "- format_compliant is true only when the body below follows the supplied committed Markdown template, when non-empty. If no template is supplied, committed prose-only or ambiguous PR body rules are informational notes only - never report them as issues and never set format_compliant false for them; judge only English and fabrication."
 	if template != "" {
 		formatRule += " A template is supplied here. required_heading_translations_json maps every source heading to the heading that must occur in the body; an unmapped source maps to itself. The mapped headings have passed deterministic level and order validation. Judge whether each English heading faithfully preserves its source meaning. Retain already-English source headings verbatim unless publication_redacted is true; that flag authorizes only the synchronized home-path redaction already reflected in the mapped heading, and no other wording change. Judge the remaining template semantics too. Prose-only or ambiguous body-format rules outside it are informational notes only - never report them as issues and never set format_compliant false for them."
 	}
