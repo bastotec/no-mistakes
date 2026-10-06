@@ -32,6 +32,10 @@ type StepContext struct {
 	ReviewStartingHeadSHA string
 	PreviousFindings      string // JSON findings selected for the current fix round
 	DeferredFindings      string // JSON findings left unselected when the current fix round began
+	// FixWithoutRereview is set on a review fix accepted at review.max_rounds:
+	// the fix turn runs and commits, and no rereview follows it. The executor
+	// records the outcome from the gate findings instead.
+	FixWithoutRereview bool
 	// StepResultID is the DB row ID of the current step's step_results record.
 	// Steps use it to query their own round history for multi-round prompts.
 	StepResultID string

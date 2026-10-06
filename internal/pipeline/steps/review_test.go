@@ -1874,3 +1874,41 @@ func TestReviewStep_FixPromptPrefersRemovalOfUnrequiredPaths(t *testing.T) {
 		}
 	}
 }
+
+// review.max_rounds caps rereviews, not fixes: a fix accepted at the cap runs
+// the fixer and commits, and no review turn follows it.
+func TestReviewStep_FixWithoutRereviewCommitsAndSkipsReview(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", headSHA)
+
+	ag := &mockAgent{
+		name: "test",
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+			if opts.Purpose != "review-fix" {
+				t.Errorf("unexpected %q agent turn after a fix at the round cap", opts.Purpose)
+			}
+			os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0o644)
+			return &agent.Result{Output: json.RawMessage(`{"summary":"fix the real bug"}`)}, nil
+		},
+	}
+
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Fixing = true
+	sctx.FixWithoutRereview = true
+	sctx.PreviousFindings = `{"findings":[{"id":"review-1","severity":"error","file":"main.go","description":"real bug"}],"summary":"1 issue"}`
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("agent calls = %d, want only the fixer", len(ag.calls))
+	}
+	if outcome.FixSummary != "changes applied" || outcome.ReviewApprovedHeadSHA != "" || outcome.Findings != "" || outcome.NeedsApproval {
+		t.Fatalf("outcome = %+v, want a committed fix that reviewed nothing", outcome)
+	}
+	if sctx.Run.HeadSHA == headSHA {
+		t.Fatal("fix was not committed: run head did not advance")
+	}
+}

@@ -641,7 +641,7 @@ A fix round that leaves the branch head where it was - the agent committed nothi
 
 ### review.max_rounds
 
-Maximum review rounds - the initial review plus each fix-and-rereview round - before the review stops asking for fixes.
+Maximum review rounds - the initial review plus each fix-and-rereview round - before the review stops rereviewing. The cap limits rereviews, not fixes.
 
 | | |
 |---|---|
@@ -656,7 +656,7 @@ review:
 When round N reaches the cap and still has findings:
 
 - non-blocking findings (`warning`, `info`) are moved off the gate into the step's unresolved review notes; they are rendered on the pull request and the pipeline continues;
-- blocking findings (`error`) still park at the Review approval gate. That gate refuses another `fix`, because a fix would start another rereview; approve continues with the findings recorded, or skip or abort.
+- blocking findings (`error`) still park at the Review approval gate. `fix` there runs the fix agent once on the selected findings and commits its change, and the review then completes without another rereview: the fixed findings are recorded as resolved by that fix, every finding left unfixed (unselected, or selected when the fix changed nothing) becomes an unresolved review note, and the pipeline continues. Approve continues with the findings recorded; skip and abort work as at any gate.
 
 The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
 

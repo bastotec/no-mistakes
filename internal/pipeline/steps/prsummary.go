@@ -1251,15 +1251,25 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
-	// A review stopped by review.max_rounds is neither "fixed" nor "passed":
-	// say how many notes it left unresolved, after any blocking findings the
-	// gate approved over.
-	if finalFindings != nil && len(finalFindings.UnresolvedNotes) > 0 {
-		notes := unresolvedNotesLabel(len(finalFindings.UnresolvedNotes))
+	// A review stopped by review.max_rounds is neither "passed" nor a
+	// rereviewed fix: say what the gate approved over, what the last fix
+	// resolved without a rereview, and how many notes it left unresolved.
+	if finalFindings != nil && (len(finalFindings.UnresolvedNotes) > 0 || len(finalFindings.ResolvedByFix) > 0) {
+		var parts []string
 		if hasFinalFindings {
-			return buildDetail(fmt.Sprintf("⚠️ **%s** - %s, %s (round cap %d reached)", name, countFindingsBySeverity(finalFindings), notes, finalFindings.RoundCap))
+			parts = append(parts, countFindingsBySeverity(finalFindings))
 		}
-		return buildDetail(fmt.Sprintf("⚠️ **%s** - %s (round cap %d reached)", name, notes, finalFindings.RoundCap))
+		if n := len(finalFindings.ResolvedByFix); n > 0 {
+			noun := "findings"
+			if n == 1 {
+				noun = "finding"
+			}
+			parts = append(parts, fmt.Sprintf("%d %s fixed without rereview", n, noun))
+		}
+		if n := len(finalFindings.UnresolvedNotes); n > 0 {
+			parts = append(parts, unresolvedNotesLabel(n))
+		}
+		return buildDetail(fmt.Sprintf("⚠️ **%s** - %s (round cap %d reached)", name, strings.Join(parts, ", "), finalFindings.RoundCap))
 	}
 
 	if findingsCleared {
@@ -1459,6 +1469,19 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		findings, err := types.ParseFindingsJSON(*r.FindingsJSON)
 		if err != nil {
 			inner.WriteString("failed to parse findings\n\n")
+			continue
+		}
+
+		// A fix accepted at review.max_rounds was committed without a
+		// rereview, so it must not read as re-checked.
+		if isFixRound && findings.RoundCap > 0 && len(findings.Items) == 0 {
+			if len(findings.ResolvedByFix) > 0 {
+				inner.WriteString(fmt.Sprintf("Fixed without rereview (review.max_rounds %d reached):\n\n", findings.RoundCap))
+				writeFindingItems(&inner, sr, &types.Findings{Items: findings.ResolvedByFix}, flavor)
+			} else {
+				inner.WriteString(fmt.Sprintf("Not rereviewed (review.max_rounds %d reached).\n", findings.RoundCap))
+			}
+			inner.WriteString("\n")
 			continue
 		}
 

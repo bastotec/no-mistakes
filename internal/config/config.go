@@ -392,9 +392,10 @@ type GlobalReviewRaw struct {
 	// MaxRounds caps review rounds. 0 or unset keeps the unlimited loop. Once
 	// round N >= MaxRounds still has findings, the executor stops
 	// rereviewing: non-blocking findings (warning/info) are carried on the
-	// step as unresolved review notes and rendered on the PR, blocking
-	// findings (error) still park at the approval gate, and that gate
-	// refuses another fix - approve, skip, or abort decides it.
+	// step as unresolved review notes and rendered on the PR, and blocking
+	// findings (error) still park at the approval gate. The cap limits
+	// rereviews, not fixes: a fix there runs once and commits, and the
+	// review completes without another rereview.
 	MaxRounds *int `yaml:"max_rounds"`
 }
 
@@ -1241,12 +1242,12 @@ auto_fix:
   ci: 3
 
 # Maximum review rounds (the initial review plus each fix-and-rereview round)
-# before the review stops asking for fixes. 0 keeps the unlimited loop. Once the
-# cap is reached, non-blocking findings (warning/info) are carried onto the PR
-# as unresolved review notes and the pipeline continues; blocking findings
-# (error) still park at the approval gate, which then takes approve, skip or
-# abort but not another fix. A repository that sets review.max_rounds on its
-# own default branch overrides this value.
+# before the review stops rereviewing. 0 keeps the unlimited loop. Once the cap
+# is reached, non-blocking findings (warning/info) are carried onto the PR as
+# unresolved review notes and the pipeline continues; blocking findings (error)
+# still park at the approval gate, where a fix runs once and commits and the
+# review then completes without another rereview. A repository that sets
+# review.max_rounds on its own default branch overrides this value.
 # review:
 #   max_rounds: 2
 
