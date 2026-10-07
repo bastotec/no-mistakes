@@ -119,9 +119,20 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		return plan, fmt.Errorf("stage live head for private mirror reconciliation: %w", err)
 	}
 
-	// An ancestor needs no reconciliation: the caller's ordinary push is
-	// already a fast-forward and preserves the private head by ancestry.
+	// An ancestor needs no ref reconciliation, but a merge can retain its
+	// object while discarding its content. Apply the existing final-retention
+	// criterion to the recorded tree before allowing the ordinary fast-forward.
+	// Keep the explicit run-owned policy exception, as on the divergent path.
 	if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", gateHead, liveHead); err == nil {
+		if !isRunOwnedHead(gateHead, runOwnedHeads) {
+			retained, err := git.TreeContentRetained(ctx, gateDir, gateHead, liveHead)
+			if err != nil {
+				return plan, fmt.Errorf("verify private mirror ancestor content: %w", err)
+			}
+			if !retained {
+				return plan, fmt.Errorf("refusing private mirror ancestor %s: recorded tree content is not retained in live head %s", gateHead, liveHead)
+			}
+		}
 		return plan, nil
 	}
 	if preserveDescendants {

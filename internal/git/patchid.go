@@ -358,10 +358,29 @@ func patchContentRetained(ctx context.Context, dir string, matched patchCommit, 
 	return fields[0] == matched.id, false, true
 }
 
+// TreeContentRetained applies the same final-retention criterion as patch
+// series comparison to the whole recorded tree. Ancestry alone cannot prove
+// content survived a merge resolution: compare against an empty baseline so
+// joining the recorded head does not make that claim vacuously true. Additional
+// live files are allowed; changed recorded files fail closed.
+func TreeContentRetained(ctx context.Context, dir, recordedHead, liveHead string) (bool, error) {
+	emptyTree, err := RunWithInput(ctx, dir, "", "mktree")
+	if err != nil {
+		return false, fmt.Errorf("create empty retention baseline: %w", err)
+	}
+	retained, comparable := rangeContentRetained(ctx, dir, emptyTree, recordedHead, liveHead)
+	if !comparable {
+		return false, fmt.Errorf("cannot verify recorded tree retention")
+	}
+	return retained, nil
+}
+
 func patchSeriesContentRetained(ctx context.Context, dir string, required []patchCommit, liveHead string) (bool, bool) {
-	first := required[0]
-	last := required[len(required)-1]
-	withoutSeriesTree, err := Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", last.commit, liveHead, first.parent)
+	return rangeContentRetained(ctx, dir, required[0].parent, required[len(required)-1].commit, liveHead)
+}
+
+func rangeContentRetained(ctx context.Context, dir, base, recordedHead, liveHead string) (bool, bool) {
+	withoutSeriesTree, err := Run(ctx, dir, "merge-tree", "--write-tree", "--merge-base", recordedHead, liveHead, base)
 	if err != nil {
 		return false, true
 	}
@@ -377,7 +396,7 @@ func patchSeriesContentRetained(ctx context.Context, dir string, required []patc
 	if !ok {
 		return false, true
 	}
-	requiredPatch, err := Run(ctx, dir, "diff", "--binary", "--no-ext-diff", first.parent, last.commit)
+	requiredPatch, err := Run(ctx, dir, "diff", "--binary", "--no-ext-diff", base, recordedHead)
 	if err != nil {
 		return false, false
 	}
