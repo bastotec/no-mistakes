@@ -119,19 +119,26 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 		return plan, fmt.Errorf("stage live head for private mirror reconciliation: %w", err)
 	}
 
-	// An ancestor needs no ref reconciliation, but a merge can retain its
-	// object while discarding its content. Apply the existing final-retention
-	// criterion to the recorded tree before allowing the ordinary fast-forward.
-	// Keep the explicit run-owned policy exception, as on the divergent path.
+	// A first-parent ancestor needs no reconciliation: the caller's ordinary
+	// push is already a fast-forward and preserves the private lineage. When
+	// the private head was joined through another parent, require its recorded
+	// tree to survive so ancestry cannot wrap discarded content.
 	if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", gateHead, liveHead); err == nil {
-		if !isRunOwnedHead(gateHead, runOwnedHeads) {
-			retained, err := git.TreeContentRetained(ctx, gateDir, gateHead, liveHead)
-			if err != nil {
-				return plan, fmt.Errorf("verify private mirror ancestor content: %w", err)
+		firstParentHistory, err := commitList(ctx, gateDir, "--first-parent", liveHead)
+		if err != nil {
+			return plan, fmt.Errorf("inspect private mirror first-parent ancestry: %w", err)
+		}
+		for _, commit := range firstParentHistory {
+			if commit == gateHead {
+				return plan, nil
 			}
-			if !retained {
-				return plan, fmt.Errorf("refusing private mirror ancestor %s: recorded tree content is not retained in live head %s", gateHead, liveHead)
-			}
+		}
+		retained, err := git.TreeContentRetained(ctx, gateDir, gateHead, liveHead)
+		if err != nil {
+			return plan, fmt.Errorf("verify private mirror ancestor content: %w", err)
+		}
+		if !retained {
+			return plan, fmt.Errorf("refusing private mirror ancestor %s: recorded tree content is not retained in live head %s", gateHead, liveHead)
 		}
 		return plan, nil
 	}

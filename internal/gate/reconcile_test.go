@@ -62,42 +62,54 @@ func TestReconcileStaleBranchArchivesPatchEquivalentHeadBeforeNonForcePush(t *te
 	}
 }
 
-func TestReconcileStaleBranchLeavesContainedAncestorForNonForcePush(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	work := initReconcileRepo(t)
+func TestReconcileStaleBranchLeavesFirstParentAncestorForNonForcePush(t *testing.T) {
+	for _, change := range []string{"add", "edit", "delete"} {
+		t.Run(change, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			work := initReconcileRepo(t)
 
-	writeReconcileFile(t, work, "feature.txt", "private content\n")
-	reconcileGit(t, work, "add", "feature.txt")
-	reconcileGit(t, work, "commit", "-m", "private head")
-	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+			writeReconcileFile(t, work, "feature.txt", "private content\n")
+			reconcileGit(t, work, "add", "feature.txt")
+			reconcileGit(t, work, "commit", "-m", "private head")
+			privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
 
-	writeReconcileFile(t, work, "live.txt", "later live work\n")
-	reconcileGit(t, work, "add", "live.txt")
-	reconcileGit(t, work, "commit", "-m", "live descendant")
-	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+			switch change {
+			case "add":
+				writeReconcileFile(t, work, "live.txt", "later live work\n")
+				reconcileGit(t, work, "add", "live.txt")
+			case "edit":
+				writeReconcileFile(t, work, "feature.txt", "intentionally revised content\n")
+				reconcileGit(t, work, "add", "feature.txt")
+			case "delete":
+				reconcileGit(t, work, "rm", "feature.txt")
+			}
+			reconcileGit(t, work, "commit", "-m", "live descendant")
+			liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
 
-	gateDir := filepath.Join(t.TempDir(), "gate.git")
-	reconcileGit(t, "", "init", "--bare", gateDir)
-	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+			gateDir := filepath.Join(t.TempDir(), "gate.git")
+			reconcileGit(t, "", "init", "--bare", gateDir)
+			reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
 
-	result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Reconciled {
-		t.Fatalf("ancestor requires no destructive reconciliation: %+v", result)
-	}
-	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
-		t.Fatalf("ancestor branch moved during inspection to %s, want %s", got, privateHead)
-	}
-	if tags := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); tags != "" {
-		t.Fatalf("ancestor inspection unexpectedly archived a live branch: %q", tags)
-	}
+			result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Reconciled {
+				t.Fatalf("ancestor requires no destructive reconciliation: %+v", result)
+			}
+			if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
+				t.Fatalf("ancestor branch moved during inspection to %s, want %s", got, privateHead)
+			}
+			if tags := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); tags != "" {
+				t.Fatalf("ancestor inspection unexpectedly archived a live branch: %q", tags)
+			}
 
-	reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature/reconcile")
-	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != liveHead {
-		t.Fatalf("non-force fast-forward reached %s, want %s", got, liveHead)
+			reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature/reconcile")
+			if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != liveHead {
+				t.Fatalf("non-force fast-forward reached %s, want %s", got, liveHead)
+			}
+		})
 	}
 }
 
@@ -146,7 +158,7 @@ func TestMirrorAncestorJoinRequiresFinalContentRetention(t *testing.T) {
 				var plan StaleBranchPlan
 				var err error
 				if publication {
-					plan, err = PlanMirrorPublicationReconciliation(ctx, gateDir, work, "feature/reconcile", joined)
+					plan, err = PlanMirrorPublicationReconciliation(ctx, gateDir, work, "feature/reconcile", joined, privateHead)
 				} else {
 					plan, err = PlanStaleBranchReconciliation(ctx, gateDir, work, "feature/reconcile", joined, "")
 				}
