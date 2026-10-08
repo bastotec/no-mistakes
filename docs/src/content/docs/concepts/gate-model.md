@@ -153,10 +153,15 @@ creation and deletion use exact names without dereferencing and expected old
 values. Before deleting a reconciled branch ref, the gate archives its exact
 head at `refs/tags/no-mistakes-abandoned/<branch>/<sha>`. Outside Decision 41-A,
 unproven private content refuses before upstream publication, leaves the
-private branch untouched, and names every at-risk commit. An ancestor already
-supports an ordinary fast-forward. A gate head that is a newer descendant of
-the published head stays untouched, including through the detached worktree's
-shared branch refs.
+private branch untouched, and names every at-risk commit. A first-parent
+ancestor supports an ordinary fast-forward unchanged, including later edits or
+deletions. If the private head appears only through another parent, ancestry
+alone is insufficient: its entire recorded tree must remain in the live tree,
+so a merge cannot wrap deleted or superseded private content and present that
+loss as containment. A content-preserving join still proceeds by ordinary
+non-force push without changing the mirror during planning. A gate head that
+is a newer descendant of the published head stays untouched, including through
+the detached worktree's shared branch refs.
 
 Correction and CI-repair recording persist the agent-created worktree head in
 the run and database without moving a branch ref shared with the gate. Repairs

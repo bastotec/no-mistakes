@@ -62,42 +62,127 @@ func TestReconcileStaleBranchArchivesPatchEquivalentHeadBeforeNonForcePush(t *te
 	}
 }
 
-func TestReconcileStaleBranchLeavesContainedAncestorForNonForcePush(t *testing.T) {
-	t.Parallel()
-	ctx := context.Background()
-	work := initReconcileRepo(t)
+func TestReconcileStaleBranchLeavesFirstParentAncestorForNonForcePush(t *testing.T) {
+	for _, change := range []string{"add", "edit", "delete"} {
+		t.Run(change, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			work := initReconcileRepo(t)
 
-	writeReconcileFile(t, work, "feature.txt", "private content\n")
-	reconcileGit(t, work, "add", "feature.txt")
-	reconcileGit(t, work, "commit", "-m", "private head")
-	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+			writeReconcileFile(t, work, "feature.txt", "private content\n")
+			reconcileGit(t, work, "add", "feature.txt")
+			reconcileGit(t, work, "commit", "-m", "private head")
+			privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
 
-	writeReconcileFile(t, work, "live.txt", "later live work\n")
-	reconcileGit(t, work, "add", "live.txt")
-	reconcileGit(t, work, "commit", "-m", "live descendant")
-	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+			switch change {
+			case "add":
+				writeReconcileFile(t, work, "live.txt", "later live work\n")
+				reconcileGit(t, work, "add", "live.txt")
+			case "edit":
+				writeReconcileFile(t, work, "feature.txt", "intentionally revised content\n")
+				reconcileGit(t, work, "add", "feature.txt")
+			case "delete":
+				reconcileGit(t, work, "rm", "feature.txt")
+			}
+			reconcileGit(t, work, "commit", "-m", "live descendant")
+			liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
 
-	gateDir := filepath.Join(t.TempDir(), "gate.git")
-	reconcileGit(t, "", "init", "--bare", gateDir)
-	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+			gateDir := filepath.Join(t.TempDir(), "gate.git")
+			reconcileGit(t, "", "init", "--bare", gateDir)
+			reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
 
-	result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
-	if err != nil {
-		t.Fatal(err)
+			result, err := ReconcileStaleBranch(ctx, gateDir, work, "feature/reconcile", liveHead, "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Reconciled {
+				t.Fatalf("ancestor requires no destructive reconciliation: %+v", result)
+			}
+			if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
+				t.Fatalf("ancestor branch moved during inspection to %s, want %s", got, privateHead)
+			}
+			if tags := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); tags != "" {
+				t.Fatalf("ancestor inspection unexpectedly archived a live branch: %q", tags)
+			}
+
+			reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature/reconcile")
+			if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != liveHead {
+				t.Fatalf("non-force fast-forward reached %s, want %s", got, liveHead)
+			}
+		})
 	}
-	if result.Reconciled {
-		t.Fatalf("ancestor requires no destructive reconciliation: %+v", result)
-	}
-	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != privateHead {
-		t.Fatalf("ancestor branch moved during inspection to %s, want %s", got, privateHead)
-	}
-	if tags := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); tags != "" {
-		t.Fatalf("ancestor inspection unexpectedly archived a live branch: %q", tags)
-	}
+}
 
-	reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature/reconcile")
-	if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != liveHead {
-		t.Fatalf("non-force fast-forward reached %s, want %s", got, liveHead)
+// A merge's two parent objects are custody evidence, not a final-content
+// claim. These real Git fixtures exercise both fresh submission and publication.
+func TestMirrorAncestorJoinRequiresFinalContentRetention(t *testing.T) {
+	for _, scenario := range []struct {
+		name    string
+		content string
+		remove  bool
+		accept  bool
+	}{
+		{name: "content-preserving", content: "recorded dispatch\n", accept: true},
+		{name: "merge-wrapped-deletion", remove: true},
+		{name: "intentional-supersession", content: "native steering dispatch\n"},
+	} {
+		t.Run(scenario.name, func(t *testing.T) {
+			t.Parallel()
+			ctx := context.Background()
+			work := initReconcileRepo(t)
+			base := reconcileGit(t, work, "rev-parse", "HEAD")
+			writeReconcileFile(t, work, "feature.txt", "recorded dispatch\n")
+			reconcileGit(t, work, "add", "feature.txt")
+			reconcileGit(t, work, "commit", "-m", "recorded private work")
+			privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+			if scenario.remove {
+				reconcileGit(t, work, "rm", "feature.txt")
+			} else {
+				writeReconcileFile(t, work, "feature.txt", scenario.content)
+				reconcileGit(t, work, "add", "feature.txt")
+			}
+			writeReconcileFile(t, work, "live.txt", "additional live work\n")
+			reconcileGit(t, work, "add", "live.txt")
+			tree := reconcileGit(t, work, "write-tree")
+			rewritten := reconcileGit(t, work, "commit-tree", tree, "-p", base, "-m", "rewritten live work")
+			joined := reconcileGit(t, work, "commit-tree", tree, "-p", rewritten, "-p", privateHead, "-m", "inspectable ancestry join")
+			reconcileGit(t, work, "merge-base", "--is-ancestor", privateHead, joined)
+			reconcileGit(t, work, "merge-base", "--is-ancestor", rewritten, joined)
+
+			gateDir := filepath.Join(t.TempDir(), "gate.git")
+			reconcileGit(t, "", "init", "--bare", gateDir)
+			reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature/reconcile")
+			before := reconcileGit(t, gateDir, "for-each-ref", "--format=%(refname) %(objectname)")
+			for _, publication := range []bool{false, true} {
+				var plan StaleBranchPlan
+				var err error
+				if publication {
+					plan, err = PlanMirrorPublicationReconciliation(ctx, gateDir, work, "feature/reconcile", joined, privateHead)
+				} else {
+					plan, err = PlanStaleBranchReconciliation(ctx, gateDir, work, "feature/reconcile", joined, "")
+				}
+				if scenario.accept {
+					if err != nil || plan.Reconcile {
+						t.Fatalf("publication=%v: content-preserving ancestor needs no archive: %+v, %v", publication, plan, err)
+					}
+				} else if err == nil || !strings.Contains(err.Error(), "recorded tree content is not retained") {
+					t.Fatalf("publication=%v: merge-wrapped loss must refuse: %+v, %v", publication, plan, err)
+				}
+			}
+			if after := reconcileGit(t, gateDir, "for-each-ref", "--format=%(refname) %(objectname)"); after != before {
+				t.Fatalf("planning changed mirror/archive refs: before=%s after=%s", before, after)
+			}
+			if scenario.accept {
+				// Ordinary fast-forward, no force or archive, and repeatable.
+				for i := 0; i < 2; i++ {
+					reconcileGit(t, work, "push", gateDir, joined+":refs/heads/feature/reconcile")
+				}
+				if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature/reconcile"); got != joined {
+					t.Fatalf("ordinary push reached %s, want %s", got, joined)
+				}
+			}
+		})
 	}
 }
 
