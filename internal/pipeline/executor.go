@@ -959,6 +959,16 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				sctx.FixWithoutRereview = false
 				cappedGateFindings = ""
 			} else {
+				// A rereview only certifies the selected repairs. Findings held
+				// out of that repair are still awaiting a decision, even when
+				// the fresh reviewer reports no issues. Carry them into the
+				// durable round and gate before either can report completion.
+				if fixRound && sctx.DeferredFindings != "" {
+					// Preserve the held finding's classification and authorized
+					// instructions if the reviewer also reports the same issue.
+					outcome.Findings = mergeFindingsJSON(removeMatchingFindingsJSON(outcome.Findings, sctx.DeferredFindings), sctx.DeferredFindings)
+					outcome.NeedsApproval = true
+				}
 				reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
 				roundReviewedHeadSHA = reviewApprovedHeadSHA
 			}
