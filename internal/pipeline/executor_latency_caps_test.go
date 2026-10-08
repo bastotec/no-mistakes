@@ -107,7 +107,7 @@ func TestExecutor_AutoFixThatCommitsKeepsItsBudget(t *testing.T) {
 func TestExecutor_ReviewRoundCapCarriesNonBlockingFindingsAsNotes(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
-	cfg := &config.Config{Review: config.Review{MaxRounds: 2}}
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 1}, Review: config.Review{MaxRounds: 2}}
 
 	calls := 0
 	step := &adaptiveCallStep{
@@ -133,10 +133,6 @@ func TestExecutor_ReviewRoundCapCarriesNonBlockingFindingsAsNotes(t *testing.T) 
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
 	done, _ := startExecutor(t, exec, run, repo, workDir)
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
-		t.Fatalf("fix below the cap: %v", err)
-	}
 	waitExecutorDone(t, done)
 
 	if calls != 2 {
@@ -239,7 +235,7 @@ func assertCappedFixCompleted(t *testing.T, database *db.DB, runID string, wantR
 
 func TestExecutor_ReviewRoundCapFixRunsOnceWithoutRereview(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	cfg := &config.Config{Review: config.Review{MaxRounds: 1}}
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 1}, Review: config.Review{MaxRounds: 1}}
 	capped := &cappedFixStep{commit: true}
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{capped.step()}, nil)
@@ -279,7 +275,7 @@ func TestExecutor_ReviewRoundCapFixRunsOnceWithoutRereview(t *testing.T) {
 
 func TestExecutor_ReviewRoundCapFixThatChangesNothingLeavesNotes(t *testing.T) {
 	database, p, run, repo := setupTest(t)
-	cfg := &config.Config{Review: config.Review{MaxRounds: 1}}
+	cfg := &config.Config{AutoFix: config.AutoFix{Review: 1}, Review: config.Review{MaxRounds: 1}}
 	capped := &cappedFixStep{commit: false}
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{capped.step()}, nil)
@@ -305,7 +301,7 @@ func TestExecutor_ResumedCappedReviewGateRunsFixWithoutRereview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.StartStep(stepResult.ID); err != nil {
+	if err := database.StartStepWithoutAutoFixPolicy(stepResult.ID); err != nil {
 		t.Fatal(err)
 	}
 	round := cappedFixGateFindings

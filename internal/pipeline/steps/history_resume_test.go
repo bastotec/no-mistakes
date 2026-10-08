@@ -15,6 +15,7 @@ import (
 
 func TestPreserveHistory_ResumeKeepsPinsBeforeFixing(t *testing.T) {
 	f, base, originalParents := newHistoryFixture(t, false)
+	f.sctx.Config.AutoFix.Review = 1
 	f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
 		return &agent.Result{Output: []byte(cleanReviewJSON)}, nil
 	}}
@@ -26,7 +27,8 @@ func TestPreserveHistory_ResumeKeepsPinsBeforeFixing(t *testing.T) {
 		}
 		if step.Name() != types.StepPush {
 			// Recovery only accepts a gate the ordinary lifecycle produced.
-			if err := f.sctx.DB.StartStep(sr.ID); err != nil {
+			limit := f.sctx.Config.AutoFixLimit(step.Name())
+			if err := f.sctx.DB.StartStepWithAutoFixLimit(sr.ID, limit); err != nil {
 				t.Fatal(err)
 			}
 		}

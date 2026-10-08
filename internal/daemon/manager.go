@@ -641,16 +641,16 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 // execution returned, or which was resumed after a crash all reach this point by
 // different routes. reason distinguishes the routes in the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
-	if m.shuttingDown.Load() {
-		slog.Info("preserving run worktree during daemon shutdown", "run_id", runID)
-		return
-	}
 	activeRepair, err := m.db.HasStartedRepairDispatch(runID)
 	if err != nil || activeRepair {
 		slog.Warn("preserving run worktree: repair process may still mutate it", "run_id", runID, "error", err)
 		return
 	}
 	m.sweepRunWorktreeProcesses(repoID, runID, wtDir)
+	if m.shuttingDown.Load() {
+		slog.Info("preserving run worktree during daemon shutdown", "run_id", runID)
+		return
+	}
 	run, err := m.db.GetRun(runID)
 	if err != nil {
 		slog.Warn("preserving run worktree: cannot read run", "run_id", runID, "error", err)

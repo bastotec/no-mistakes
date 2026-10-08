@@ -27,6 +27,14 @@ func WithRepairFactory(a Agent, factory RepairFactory) Agent {
 	return &repairFactoryAgent{Agent: a, factory: factory}
 }
 
+// NeutralizesGateInstructions preserves the wrapped adapter's verified
+// project-instruction suppression capability. Adding the repair factory is
+// transport metadata and must not make an otherwise safe gate agent fail the
+// daemon's pre-launch safety check.
+func (a *repairFactoryAgent) NeutralizesGateInstructions() bool {
+	return NeutralizesGateInstructions(a.Agent)
+}
+
 type RepairAgentDescriptor struct {
 	Kind     string                  `json:"kind"`
 	Factory  *RepairFactory          `json:"factory,omitempty"`

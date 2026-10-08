@@ -945,6 +945,18 @@ func (e *Executor) autoFixLimit(stepName types.StepName) int {
 	return e.config.AutoFixLimit(stepName)
 }
 
+func (e *Executor) autoFixPolicyConfigured(step types.StepName) bool {
+	if e.config == nil {
+		return false
+	}
+	switch step {
+	case types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepCI:
+		return true
+	default:
+		return false
+	}
+}
+
 // executeStep runs a single step with approval coordination.
 // Returns whether to skip the remainder, an optional earlier restart step,
 // and any execution error.
@@ -956,7 +968,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 	if !state.fixing && !state.resumeRunning {
 		var err error
-		if stepName.IsCustomGate() {
+		if stepName.IsCustomGate() || !e.autoFixPolicyConfigured(stepName) {
 			err = e.db.StartStepWithoutAutoFixPolicy(sr.ID)
 		} else {
 			err = e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit)
@@ -1887,6 +1899,14 @@ func (a *repairInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*a
 			return result, restoreRepairInvocationError(invocation.ErrorClass, *invocation.ErrorText)
 		}
 		return result, nil
+	}
+	// Process-backed agents carry a reconstructable factory and run through the
+	// durable wrapper. In-process embeddings (including deterministic test
+	// agents) cannot be reconstructed in a child process; run them directly.
+	// Their registered invocation still makes an interrupted launch reconcile
+	// as unresolved rather than replaying a repair whose side effects are unknown.
+	if _, _, err := agent.DescribeRepairAgent(a.inner, opts.Purpose); err != nil {
+		return a.inner.Run(ctx, opts)
 	}
 	return launchIndependentRepair(ctx, a.db, a.root, invocation.ID, a.inner, opts)
 }

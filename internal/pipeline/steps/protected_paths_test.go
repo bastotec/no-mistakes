@@ -225,7 +225,7 @@ func persistCIRefusal(t *testing.T, f *ciRepairFixture, outcome *pipeline.StepOu
 	if err := f.sctx.DB.UpdateRunPRURL(f.sctx.Run.ID, *f.sctx.Run.PRURL); err != nil {
 		t.Fatal(err)
 	}
-	if err := f.sctx.DB.StartStep(f.sctx.StepResultID); err != nil {
+	if err := f.sctx.DB.StartStepWithAutoFixLimit(f.sctx.StepResultID, 1); err != nil {
 		t.Fatal(err)
 	}
 	rounds, err := f.sctx.DB.GetRoundsByStep(f.sctx.StepResultID)

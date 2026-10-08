@@ -355,7 +355,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.StartStep(stepResult.ID); err != nil {
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 2); err != nil {
 		t.Fatal(err)
 	}
 	initial, err := database.GetStepResult(stepResult.ID)
@@ -580,7 +580,7 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"severity":"error","description":"bug one","action":"auto-fix"},{"severity":"warn","description":"bug two","action":"ask-user"}],"summary":"2 issues"}`}, nil
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"gate-1","severity":"error","description":"bug one","action":"auto-fix"},{"id":"gate-2","severity":"warn","description":"bug two","action":"ask-user"}],"summary":"2 issues"}`}, nil
 			}
 			return &StepOutcome{ExitCode: 0}, nil
 		},
@@ -595,7 +595,7 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, stepName, types.StepStatusAwaitingApproval)
 
-	if err := exec.Respond(stepName, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(stepName, types.ActionFix, []string{"gate-1", "gate-2"}); err != nil {
 		t.Fatalf("respond error: %v", err)
 	}
 

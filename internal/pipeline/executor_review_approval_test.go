@@ -44,7 +44,7 @@ func TestExecutor_FullRereviewReplacesApprovalWithoutAuthorizingParkedRound(t *t
 		}
 		return &StepOutcome{ReviewApprovedHeadSHA: rereviewedHead}, nil
 	}}
-	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
 	workDir := t.TempDir()
 
 	done := make(chan error, 1)
