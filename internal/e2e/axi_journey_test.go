@@ -101,7 +101,7 @@ func branchSyncScenario(t *testing.T) string {
           file: "feature.txt"
           line: 1
           description: "unsafe value needs validation"
-          action: auto-fix
+          action: ask-user
       summary: "found one issue"
       risk_level: medium
       risk_rationale: "the unsafe value needs a guard"
@@ -135,7 +135,7 @@ func branchSyncScenario(t *testing.T) string {
 // TestAxiBranchSyncJourney reproduces the end-user stale-local journey with the
 // real binary, fake agent, isolated daemon, and local bare push target.
 func TestAxiBranchSyncJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-sync", "seed.txt", "seed\n", "seed sync init")
 	initWorktree := h.AddWorktree("init-sync")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
@@ -216,7 +216,7 @@ func TestAxiBranchSyncJourney(t *testing.T) {
 // worktree remain at the immutable submitted head. A second axi run from that
 // unchanged worktree must reattach without pushing or creating another run.
 func TestAxiRunReattachesAfterManagedFix(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-reattach", "seed.txt", "seed\n", "seed reattach init")
 	initWorktree := h.AddWorktree("init-reattach")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
@@ -351,7 +351,7 @@ func TestAxiRunReattachesAfterManagedFix(t *testing.T) {
 // sync --recover returns custody and fast-forwards to the preserved head, and
 // the operator can then commit and start a fresh run without losing anything.
 func TestAxiCustodyRecoveryJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-recover", "seed.txt", "seed\n", "seed recover init")
 	initWorktree := h.AddWorktree("init-recover")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
@@ -630,7 +630,7 @@ func rebaseCustodyScenario(t *testing.T) string {
           file: "feature.txt"
           line: 1
           description: "the feature needs a guard helper"
-          action: auto-fix
+          action: ask-user
       summary: "found one issue"
       risk_level: medium
       risk_rationale: "the feature needs a guard"
@@ -671,7 +671,7 @@ func rebaseCustodyScenario(t *testing.T) string {
 // real binary now auto-recovers, keeps the operator's file content, brings the
 // advanced base into the worktree, and anchors the exact pre-recovery commits.
 func TestAxiCustodyRecoveryAfterRebaseJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: rebaseCustodyScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: rebaseCustodyScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-rebase-recover", "seed.txt", "seed\n", "seed rebase recover init")
 	initWorktree := h.AddWorktree("init-rebase-recover")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
@@ -791,7 +791,7 @@ func TestAxiCustodyRecoveryAfterRebaseJourney(t *testing.T) {
 // worker continues through a separately authorized direct delivery path
 // without starting another validation.
 func TestAxiPrePushAbortUnmovedHeadCustodyJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-unmoved", "seed.txt", "seed\n", "seed unmoved init")
 	initWorktree := h.AddWorktree("init-unmoved")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
@@ -990,7 +990,7 @@ func TestAxiPrePushAbortUnmovedHeadCustodyJourney(t *testing.T) {
 func operatorContext() context.Context { return context.Background() }
 
 func TestAxiAgentJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: axiScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 
 	// Initialize the gate from a worktree, mirroring the real install flow.
 	h.CommitChange("init-axi", "seed.txt", "seed\n", "seed for axi init")

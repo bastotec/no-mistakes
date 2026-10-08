@@ -55,7 +55,7 @@ func writeReviewAgentsRoutingScenario(t *testing.T) string {
         - id: "routing-check"
           severity: warning
           description: "mechanical issue routed through the fixer role"
-          action: auto-fix
+          action: ask-user
           review_scope: source
       summary: "one blocking issue"
       risk_level: low
@@ -116,6 +116,7 @@ func TestReviewAgentsRouteIndependentProfilesOnRealBinary(t *testing.T) {
 		Agent:             "claude",
 		Scenario:          writeReviewAgentsRoutingScenario(t),
 		GlobalConfigExtra: extra,
+		AutoFix:           map[types.StepName]int{types.StepReview: 1},
 	})
 
 	if out, err := h.Run("init"); err != nil {

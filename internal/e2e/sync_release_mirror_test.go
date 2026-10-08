@@ -55,7 +55,7 @@ func TestSyncReleaseStaleBindingJourney(t *testing.T) {
 	// so the pipeline publishes a fix commit the operator's branch has never
 	// seen: after release that head must be anchored rather than merely
 	// reachable, which is the lossless half of the contract.
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-release", "seed.txt", "seed\n", "seed release init")
 	initWorktree := h.AddWorktree("init-release")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {
@@ -197,7 +197,7 @@ func TestSyncReleaseStaleBindingJourney(t *testing.T) {
 // sync --check offers the mirror-backed keep-local custody return and
 // sync --recover --keep-local performs it without touching the worktree.
 func TestSyncMirrorKeepLocalJourney(t *testing.T) {
-	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t)})
+	h := NewHarness(t, SetupOpts{Agent: "claude", Scenario: branchSyncScenario(t), AutoFix: map[types.StepName]int{types.StepReview: 1}})
 	h.CommitChange("init-mirror", "seed.txt", "seed\n", "seed mirror init")
 	initWorktree := h.AddWorktree("init-mirror")
 	if out, err := h.RunInDir(initWorktree, "init"); err != nil {

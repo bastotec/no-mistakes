@@ -401,7 +401,7 @@ func cleanReviewScenario(t *testing.T) string {
       risk_level: low
       risk_rationale: "documentation status only"
       risk_scope: source-or-external
-  - match: "branch: document-info"
+  - match: "report only what you could not resolve.\n\nContext:\n- branch: document-info"
     text: "documentation info finding"
     structured:
       findings:

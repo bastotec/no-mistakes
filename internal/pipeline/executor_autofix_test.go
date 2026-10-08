@@ -595,7 +595,8 @@ func TestExecutor_CustomGatesRequireOneExplicitResponsePerRepair(t *testing.T) {
 			if err := exec.Respond(stepName, types.ActionFix, []string{"policy"}); err != nil {
 				t.Fatal(err)
 			}
-			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusFixing)
+			// The repair can pass through fixing between DB polls; fix_review is
+			// the durable evidence that exactly one repair completed.
 			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusFixReview)
 			if calls != 2 {
 				t.Fatalf("custom gate auto-looped after one response: calls=%d", calls)

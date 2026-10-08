@@ -27,7 +27,7 @@ func TestLargeConfiguredTestAndLintFailuresRemainUsableThroughAXIFix(t *testing.
 		{name: "lint", step: types.StepLint, branch: "large-lint-output", commandKey: "lint", findingID: "lint-1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			h := NewHarness(t, SetupOpts{Agent: "claude"})
+			h := NewHarness(t, SetupOpts{Agent: "claude", AutoFix: map[types.StepName]int{tc.step: 1}})
 			if out, err := h.Run("init"); err != nil {
 				t.Fatalf("init: %v\n%s", err, out)
 			}
