@@ -1964,7 +1964,13 @@ func (m *RunManager) Shutdown() {
 	}
 	m.mu.Unlock()
 
+	needsDecision := make([]string, 0, len(cancels))
 	for id, cancel := range cancels {
+		run, runErr := m.db.GetRun(id)
+		repairDispatch, dispatchErr := m.db.HasRecoverableRepairDispatch(id)
+		if runErr != nil || dispatchErr != nil || run == nil || (run.AwaitingAgentSince == nil && !repairDispatch) {
+			needsDecision = append(needsDecision, id)
+		}
 		cancel(pipeline.ErrDaemonShutdown)
 		slog.Info("detached active run on shutdown", "run_id", id)
 	}
@@ -1979,6 +1985,45 @@ func (m *RunManager) Shutdown() {
 	case <-time.After(30 * time.Second):
 		slog.Warn("timed out waiting for runs to finish during shutdown")
 	}
+
+	for _, runID := range needsDecision {
+		if err := m.parkShutdownInterruptedRun(runID); err != nil {
+			slog.Error("failed to park run interrupted by daemon shutdown", "run_id", runID, "error", err)
+		}
+	}
+}
+
+func (m *RunManager) parkShutdownInterruptedRun(runID string) error {
+	results, err := m.db.GetStepsByRun(runID)
+	if err != nil {
+		return err
+	}
+	var target *db.StepResult
+	for _, result := range results {
+		if result.Status == types.StepStatusRunning {
+			target = result
+			break
+		}
+	}
+	if target == nil {
+		for _, result := range results {
+			if result.Status == types.StepStatusPending {
+				target = result
+				break
+			}
+			if result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped {
+				break
+			}
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("active run has no executable step to park")
+	}
+	findings := pipeline.DaemonShutdownFindings(target.StepName)
+	if findings == "" {
+		return fmt.Errorf("build daemon shutdown findings")
+	}
+	return m.db.ParkStepForDaemonShutdown(runID, target.ID, findings)
 }
 
 // HandleCancel stops an active run and propagates cancellation to the executor.

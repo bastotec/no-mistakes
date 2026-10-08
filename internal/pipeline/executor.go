@@ -71,6 +71,7 @@ type Executor struct {
 	waitingAutoFixLimit         int
 	waitingProtectedPath        bool // approval would skip work refused by protected_paths
 	waitingRepairReconciliation bool
+	waitingShutdownInterruption bool
 
 	gateReconcileInterval time.Duration
 	gateReconcileTimeout  time.Duration
@@ -180,6 +181,16 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 	if action == types.ActionApprove && e.waitingProtectedPath {
 		e.mu.Unlock()
 		return fmt.Errorf("cannot approve a protected-path refusal: resolve the reported edit, then use fix to retry %s; approval would skip unfinished work", step)
+	}
+	if e.waitingShutdownInterruption {
+		if action != types.ActionAbort {
+			e.mu.Unlock()
+			return fmt.Errorf("daemon shutdown interruption accepts only abort")
+		}
+		e.waiting = false
+		e.mu.Unlock()
+		e.approvalCh <- approvalResponse{action: action}
+		return nil
 	}
 	if e.waitingRepairReconciliation {
 		switch action {
@@ -383,19 +394,20 @@ func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionStat
 }
 
 type recoveredGate struct {
-	index              int
-	step               Step
-	stepResult         *db.StepResult
-	findings           string
-	round              int
-	lastRoundID        string
-	reviewedHeadSHA    string
-	repairAuthorized   bool
-	repairUnresolved   bool
-	repairWrapperLive  bool
-	postRepairMonitor  bool
-	selectedFindingIDs *string
-	userFindingsJSON   *string
+	index               int
+	step                Step
+	stepResult          *db.StepResult
+	findings            string
+	round               int
+	lastRoundID         string
+	reviewedHeadSHA     string
+	repairAuthorized    bool
+	repairUnresolved    bool
+	repairWrapperLive   bool
+	postRepairMonitor   bool
+	shutdownInterrupted bool
+	selectedFindingIDs  *string
+	userFindingsJSON    *string
 }
 
 func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
@@ -570,7 +582,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		LogFile:    func(string) {},
 		OnPRMerged: e.onPRMerged,
 	}
-	if reconciled, reconcileErr := e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings); reconciled {
+	var gateReconciled bool
+	var reconcileErr error
+	if !gate.shutdownInterrupted {
+		gateReconciled, reconcileErr = e.reconcileApprovalGate(ctx, gate.step, reconcileCtx, gate.findings)
+	}
+	if gateReconciled {
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 			return e.failRun(run, repo, fmt.Errorf("complete reconciled awaiting-agent state: %w", dbErr), ctx)
 		}
@@ -598,6 +615,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.waitingAutoFixLimit = e.autoFixLimit(gate.step.Name())
 	e.waitingProtectedPath = HasProtectedPathRefusal(gate.findings)
 	e.waitingRepairReconciliation = gate.repairUnresolved
+	e.waitingShutdownInterruption = gate.shutdownInterrupted
 	e.mu.Unlock()
 	e.emitStepEventWithFindingsAndError(
 		ipc.EventStepCompleted,
@@ -622,6 +640,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 	} else {
 		response, reconciled, err = e.waitForApprovalOrReconcile(ctx, gate.step, reconcileCtx, gate.findings, false)
+	}
+	if errors.Is(err, ErrDaemonShutdown) || errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+		return ErrDaemonShutdown
 	}
 	if response.action != types.ActionFix {
 		if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
@@ -800,18 +821,19 @@ func (e *Executor) recoveredGate(runID string) (*recoveredGate, error) {
 				return nil, fmt.Errorf("recovered approval gate findings are incomplete")
 			}
 			gate = &recoveredGate{
-				index:              index,
-				step:               e.steps[index],
-				stepResult:         result,
-				findings:           *result.FindingsJSON,
-				round:              latest.Round,
-				lastRoundID:        latest.ID,
-				repairAuthorized:   repairAuthorized,
-				repairUnresolved:   repairUnresolved,
-				repairWrapperLive:  repairWrapperLive,
-				postRepairMonitor:  isPostRepairMonitor,
-				selectedFindingIDs: latest.SelectedFindingIDs,
-				userFindingsJSON:   latest.UserFindingsJSON,
+				index:               index,
+				step:                e.steps[index],
+				stepResult:          result,
+				findings:            *result.FindingsJSON,
+				round:               latest.Round,
+				lastRoundID:         latest.ID,
+				repairAuthorized:    repairAuthorized,
+				repairUnresolved:    repairUnresolved,
+				repairWrapperLive:   repairWrapperLive,
+				postRepairMonitor:   isPostRepairMonitor,
+				shutdownInterrupted: HasDaemonShutdownInterruption(*result.FindingsJSON),
+				selectedFindingIDs:  latest.SelectedFindingIDs,
+				userFindingsJSON:    latest.UserFindingsJSON,
 			}
 			if latest.ReviewedHeadSHA != nil {
 				gate.reviewedHeadSHA = *latest.ReviewedHeadSHA
@@ -1374,6 +1396,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.waitingAutoFixLimit = autoFixLimit
 		e.waitingProtectedPath = HasProtectedPathRefusal(outcome.Findings)
 		e.waitingRepairReconciliation = false
+		e.waitingShutdownInterruption = false
 		e.mu.Unlock()
 
 		// Parking starts before the gate becomes observable. This includes the
@@ -1395,6 +1418,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(approvalStatus), outcome.Findings, "", &executionMS)
 
 		response, reconciled, err := e.waitForApprovalOrReconcile(ctx, step, sctx, outcome.Findings, true)
+		if errors.Is(err, ErrDaemonShutdown) || errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			return false, "", ErrDaemonShutdown
+		}
 		if response.action != types.ActionFix {
 			if dbErr := e.db.CompleteRunAwaitingAgent(run.ID, time.Since(parkStart).Milliseconds()); dbErr != nil {
 				slog.Warn("failed to complete awaiting-agent state in db", "step", stepName, "run", run.ID, "error", dbErr)

@@ -11,7 +11,40 @@ const (
 	repairBudgetFindingCategory            = "repair-budget"
 	repairBudgetHardCeilingFindingCategory = "repair-budget-hard-ceiling"
 	repairReconciliationFindingCategory    = "repair-reconciliation"
+	daemonShutdownFindingCategory          = "daemon-shutdown"
 )
+
+func DaemonShutdownFindings(step types.StepName) string {
+	findings, err := types.MarshalFindingsJSON(types.Findings{
+		Items: []types.Finding{{
+			ID:          "daemon-shutdown-" + string(step),
+			Severity:    types.FindingSeverityError,
+			Action:      types.ActionAskUser,
+			Category:    daemonShutdownFindingCategory,
+			Description: fmt.Sprintf("The daemon shut down while %s was running, so its result cannot be trusted or resumed. The run was preserved for inspection; abort it before starting replacement validation.", step),
+		}},
+		Summary:       fmt.Sprintf("%s interrupted by daemon shutdown", step),
+		RiskLevel:     "high",
+		RiskRationale: "The interrupted validation result is unknown.",
+	})
+	if err != nil {
+		return ""
+	}
+	return findings
+}
+
+func HasDaemonShutdownInterruption(raw string) bool {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false
+	}
+	for _, item := range findings.Items {
+		if item.Category == daemonShutdownFindingCategory {
+			return true
+		}
+	}
+	return false
+}
 
 // HasRepairBudgetExhaustion identifies a control-plane gate that unattended
 // drivers must not turn into new repair authority or a silent clean pass.

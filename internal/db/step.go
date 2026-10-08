@@ -225,6 +225,64 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 	return nil
 }
 
+func (d *DB) ParkStepForDaemonShutdown(runID, stepID, findings string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin daemon shutdown park: %w", err)
+	}
+	defer tx.Rollback()
+
+	var runStatus types.RunStatus
+	var awaiting sql.NullInt64
+	if err := tx.QueryRow(`SELECT status, awaiting_agent_since FROM runs WHERE id = ?`, runID).Scan(&runStatus, &awaiting); err != nil {
+		return fmt.Errorf("read run for daemon shutdown park: %w", err)
+	}
+	if runStatus != types.RunRunning || awaiting.Valid {
+		return fmt.Errorf("run is not actively executing")
+	}
+
+	var stepStatus types.StepStatus
+	var startedAt sql.NullInt64
+	if err := tx.QueryRow(`SELECT status, started_at FROM step_results WHERE id = ? AND run_id = ?`, stepID, runID).Scan(&stepStatus, &startedAt); err != nil {
+		return fmt.Errorf("read step for daemon shutdown park: %w", err)
+	}
+	if stepStatus != types.StepStatusRunning && stepStatus != types.StepStatusPending {
+		return fmt.Errorf("step is not actively executable")
+	}
+
+	var round int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(round), 0) + 1 FROM step_rounds WHERE step_result_id = ?`, stepID).Scan(&round); err != nil {
+		return fmt.Errorf("read daemon shutdown round: %w", err)
+	}
+	ts := now()
+	durationMS := int64(0)
+	if startedAt.Valid && ts > startedAt.Int64 {
+		durationMS = (ts - startedAt.Int64) * 1000
+	}
+	roundID := newID()
+	if _, err := tx.Exec(`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, findings_json, repair_published, duration_ms, created_at) VALUES (?, ?, ?, 'initial', ?, 0, ?, ?)`, roundID, stepID, round, findings, durationMS, ts); err != nil {
+		return fmt.Errorf("record daemon shutdown round: %w", err)
+	}
+	result, err := tx.Exec(`UPDATE step_results SET status = ?, exit_code = 1, duration_ms = ?, findings_json = ?, started_at = COALESCE(started_at, ?), round_started_at = COALESCE(round_started_at, ?), last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ? AND status = ?`, types.StepStatusAwaitingApproval, durationMS, findings, ts, ts, ts, "daemon shutdown decision required", stepID, stepStatus)
+	if err != nil {
+		return fmt.Errorf("park step after daemon shutdown: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("park step after daemon shutdown: step changed concurrently")
+	}
+	result, err = tx.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ? AND status = ? AND awaiting_agent_since IS NULL`, ts, ts, runID, types.RunRunning)
+	if err != nil {
+		return fmt.Errorf("park run after daemon shutdown: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("park run after daemon shutdown: run changed concurrently")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit daemon shutdown park: %w", err)
+	}
+	return nil
+}
+
 // StartStep marks a step as running with a started_at timestamp.
 func (d *DB) StartStep(id string) error {
 	return d.StartStepWithAutoFixLimit(id, 0)
