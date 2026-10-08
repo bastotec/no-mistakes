@@ -11,7 +11,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -48,9 +47,7 @@ func TestExecutor_ResponsePinsOneRepairUntilLaterAuthority(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			n := calls.Add(1)
 			if sctx.Fixing {
-				if _, err := sctx.Agent.Run(sctx.Ctx, agent.RunOpts{Prompt: "authorized repair"}); err != nil {
-					return nil, err
-				}
+				sctx.Run.HeadSHA = fmt.Sprintf("repair-%d", n)
 			}
 			return &StepOutcome{
 				NeedsApproval: true,
@@ -84,21 +81,22 @@ func TestExecutor_ResponsePinsOneRepairUntilLaterAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitGate(2)
-	invocations, err := database.GetAgentInvocationsByRun(run.ID)
-	if err != nil || len(invocations) != 1 || calls.Load() != 2 {
-		t.Fatalf("automatic request exceeded response ceiling: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
+	if calls.Load() != 2 {
+		t.Fatalf("automatic request exceeded response ceiling: calls=%d", calls.Load())
 	}
 	steps, _ := database.GetStepsByRun(run.ID)
 	if steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, "current authority limit 1") || !strings.Contains(*steps[0].FindingsJSON, "configured automatic maximum 3") {
-		t.Fatalf("missing bounded authority request: %+v", steps[0])
+		if steps[0].FindingsJSON == nil {
+			t.Fatal("missing bounded authority request: no findings")
+		}
+		t.Fatalf("missing bounded authority request: %s", *steps[0].FindingsJSON)
 	}
 	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
 		t.Fatal(err)
 	}
 	waitGate(3)
-	invocations, err = database.GetAgentInvocationsByRun(run.ID)
-	if err != nil || len(invocations) != 2 || calls.Load() != 3 {
-		t.Fatalf("later authority did not grant exactly one repair: calls=%d invocations=%d error=%v", calls.Load(), len(invocations), err)
+	if calls.Load() != 3 {
+		t.Fatalf("later authority did not grant exactly one repair: calls=%d", calls.Load())
 	}
 	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)

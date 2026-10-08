@@ -62,11 +62,13 @@ func TestRepairInvocationAgent_ReplaysTerminalResultWithoutRerunningFixer(t *tes
 	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
 		t.Fatal(err)
 	}
-	inner := &repairResultAgent{}
-	wrapped := &repairInvocationAgent{inner: inner, db: database, stepID: stepResult.ID, worktree: t.TempDir(), roundID: func() string { return round.ID }}
-	first, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review-fix"})
-	if err != nil || first == nil || first.Text != "durable result" {
-		t.Fatalf("first Run() = %+v, %v", first, err)
+	invocation, err := database.RegisterRepairInvocation(stepResult.ID, round.ID, 0, t.TempDir(), "repair-result", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultJSON := []byte(`{"text":"durable result"}`)
+	if err := database.FinishRepairInvocation(invocation.ID, resultJSON, true, nil, nil); err != nil {
+		t.Fatal(err)
 	}
 	if state, _, err := database.RepairInvocationRecoveryState(stepResult.ID, round.ID); err != nil || state != "terminal" {
 		t.Fatalf("terminal invocation state = %q, %v", state, err)
@@ -74,13 +76,14 @@ func TestRepairInvocationAgent_ReplaysTerminalResultWithoutRerunningFixer(t *tes
 	if state, err := database.RestoreLegacyRepairAuthorization(stepResult.ID, round.ID); err != nil || state != "fix_authorized" {
 		t.Fatalf("recovery authorization = %q, %v", state, err)
 	}
+	inner := &repairResultAgent{}
 	recovered := &repairInvocationAgent{inner: inner, db: database, stepID: stepResult.ID, worktree: t.TempDir(), roundID: func() string { return round.ID }}
-	second, err := recovered.Run(context.Background(), agent.RunOpts{Purpose: "review-fix"})
-	if err != nil || second == nil || second.Text != "durable result" {
-		t.Fatalf("replayed Run() = %+v, %v", second, err)
+	result, err := recovered.Run(context.Background(), agent.RunOpts{Purpose: "review-fix"})
+	if err != nil || result == nil || result.Text != "durable result" {
+		t.Fatalf("replayed Run() = %+v, %v", result, err)
 	}
-	if inner.calls != 1 {
-		t.Fatalf("native fixer calls = %d, want 1", inner.calls)
+	if inner.calls != 0 {
+		t.Fatalf("terminal replay reran native fixer %d times", inner.calls)
 	}
 }
 
