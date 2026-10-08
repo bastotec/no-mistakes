@@ -436,6 +436,7 @@ func TestDriveRun_YesLeavesProtectedPathRefusalAwaitingResponse(t *testing.T) {
 		{"protected-path", refusal.Findings, "package.lock"},
 		{"repair-budget", `{"findings":[{"id":"repair-budget-ci","severity":"warning","description":"consumed 3 repairs; additional repair 4 needs explicit authority","action":"ask-user","category":"repair-budget"}]}`, "additional repair 4"},
 		{"repair-reconciliation", `{"findings":[{"id":"repair-reconciliation-ci","severity":"error","description":"repair outcome requires reconciliation","action":"ask-user","category":"repair-reconciliation"}]}`, "requires reconciliation"},
+		{"daemon-shutdown", pipeline.DaemonShutdownFindings(types.StepCI), "cannot be trusted"},
 	} {
 		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
 			t.Run(gateCase.name+"/"+string(status), func(t *testing.T) {
@@ -473,6 +474,21 @@ func TestDriveRun_YesLeavesProtectedPathRefusalAwaitingResponse(t *testing.T) {
 				t.Logf("AXI output with --yes (automatic IPC responses: %d):\n%s%s", responses.Load(), progress.String(), output.String())
 			})
 		}
+	}
+}
+
+func TestValidateGateResponseAction_DaemonShutdownAcceptsOnlyAbort(t *testing.T) {
+	findings := pipeline.DaemonShutdownFindings(types.StepReview)
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip} {
+		if err := validateGateResponseAction(action, findings); err == nil || !strings.Contains(err.Error(), "only --action abort") {
+			t.Errorf("action %s error = %v, want abort-only refusal", action, err)
+		}
+	}
+	if err := validateGateResponseAction(types.ActionAbort, findings); err != nil {
+		t.Fatalf("abort rejected: %v", err)
+	}
+	if err := validateGateResponseAction(types.ActionAbort, `{}`); err == nil {
+		t.Fatal("ordinary gate accepted abort")
 	}
 }
 

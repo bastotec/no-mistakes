@@ -532,7 +532,12 @@ func gateFields(gate stepView) []toon.Field {
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
 		"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) to have the pipeline fix the selected findings (do not edit files yourself)",
 	}
-	if pipeline.HasRepairReconciliation(gate.FindingsJSON) {
+	if pipeline.HasDaemonShutdownInterruption(gate.FindingsJSON) {
+		help = []string{
+			"The daemon shut down during this step, so its interrupted result cannot be resumed or trusted.",
+			"Run `no-mistakes axi respond --action abort` to stop the preserved run before starting replacement validation.",
+		}
+	} else if pipeline.HasRepairReconciliation(gate.FindingsJSON) {
 		help = []string{
 			"The daemon restarted during an authorized repair; original approve and skip actions are disabled.",
 			"Run `no-mistakes axi respond --action fix` only to declare that no repair process started and retry the already-authorized repair; this is refused when a process identity was registered.",
@@ -562,7 +567,7 @@ func gateFields(gate stepView) []toon.Field {
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,
 	}
-	if !pipeline.HasRepairReconciliation(gate.FindingsJSON) {
+	if !pipeline.HasRepairReconciliation(gate.FindingsJSON) && !pipeline.HasDaemonShutdownInterruption(gate.FindingsJSON) {
 		tail = append([]string{"Run `no-mistakes axi respond --action skip` to skip this step"}, tail...)
 	}
 	return gateFieldsWithHelp(gate, append(help, tail...))

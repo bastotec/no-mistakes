@@ -990,6 +990,10 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			if !autoApprove {
 				return run, false, nil
 			}
+			if pipeline.HasDaemonShutdownInterruption(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: daemon shutdown interruption requires an explicit response (--action abort); --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
 			if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) || pipeline.HasRepairReconciliation(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: repair authority decision required; --yes leaves this gate awaiting an explicit response\n", gate.Name)
 				return run, false, nil
@@ -1357,15 +1361,16 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		stepName = types.StepName(gate.Name)
 	}
 	var reconciliation bool
+	var gateFindings string
 	for _, candidate := range rv.Steps {
 		if candidate.Name == string(stepName) {
-			reconciliation = pipeline.HasRepairReconciliation(candidate.FindingsJSON)
+			gateFindings = candidate.FindingsJSON
+			reconciliation = pipeline.HasRepairReconciliation(gateFindings)
 			break
 		}
 	}
-	if act == types.ActionAbort && !reconciliation {
-		return emitError(cmd, 2, "--action abort is only valid at a repair reconciliation gate",
-			"Use `no-mistakes axi abort` to stop an ordinary active run")
+	if err := validateGateResponseAction(act, gateFindings); err != nil {
+		return emitError(cmd, 2, err.Error())
 	}
 
 	findingIDs := append([]string(nil), ra.finding...)
@@ -1421,6 +1426,17 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, final, ciReady)
+}
+
+func validateGateResponseAction(action types.ApprovalAction, findings string) error {
+	shutdownInterruption := pipeline.HasDaemonShutdownInterruption(findings)
+	if shutdownInterruption && action != types.ActionAbort {
+		return fmt.Errorf("daemon shutdown interruption accepts only --action abort")
+	}
+	if action == types.ActionAbort && !shutdownInterruption && !pipeline.HasRepairReconciliation(findings) {
+		return fmt.Errorf("--action abort is only valid at a repair reconciliation or daemon shutdown gate")
+	}
+	return nil
 }
 
 // gateStatusFor returns the current status of step in rv, defaulting to the

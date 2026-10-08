@@ -421,6 +421,25 @@ func TestRepairBudgetGateHelpHidesFixAtHardCeiling(t *testing.T) {
 	}
 }
 
+func TestDaemonShutdownGateHelpExposesOnlyAbort(t *testing.T) {
+	gate := stepView{
+		Name:         "review",
+		Status:       "awaiting_approval",
+		FindingsJSON: pipeline.DaemonShutdownFindings(types.StepReview),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{"cannot be resumed or trusted", "axi respond --action abort", "starting replacement validation"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("daemon-shutdown gate missing %q:\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{"--action approve", "--action fix", "--action skip"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("daemon-shutdown gate advertised invalid response %q:\n%s", absent, out)
+		}
+	}
+}
+
 func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
 	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
