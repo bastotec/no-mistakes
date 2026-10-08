@@ -144,11 +144,11 @@ func TestAxiRun_WaitElapsedAgainstLiveIdleDaemon(t *testing.T) {
 	})
 
 	started := time.Now()
-	out, err := executeCmd("axi", "run", "--wait", "250ms")
+	out, err := executeCmd("axi", "run", "--wait", "3s")
 	elapsed := time.Since(started)
-	assertWaitElapsed(t, err, out, "250ms")
-	if elapsed > 3*time.Second {
-		t.Fatalf("bounded wait took %s, want return near 250ms", elapsed)
+	assertWaitElapsed(t, err, out, "3s")
+	if elapsed > 6*time.Second {
+		t.Fatalf("bounded wait took %s, want return near 3s", elapsed)
 	}
 }
 

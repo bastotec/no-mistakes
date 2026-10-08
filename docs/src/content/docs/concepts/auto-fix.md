@@ -91,7 +91,7 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
 The current step's part of that history also includes one-line summaries from earlier fix commits.
 
-After a user-triggered fix, the step re-runs. It completes if the check passes, or pauses again with the new results in `fix_review` status. You can then approve, fix again, skip, or abort, subject to the [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths).
+After a user-triggered fix, the step re-runs. It completes if the check passes, or pauses again with the new results in `fix_review` status. A manual Review fix that selects only part of its gate also keeps the omitted findings pending; the [Review reference](/no-mistakes/reference/pipeline-steps/#review) owns that subset-selection rule. You can then approve, fix again, skip, or abort, subject to the [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths).
 
 ## Fix commits
 

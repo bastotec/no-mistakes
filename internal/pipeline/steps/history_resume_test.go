@@ -59,7 +59,7 @@ func TestPreserveHistory_ResumeKeepsPinsBeforeFixing(t *testing.T) {
 	var executor *pipeline.Executor
 	executor = pipeline.NewExecutor(f.sctx.DB, paths.WithRoot(t.TempDir()), f.sctx.Config, f.sctx.Agent, sequence, func(event ipc.Event) {
 		if event.StepName != nil && *event.StepName == types.StepReview && event.Status != nil && *event.Status == string(types.StepStatusAwaitingApproval) {
-			if err := executor.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+			if err := executor.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 				t.Error(err)
 			}
 		}

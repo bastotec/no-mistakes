@@ -133,7 +133,7 @@ func TestReviewAgentsRouteIndependentProfilesOnRealBinary(t *testing.T) {
 	if gated == nil {
 		t.Fatal("run did not park at the review gate")
 	}
-	h.Respond(gated.ID, types.StepReview, types.ActionFix)
+	h.RespondToFindings(gated.ID, types.StepReview, types.ActionFix, []string{"routing-check"})
 
 	run := h.WaitForRun(branch, 120*time.Second)
 	if run.Status != types.RunCompleted {

@@ -526,12 +526,22 @@ func (h *Harness) ActiveRun(branch string) *ipc.RunInfo {
 
 func (h *Harness) Respond(runID string, step types.StepName, action types.ApprovalAction) {
 	h.t.Helper()
-	if err := h.RespondError(runID, step, action); err != nil {
+	h.RespondToFindings(runID, step, action, nil)
+}
+
+func (h *Harness) RespondToFindings(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) {
+	h.t.Helper()
+	if err := h.respondError(runID, step, action, findingIDs); err != nil {
 		h.t.Fatalf("respond to run %s step %s with %s: %v", runID, step, action, err)
 	}
 }
 
 func (h *Harness) RespondError(runID string, step types.StepName, action types.ApprovalAction) error {
+	h.t.Helper()
+	return h.respondError(runID, step, action, nil)
+}
+
+func (h *Harness) respondError(runID string, step types.StepName, action types.ApprovalAction, findingIDs []string) error {
 	h.t.Helper()
 	p := paths.WithRoot(h.NMHome)
 	client, err := ipc.Dial(p.Socket())
@@ -540,7 +550,7 @@ func (h *Harness) RespondError(runID string, step types.StepName, action types.A
 	}
 	defer client.Close()
 	var result ipc.RespondResult
-	if err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: step, Action: action}, &result); err != nil {
+	if err := client.Call(ipc.MethodRespond, &ipc.RespondParams{RunID: runID, Step: step, Action: action, FindingIDs: findingIDs}, &result); err != nil {
 		return err
 	}
 	if !result.OK {

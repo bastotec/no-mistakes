@@ -58,7 +58,7 @@ func TestExecutor_FullRereviewReplacesApprovalWithoutAuthorizingParkedRound(t *t
 	if parked.ReviewApprovedHeadSHA != nil {
 		t.Fatalf("parked review gained approval authority: %#v", parked.ReviewApprovedHeadSHA)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
 		t.Fatal(err)
 	}
 	select {
