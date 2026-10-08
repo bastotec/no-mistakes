@@ -31,7 +31,7 @@ func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 				writeTestFile(t, workDir, "fix.txt", "agent fix\n")
 				execGit(t, workDir, "add", "fix.txt")
 			}
-			return &StepOutcome{NeedsApproval: true, Findings: `{"items":[]}`}, nil
+			return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"r1","severity":"warning","description":"review again","action":"ask-user"}],"summary":"one finding"}`}, nil
 		},
 	}
 
@@ -54,7 +54,9 @@ func TestExecutor_FixEmitsFixReviewStatusWithoutStreamingTheDiff(t *testing.T) {
 	}
 
 	// Send fix action
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	// The gate is announced by status alone. The working-tree diff is
 	// derived state served on demand (ipc.MethodGetStepDiff); it is
@@ -95,7 +97,7 @@ func TestExecutor_FixEmitsFixingStatusImmediately(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				return &StepOutcome{NeedsApproval: true, Findings: `{"issues":["bug"]}`}, nil
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"r1","severity":"error","description":"bug","action":"ask-user"}],"summary":"one finding"}`}, nil
 			}
 			close(fixStarted)
 			<-releaseFix
@@ -123,7 +125,7 @@ func TestExecutor_FixEmitsFixingStatusImmediately(t *testing.T) {
 	for time.Now().Unix() <= initialRoundStartedAt {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -232,7 +234,7 @@ func TestExecutor_FixReviewNoChanges(t *testing.T) {
 		name: types.StepReview,
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
-			return &StepOutcome{NeedsApproval: true, Findings: `{"items":[]}`}, nil
+			return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"r1","severity":"warning","description":"still needs review","action":"ask-user"}],"summary":"one finding"}`}, nil
 		},
 	}
 
@@ -245,7 +247,9 @@ func TestExecutor_FixReviewNoChanges(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	fixEvent := waitForEvent(t, events, ipc.EventStepCompleted, string(types.StepStatusFixReview))
 	if fixEvent.Status == nil || *fixEvent.Status != string(types.StepStatusFixReview) {
@@ -267,7 +271,7 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	workDir := t.TempDir()
 
-	findings := `{"findings":[{"severity":"error","file":"main.go","line":42,"description":"nil pointer dereference","action":"auto-fix"}],"summary":"1 error found"}`
+	findings := `{"findings":[{"id":"r1","severity":"error","file":"main.go","line":42,"description":"nil pointer dereference","action":"auto-fix"}],"summary":"1 error found"}`
 	var capturedFindings string
 
 	callCount := 0
@@ -293,8 +297,9 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	exec.Respond(types.StepReview, types.ActionFix, nil)
-	approveDeferredReviewGate(t, database, run.ID, exec)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1"}); err != nil {
+		t.Fatal(err)
+	}
 
 	select {
 	case err := <-done:
@@ -309,11 +314,11 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse PreviousFindings: %v", err)
 	}
-	if len(payload.Items) != 0 {
-		t.Fatalf("expected 0 findings, got %d", len(payload.Items))
+	if len(payload.Items) != 1 || payload.Items[0].ID != "r1" {
+		t.Fatalf("selected findings = %+v, want r1", payload.Items)
 	}
-	if payload.Summary != "0 selected findings" {
-		t.Fatalf("summary = %q, want %q", payload.Summary, "0 selected findings")
+	if payload.Summary != "1 error found" {
+		t.Fatalf("summary = %q, want %q", payload.Summary, "1 error found")
 	}
 }
 

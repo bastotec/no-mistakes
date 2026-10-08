@@ -77,6 +77,7 @@ CREATE TABLE IF NOT EXISTS step_results (
     last_activity    TEXT,
     agent_pid        INTEGER,
     auto_fix_limit              INTEGER,
+    auto_fix_limit_provenance   TEXT NOT NULL DEFAULT 'legacy_unknown',
     ci_fix_attempts             INTEGER NOT NULL DEFAULT 0,
     override_reason             TEXT
 );
@@ -99,6 +100,46 @@ CREATE TABLE IF NOT EXISTS step_rounds (
     repair_published     INTEGER NOT NULL DEFAULT 0,
     duration_ms          INTEGER NOT NULL,
     created_at           INTEGER NOT NULL
+);
+
+-- One gate observation can dispatch at most one repair. A denied decision
+-- remains available for one explicit response, never a renewed automatic budget.
+CREATE TABLE IF NOT EXISTS repair_budget_decisions (
+    round_id       TEXT PRIMARY KEY REFERENCES step_rounds(id) ON DELETE CASCADE,
+    step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    consumed       INTEGER NOT NULL,
+    repair_limit   INTEGER NOT NULL,
+    authority_limit INTEGER,
+    source         TEXT NOT NULL,
+    dispatch_state TEXT
+);
+
+CREATE TABLE IF NOT EXISTS repair_invocations (
+    id             TEXT PRIMARY KEY,
+    round_id       TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+    step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+    ordinal        INTEGER NOT NULL,
+    state          TEXT NOT NULL,
+    worktree       TEXT,
+    agent          TEXT,
+    purpose        TEXT,
+    wrapper_pid    INTEGER,
+    wrapper_token  TEXT,
+    descriptor_path TEXT,
+    result_path    TEXT,
+    fixer_pid      INTEGER,
+    result_json    BLOB,
+    result_present INTEGER NOT NULL DEFAULT 0,
+    error_class    TEXT,
+    error_text     TEXT,
+    lifecycle_phase TEXT NOT NULL DEFAULT 'repair',
+    control_state  TEXT NOT NULL DEFAULT 'active',
+    cleanup_state  TEXT NOT NULL DEFAULT 'active',
+    cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+    cleanup_error  TEXT,
+    created_at     INTEGER NOT NULL,
+    updated_at     INTEGER NOT NULL,
+    UNIQUE (round_id, ordinal)
 );
 
 CREATE TABLE IF NOT EXISTS agent_invocations (
@@ -306,7 +347,47 @@ var migrationStatements = []string{
 	// written before this column existed can have had.
 	`ALTER TABLE runs ADD COLUMN gates_json TEXT`,
 	`ALTER TABLE step_results ADD COLUMN auto_fix_limit INTEGER`,
+	`ALTER TABLE step_results ADD COLUMN auto_fix_limit_provenance TEXT NOT NULL DEFAULT 'legacy_unknown'`,
+	`UPDATE step_results SET auto_fix_limit_provenance = 'initialized' WHERE auto_fix_limit IS NOT NULL AND auto_fix_limit_provenance = 'legacy_unknown'`,
 	`ALTER TABLE step_results ADD COLUMN ci_fix_attempts INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE repair_budget_decisions ADD COLUMN authority_limit INTEGER`,
+	`ALTER TABLE repair_budget_decisions ADD COLUMN dispatch_state TEXT`,
+	`CREATE TABLE IF NOT EXISTS repair_invocations (
+		id TEXT PRIMARY KEY,
+		round_id TEXT NOT NULL REFERENCES step_rounds(id) ON DELETE CASCADE,
+		step_result_id TEXT NOT NULL REFERENCES step_results(id) ON DELETE CASCADE,
+		ordinal INTEGER NOT NULL,
+		state TEXT NOT NULL,
+		worktree TEXT,
+		agent TEXT,
+		purpose TEXT,
+		wrapper_pid INTEGER,
+		wrapper_token TEXT,
+		descriptor_path TEXT,
+		result_path TEXT,
+		fixer_pid INTEGER,
+		result_json BLOB,
+		result_present INTEGER NOT NULL DEFAULT 0,
+		error_class TEXT,
+		error_text TEXT,
+		lifecycle_phase TEXT NOT NULL DEFAULT 'repair',
+		control_state TEXT NOT NULL DEFAULT 'active',
+		cleanup_state TEXT NOT NULL DEFAULT 'active',
+		cleanup_attempts INTEGER NOT NULL DEFAULT 0,
+		cleanup_error TEXT,
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL,
+		UNIQUE (round_id, ordinal)
+	)`,
+	`ALTER TABLE repair_invocations ADD COLUMN error_class TEXT`,
+	`ALTER TABLE repair_invocations ADD COLUMN lifecycle_phase TEXT NOT NULL DEFAULT 'repair'`,
+	`ALTER TABLE repair_invocations ADD COLUMN wrapper_token TEXT`,
+	`ALTER TABLE repair_invocations ADD COLUMN descriptor_path TEXT`,
+	`ALTER TABLE repair_invocations ADD COLUMN result_path TEXT`,
+	`ALTER TABLE repair_invocations ADD COLUMN control_state TEXT NOT NULL DEFAULT 'active'`,
+	`ALTER TABLE repair_invocations ADD COLUMN cleanup_state TEXT NOT NULL DEFAULT 'active'`,
+	`ALTER TABLE repair_invocations ADD COLUMN cleanup_attempts INTEGER NOT NULL DEFAULT 0`,
+	`ALTER TABLE repair_invocations ADD COLUMN cleanup_error TEXT`,
 	// Non-nil exactly when a human answered ActionApprove on a step whose gate
 	// existed because of an unresolved external condition (currently: the CI
 	// step's live checks were still failing) - see

@@ -18,6 +18,12 @@ import (
 // budget; a late successful return after this cause is still a timeout.
 var ErrAgentTimeout = errors.New("agent timeout")
 
+// ErrReviewAgentTimeout is the review turn's distinct absolute deadline cause.
+var ErrReviewAgentTimeout = errors.New("review agent timeout")
+
+// ErrAgentBudget reports that the native adapter exhausted its turn budget.
+var ErrAgentBudget = errors.New("agent turn budget exhausted")
+
 // AgentTimeout is the per-invocation budget applied at the shared agent-run
 // seam. A positive Config.AgentTimeout wins; otherwise the default (30m).
 func AgentTimeout(cfg *config.Config) time.Duration {

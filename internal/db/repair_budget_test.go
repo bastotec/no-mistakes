@@ -1,0 +1,797 @@
+package db
+
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"sync"
+	"sync/atomic"
+	"testing"
+
+	"github.com/kunchenguid/no-mistakes/internal/types"
+)
+
+func TestAutomaticRepairReservationIsRecoverableUntilCompletion(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 1)
+	decision, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil)
+	if err != nil || !decision.Granted {
+		t.Fatalf("ReserveStepRepair() = %+v, %v", decision, err)
+	}
+	if recoverable, err := d.HasRecoverableRepairDispatch(run.ID); err != nil || !recoverable {
+		t.Fatalf("reserved automatic repair is not recoverable: %v, %v", recoverable, err)
+	}
+	invocation, err := d.RegisterRepairInvocation(step.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.BindRepairInvocationProcess(invocation.ID, "repair process active", 4242); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	if recoverable, err := d.HasRecoverableRepairDispatch(run.ID); err != nil || recoverable {
+		t.Fatalf("completed automatic repair remained recoverable: %v, %v", recoverable, err)
+	}
+	stored, _ := d.GetStepResult(step.ID)
+	if stored.AgentPID != nil {
+		t.Fatalf("completed repair retained process identity %v", *stored.AgentPID)
+	}
+}
+
+func TestExplicitRepairAuthorizationStaysRecoverablyParkedUntilClaim(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","action":"ask-user"}]}`
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	decision, err := d.AuthorizeStepRepair(step.ID, round.ID, 3, &ids, nil)
+	if err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	parked, err := d.GetStepResult(step.ID)
+	if err != nil || parked.Status != types.StepStatusAwaitingApproval || parked.FindingsJSON == nil {
+		t.Fatalf("authorization erased recoverable gate: %+v, %v", parked, err)
+	}
+	storedRun, err := d.GetRun(run.ID)
+	if err != nil || storedRun.AwaitingAgentSince == nil {
+		t.Fatalf("authorization erased parked run marker: %+v, %v", storedRun, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	claimed, _ := d.GetStepResult(step.ID)
+	if claimed.Status != types.StepStatusFixing {
+		t.Fatalf("claimed status = %s, want fixing", claimed.Status)
+	}
+	claimedRun, err := d.GetRun(run.ID)
+	if err != nil || claimedRun.AwaitingAgentSince != nil {
+		t.Fatalf("claimed repair retained parked marker: %+v, %v", claimedRun, err)
+	}
+	recoverable, err := d.HasRecoverableRepairDispatch(run.ID)
+	if err != nil || !recoverable {
+		t.Fatalf("claimed repair is not recoverable: %v, %v", recoverable, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatalf("replayed claim: %v", err)
+	}
+}
+
+func TestStartedRepairRecoveryStaysFixingWithoutRedispatch(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	if err := d.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 2); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","action":"ask-user"}]}`
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	if decision, err := d.AuthorizeStepRepair(step.ID, round.ID, 2, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	pid := 4242
+	invocation, err := d.RegisterRepairInvocation(step.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.BindRepairInvocationProcess(invocation.ID, "repair process active", pid); err != nil {
+		t.Fatal(err)
+	}
+	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
+	if err != nil || state != "repair_started_unresolved" {
+		t.Fatalf("restored state = %q, %v", state, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err == nil {
+		t.Fatal("started repair was dispatchable again")
+	}
+	preserved, _ := d.GetStepResult(step.ID)
+	if preserved.Status != types.StepStatusFixing {
+		t.Fatalf("step status = %s, want fixing", preserved.Status)
+	}
+	if preserved.AgentPID == nil || *preserved.AgentPID != pid {
+		t.Fatalf("agent pid = %v, want %d", preserved.AgentPID, pid)
+	}
+	storedRun, _ := d.GetRun(run.ID)
+	if storedRun.AwaitingAgentSince != nil {
+		t.Fatal("unresolved active repair was exposed as an approval gate")
+	}
+}
+
+func TestMissingUnstartedWrapperReturnsToPreparedAuthorization(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if decision, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil); err != nil || !decision.Granted {
+		t.Fatalf("reserve repair = %+v, %v", decision, err)
+	}
+	invocationID, err := d.RepairInvocationForRound(step.ID, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.RegisterRepairInvocation(step.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PrepareRepairInvocationWrapper(invocationID, "token"); err != nil {
+		t.Fatal(err)
+	}
+	retryable, err := d.MarkRepairInvocationUnresolved(step.ID, round.ID)
+	if err != nil || !retryable {
+		t.Fatalf("unstarted wrapper reconciliation = %v, %v", retryable, err)
+	}
+	state, _, err := d.RepairInvocationRecoveryState(step.ID, round.ID)
+	if err != nil || state != "prepared" {
+		t.Fatalf("reconciled state = %q, %v", state, err)
+	}
+	restored, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
+	if err != nil || restored != "fix_authorized" {
+		t.Fatalf("restored authorization = %q, %v", restored, err)
+	}
+}
+
+func TestPreparedRepairRecoveryRestartsTheSameInvocation(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","action":"ask-user"}]}`
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+	ids := `["review-1"]`
+	if decision, err := d.AuthorizeStepRepair(step.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
+	if err != nil || state != "fix_authorized" {
+		t.Fatalf("restored prepared state = %q, %v", state, err)
+	}
+	if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatalf("prepared invocation was not dispatchable by its original id: %v", err)
+	}
+}
+
+func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		limit int
+		grant bool
+	}{
+		{name: "lower lifecycle limit", limit: 1, grant: true},
+		{name: "zero lifecycle limit", limit: 0, grant: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+			step, _ := d.InsertStepResult(run.ID, types.StepCI)
+			if err := d.StartStepWithAutoFixLimit(step.ID, tc.limit); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.ResetStepsFrom(run.ID, types.StepCI.Order()); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+				t.Fatal(err)
+			}
+			observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+			got, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+			if err != nil || got.Granted != tc.grant || got.Limit != tc.limit || got.AuthorityLimit != tc.limit {
+				t.Fatalf("reservation ignored persisted lifecycle limit: %+v %v", got, err)
+			}
+		})
+	}
+}
+
+func TestRepairBudgetRevalidationPreservesReviewLifecycleLimit(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	review, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if _, err := d.InsertStepResult(run.ID, types.StepCI); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStepWithAutoFixLimit(review.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStep(review.ID, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+		t.Fatal(err)
+	}
+	for range 2 {
+		if err := d.StartStepWithAutoFixLimit(review.ID, 3); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := d.StartStepFixRound(review.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	got, err := d.GetStepResult(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.AutoFixLimit == nil || *got.AutoFixLimit != 1 {
+		t.Fatalf("review lifecycle limit after revalidation = %v, want 1", got.AutoFixLimit)
+	}
+	observation, _ := d.InsertStepRound(review.ID, 1, "initial", nil, nil, 0)
+	first, err := d.ReserveStepRepairWithSelection(review.ID, observation.ID, 3, nil)
+	if err != nil || !first.Granted || first.Limit != 1 {
+		t.Fatalf("first reservation after revalidation = %+v, %v", first, err)
+	}
+	next, _ := d.InsertStepRound(review.ID, 2, "auto_fix", nil, nil, 0)
+	denied, err := d.ReserveStepRepairWithSelection(review.ID, next.ID, 3, nil)
+	if err != nil || denied.Granted || denied.Limit != 1 || denied.Consumed != 1 {
+		t.Fatalf("repeated reservation widened lifecycle limit: %+v, %v", denied, err)
+	}
+}
+
+func TestRepairBudgetResetNormalizesLegacyExecutedSteps(t *testing.T) {
+	for _, status := range []types.StepStatus{
+		types.StepStatusRunning,
+		types.StepStatusAwaitingApproval,
+		types.StepStatusCompleted,
+		types.StepStatusFailed,
+	} {
+		t.Run(string(status), func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+			step, _ := d.InsertStepResult(run.ID, types.StepReview)
+			if err := d.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
+				t.Fatal(err)
+			}
+			switch status {
+			case types.StepStatusAwaitingApproval:
+				if err := d.ParkStepForApproval(run.ID, step.ID, status, 1, 1, nil); err != nil {
+					t.Fatal(err)
+				}
+			case types.StepStatusCompleted:
+				if err := d.CompleteStep(step.ID, 0, 1, ""); err != nil {
+					t.Fatal(err)
+				}
+			case types.StepStatusFailed:
+				if err := d.FailStep(step.ID, "failed", 1); err != nil {
+					t.Fatal(err)
+				}
+			}
+			observation, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(`INSERT INTO repair_budget_decisions(round_id, step_result_id, consumed, repair_limit, authority_limit, source) VALUES (?, ?, 1, 3, 3, 'user')`, observation.ID, step.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = NULL, auto_fix_limit_provenance = 'legacy_unknown' WHERE id = ?`, step.ID); err != nil {
+				t.Fatal(err)
+			}
+
+			for range 2 {
+				if err := d.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+					t.Fatal(err)
+				}
+			}
+			persisted, err := d.GetStepResult(step.ID)
+			if err != nil || persisted.Status != types.StepStatusPending || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
+				t.Fatalf("reset legacy step = %+v, %v", persisted, err)
+			}
+			var provenance string
+			var decisionLimit, authorityLimit int
+			if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.sql.QueryRow(`SELECT repair_limit, authority_limit FROM repair_budget_decisions WHERE round_id = ?`, observation.ID).Scan(&decisionLimit, &authorityLimit); err != nil {
+				t.Fatal(err)
+			}
+			if provenance != "initialized" || decisionLimit != 0 || authorityLimit != 0 {
+				t.Fatalf("normalized lifecycle state = %q, limits %d/%d", provenance, decisionLimit, authorityLimit)
+			}
+			if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+				t.Fatal(err)
+			}
+			next, err := d.InsertStepRound(step.ID, 2, "initial", nil, nil, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			denied, err := d.AuthorizeStepRepair(step.ID, next.ID, 3, nil, nil)
+			if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 {
+				t.Fatalf("reset legacy step regained authority: %+v, %v", denied, err)
+			}
+		})
+	}
+}
+
+func TestRepairBudgetResetLeavesNeverStartedLegacyStepUninitialized(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.ResetStepsFrom(run.ID, types.StepReview.Order()); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := d.GetStepResult(step.ID)
+	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 3 {
+		t.Fatalf("never-started step limit = %+v, %v", persisted, err)
+	}
+	var provenance string
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "initialized" {
+		t.Fatalf("never-started step provenance = %q, %v", provenance, err)
+	}
+	observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	granted, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || !granted.Granted || granted.Limit != 3 {
+		t.Fatalf("never-started step did not adopt configured limit: %+v, %v", granted, err)
+	}
+}
+
+func TestRepairBudgetLoweredLimitCannotBeRestoredByExhaustedDecision(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	for n := 1; n <= 3; n++ {
+		trigger := "auto_fix"
+		if n == 1 {
+			trigger = "initial"
+		}
+		observation, _ := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
+		got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+		if err != nil || !got.Granted {
+			t.Fatalf("reserve repair %d: %+v %v", n, got, err)
+		}
+	}
+	observation, _ := d.InsertStepRound(step.ID, 4, "auto_fix", nil, nil, 0)
+	if got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil); err != nil || got.Granted {
+		t.Fatalf("expected exhaustion decision: %+v %v", got, err)
+	}
+	lowered, err := d.AuthorizeStepRepair(step.ID, observation.ID, 1, nil, nil)
+	if err != nil || lowered.Granted || lowered.Limit != 1 || lowered.AuthorityLimit != 1 {
+		t.Fatalf("exhausted decision restored larger limit: %+v %v", lowered, err)
+	}
+	retried, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+	if err != nil || retried.Granted || retried.Limit != 1 || retried.AuthorityLimit != 1 {
+		t.Fatalf("retry widened lowered limit: %+v %v", retried, err)
+	}
+}
+
+func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "budget.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { d.Close() }()
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepCI)
+	observation, err := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+	if err != nil || !first.Granted || first.Consumed != 1 || first.AuthorityLimit != 1 || first.Limit != 3 {
+		t.Fatalf("first response did not pin one repair: %+v %v", first, err)
+	}
+	next, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, next.ID, 3, nil)
+	if err != nil || denied.Granted || denied.Consumed != 1 || denied.AuthorityLimit != 1 || denied.Limit != 3 {
+		t.Fatalf("automatic repair exceeded response authority: %+v %v", denied, err)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var grants atomic.Int32
+	var wg sync.WaitGroup
+	for n := 0; n < 20; n++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			got, err := d.AuthorizeStepRepair(step.ID, next.ID, 3, nil, nil)
+			if err != nil {
+				t.Error(err)
+				return
+			}
+			if got.Granted {
+				grants.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if grants.Load() != 1 {
+		t.Fatalf("later response launched %d repairs, want one", grants.Load())
+	}
+	afterGrant, _ := d.InsertStepRound(step.ID, 3, "auto_fix", nil, nil, 0)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, afterGrant.ID, 100, nil)
+	if err != nil || got.Granted || got.Consumed != 2 || got.AuthorityLimit != 2 || got.Limit != 3 {
+		t.Fatalf("retry or config reload widened response authority: %+v %v", got, err)
+	}
+}
+
+func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy-null.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepCI)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"ci-red","severity":"error","description":"check failed","action":"auto-fix"}],"summary":"check failed"}`
+	observation, err := d.InsertStepRound(step.ID, 1, "initial", &findings, nil, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.ParkStepForApproval(run.ID, step.ID, types.StepStatusAwaitingApproval, 1, 10, &findings); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = NULL, auto_fix_limit_provenance = 'legacy_unknown' WHERE id = ?`, step.ID); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.ExplicitRepairAvailable {
+		t.Fatalf("legacy NULL gained repair authority: %+v %v", denied, err)
+	}
+	persisted, err := d.GetStepResult(step.ID)
+	if err != nil || persisted.AutoFixLimit == nil || *persisted.AutoFixLimit != 0 {
+		t.Fatalf("legacy NULL was not normalized to zero: %+v %v", persisted, err)
+	}
+	var provenance string
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "legacy_normalized" {
+		t.Fatalf("legacy NULL provenance after normalization = %q, %v", provenance, err)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retried, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || retried.Granted || retried.ExplicitRepairAvailable {
+		t.Fatalf("legacy zero advertised repair authority: %+v %v", retried, err)
+	}
+	ids := `["ci-red"]`
+	denied, err = d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
+	if err != nil || denied.Granted || denied.Consumed != 0 || denied.Limit != 0 || denied.AuthorityLimit != 0 {
+		t.Fatalf("legacy zero accepted explicit repair: %+v %v", denied, err)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	denied, err = d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
+	if err != nil || denied.Granted || denied.Consumed != 0 || denied.Limit != 0 || denied.AuthorityLimit != 0 {
+		t.Fatalf("restart reopened legacy zero authority: %+v %v", denied, err)
+	}
+}
+
+func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "initialized-zero.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	firstRound, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	first, err := d.ReserveStepRepairWithSelection(step.ID, firstRound.ID, 3, nil)
+	if err != nil || !first.Granted {
+		t.Fatalf("initial reservation: %+v %v", first, err)
+	}
+	if err := d.StartStepWithAutoFixLimit(step.ID, 0); err != nil {
+		t.Fatal(err)
+	}
+	observation, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
+	denied, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.Consumed != 1 {
+		t.Fatalf("initialized zero reopened prior authority: %+v %v", denied, err)
+	}
+	var provenance string
+	var decisionLimit, decisionAuthority int
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.sql.QueryRow(`SELECT MAX(repair_limit), MAX(authority_limit) FROM repair_budget_decisions WHERE step_result_id = ?`, step.ID).Scan(&decisionLimit, &decisionAuthority); err != nil {
+		t.Fatal(err)
+	}
+	if provenance != "initialized" || decisionLimit != 0 || decisionAuthority != 0 {
+		t.Fatalf("lowered lifecycle state = %q, limits %d/%d", provenance, decisionLimit, decisionAuthority)
+	}
+	d.Close()
+
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	for range 2 {
+		retried, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+		if err != nil || retried.Granted || retried.Limit != 0 || retried.AuthorityLimit != 0 || retried.Consumed != 1 {
+			t.Fatalf("resume or retry reopened initialized zero: %+v %v", retried, err)
+		}
+	}
+}
+
+func TestRepairBudgetLegacyOverCeilingSurvivesMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	d, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepTest)
+	for n := 1; n <= 5; n++ {
+		trigger := "initial"
+		if n > 1 {
+			trigger = "user_fix"
+		}
+		if _, err := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Model an existing schema with no reservation table, then reopen/migrate.
+	if _, err := d.sql.Exec(`DROP TABLE repair_budget_decisions`); err != nil {
+		t.Fatal(err)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	rounds, err := d.GetRoundsByStep(step.ID)
+	if err != nil || len(rounds) != 5 {
+		t.Fatalf("legacy records lost: %v %v", rounds, err)
+	}
+	last := rounds[4]
+	got, err := d.ReserveStepRepairWithSelection(step.ID, last.ID, 3, nil)
+	if err != nil || got.Granted || got.Consumed != 4 {
+		t.Fatalf("legacy overrun granted: %+v %v", got, err)
+	}
+	d.Close()
+	d, err = Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	got, err = d.ReserveStepRepairWithSelection(step.ID, last.ID, 100, nil)
+	if err != nil || got.Granted || got.Consumed != 4 || got.Limit != 3 {
+		t.Fatalf("restart minted authority: %+v %v", got, err)
+	}
+	preserved, _ := d.GetRoundsByStep(step.ID)
+	if len(preserved) != len(rounds) {
+		t.Fatal("restart reset legacy rounds")
+	}
+	for n := range rounds {
+		if !reflect.DeepEqual(preserved[n], rounds[n]) {
+			t.Fatal("migration changed a legacy round")
+		}
+	}
+}
+
+func TestRepairBudgetAutomaticSequenceUsesConfiguredLimit(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	for n := 1; n <= 3; n++ {
+		trigger := "auto_fix"
+		if n == 1 {
+			trigger = "initial"
+		}
+		observation, _ := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
+		got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+		if err != nil || !got.Granted || got.Consumed != n || got.AuthorityLimit != 3 {
+			t.Fatalf("automatic repair %d: %+v %v", n, got, err)
+		}
+	}
+	observation, _ := d.InsertStepRound(step.ID, 4, "auto_fix", nil, nil, 0)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || got.Granted || got.Consumed != 3 {
+		t.Fatalf("automatic sequence exceeded configured limit: %+v %v", got, err)
+	}
+}
+
+func TestRepairBudgetOneRemainingLaunchesTwoOfThree(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	// The sole counterfactual is consumed=1 instead of consumed=3.
+	d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	observation, _ := d.InsertStepRound(step.ID, 2, "user_fix", nil, nil, 0)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || !got.Granted || got.Consumed != 2 || got.Limit != 3 {
+		t.Fatalf("2/3 repair refused: %+v %v", got, err)
+	}
+	retry, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || retry.Granted || !retry.Duplicate {
+		t.Fatalf("retry launched duplicate: %+v %v", retry, err)
+	}
+}
+
+func TestUnconfiguredRepairPolicyRequiresOneExplicitGrantPerRepair(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.CustomGateStepName(types.StepReview, "policy"))
+	if err := d.StartStepWithoutAutoFixPolicy(step.ID); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, first.ID, 0, nil)
+	if err != nil || denied.Granted || !denied.ExplicitRepairAvailable || denied.PolicyConfigured {
+		t.Fatalf("unconfigured automatic decision = %+v, %v", denied, err)
+	}
+	ids := `["policy"]`
+	granted, err := d.AuthorizeStepRepair(step.ID, first.ID, 0, &ids, nil)
+	if err != nil || !granted.Granted || granted.Consumed != 1 || granted.AuthorityLimit != 1 {
+		t.Fatalf("first explicit grant = %+v, %v", granted, err)
+	}
+	next, _ := d.InsertStepRound(step.ID, 2, "user_fix", nil, nil, 0)
+	automatic, err := d.ReserveStepRepairWithSelection(step.ID, next.ID, 0, nil)
+	if err != nil || automatic.Granted || automatic.Consumed != 1 || automatic.AuthorityLimit != 1 {
+		t.Fatalf("unconfigured gate auto-looped = %+v, %v", automatic, err)
+	}
+}
+
+func TestConsumedRepairPayloadCleanupIsDurableAndRemovesFiles(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepReview)
+	if err := d.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
+	decision, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil)
+	if err != nil || !decision.Granted {
+		t.Fatalf("reserve repair: %+v, %v", decision, err)
+	}
+	invocationID, err := d.RepairInvocationForRound(step.ID, round.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	descriptor := filepath.Join(dir, "prompt.json")
+	result := filepath.Join(dir, "result.json")
+	for _, path := range []string{descriptor, result, result + ".heartbeat"} {
+		if err := os.WriteFile(path, []byte("sensitive"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'terminal', descriptor_path = ?, result_path = ?, result_json = ?, result_present = 1, error_text = 'secret' WHERE id = ?`, descriptor, result, []byte(`{"text":"secret"}`), invocationID); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.CompleteStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	var state, cleanupState string
+	var payload, errorText []byte
+	if err := d.sql.QueryRow(`SELECT state, cleanup_state, result_json, error_text FROM repair_invocations WHERE id = ?`, invocationID).Scan(&state, &cleanupState, &payload, &errorText); err != nil {
+		t.Fatal(err)
+	}
+	if state != "consumed" || cleanupState != "pending" || payload != nil || errorText != nil {
+		t.Fatalf("consumption did not clear payload: state=%s cleanup=%s payload=%q error=%q", state, cleanupState, payload, errorText)
+	}
+	if err := d.CleanupPendingRepairInvocationFiles(); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{descriptor, result, result + ".heartbeat"} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("payload survived cleanup: %s (%v)", path, err)
+		}
+	}
+}
+
+func TestRepairBudgetInterruptedLegacySelectionsRemainConsumed(t *testing.T) {
+	d := openTestDB(t)
+	repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+	step, _ := d.InsertStepResult(run.ID, types.StepCI)
+	ids := `["ci-red"]`
+	for n := 1; n <= 3; n++ {
+		observation, err := d.InsertStepRound(step.ID, n, "initial", nil, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := d.SetStepRoundSelection(observation.ID, &ids, RoundSelectionSourceUser); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Recovery re-observes checks without a completed fixer result. Each pending
+	// selection still represents spent authority; an initial trigger is no reset.
+	observation, _ := d.InsertStepRound(step.ID, 4, "initial", nil, nil, 0)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
+	if err != nil || got.Granted || got.Consumed != 3 {
+		t.Fatalf("interrupted authority discarded: %+v %v", got, err)
+	}
+}

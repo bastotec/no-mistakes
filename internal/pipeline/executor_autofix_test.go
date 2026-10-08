@@ -2,9 +2,12 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -12,6 +15,94 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+// A response authorizes one repair, not the configured automatic headroom.
+func TestExecutor_DaemonShutdownPreservesActiveStepState(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		return nil, ErrDaemonShutdown
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, t.TempDir()); !errors.Is(err, ErrDaemonShutdown) {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	steps, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(steps) != 1 {
+		t.Fatalf("steps = %+v, %v", steps, err)
+	}
+	if steps[0].Status != types.StepStatusRunning {
+		t.Fatalf("shutdown changed active step to %s", steps[0].Status)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunRunning {
+		t.Fatalf("shutdown changed active run: %+v, %v", stored, err)
+	}
+}
+
+func TestExecutor_ResponsePinsOneRepairUntilLaterAuthority(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	var calls atomic.Int32
+	step := &adaptiveCallStep{
+		name: types.StepCI,
+		fn: func(sctx *StepContext) (*StepOutcome, error) {
+			n := calls.Add(1)
+			if sctx.Fixing {
+				sctx.Run.HeadSHA = fmt.Sprintf("repair-%d", n)
+			}
+			return &StepOutcome{
+				NeedsApproval: true,
+				AutoFixable:   n > 1,
+				Findings:      `{"findings":[{"id":"ci-red","severity":"error","description":"serial check failed","action":"auto-fix"}],"summary":"serial check failed"}`,
+			}, nil
+		},
+	}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 3}}, &usageAgent{}, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	waitGate := func(minCalls int32) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			steps, err := database.GetStepsByRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls.Load() >= minCalls && len(steps) == 1 && (steps[0].Status == types.StepStatusAwaitingApproval || steps[0].Status == types.StepStatusFixReview) {
+				return
+			}
+			select {
+			case <-deadline:
+				t.Fatal("repair did not settle at a gate")
+			case <-time.After(time.Millisecond):
+			}
+		}
+	}
+	waitGate(1)
+	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
+		t.Fatal(err)
+	}
+	waitGate(2)
+	if calls.Load() != 2 {
+		t.Fatalf("automatic request exceeded response ceiling: calls=%d", calls.Load())
+	}
+	steps, _ := database.GetStepsByRun(run.ID)
+	if steps[0].FindingsJSON == nil || !strings.Contains(*steps[0].FindingsJSON, "current authority limit 1") || !strings.Contains(*steps[0].FindingsJSON, "configured automatic maximum 3") {
+		if steps[0].FindingsJSON == nil {
+			t.Fatal("missing bounded authority request: no findings")
+		}
+		t.Fatalf("missing bounded authority request: %s", *steps[0].FindingsJSON)
+	}
+	if err := exec.Respond(types.StepCI, types.ActionFix, []string{"ci-red"}); err != nil {
+		t.Fatal(err)
+	}
+	waitGate(3)
+	if calls.Load() != 3 {
+		t.Fatalf("later authority did not grant exactly one repair: calls=%d", calls.Load())
+	}
+	if err := exec.Respond(types.StepCI, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
 
 func TestExecutor_AutoFixTriggersWithoutApproval(t *testing.T) {
 	database, p, run, repo := setupTest(t)
@@ -143,7 +234,7 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 			return &StepOutcome{
 				NeedsApproval: true,
 				AutoFixable:   true,
-				Findings:      `{"findings":[{"severity":"warning","description":"style issue","action":"auto-fix"}],"summary":"lint issue"}`,
+				Findings:      `{"findings":[{"id":"style","severity":"warning","description":"style issue","action":"auto-fix"}],"summary":"lint issue"}`,
 			}, nil
 		},
 	}
@@ -160,8 +251,17 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		t.Errorf("expected 3 calls (1 initial + 2 auto-fix), got %d", callCount)
 	}
 
+	if err := exec.Respond(types.StepLint, types.ActionFix, []string{"style"}); err == nil {
+		t.Fatal("configured hard ceiling accepted another repair")
+	}
+	if callCount != 3 {
+		t.Fatalf("configured hard ceiling launched %d extra rounds", callCount-3)
+	}
+
 	// Now approve manually to finish
-	exec.Respond(types.StepLint, types.ActionApprove, nil)
+	if err := exec.Respond(types.StepLint, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
 	waitExecutorDone(t, done)
 }
 
@@ -451,6 +551,72 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 
 	exec.Respond(types.StepReview, types.ActionApprove, nil)
 	waitExecutorDone(t, done)
+}
+
+func TestExecutor_ConfiguredZeroRejectsExplicitRepair(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"ask-user"}]}`}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 0}}, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err == nil {
+		t.Fatal("configured zero accepted an explicit repair")
+	}
+	if calls != 1 {
+		t.Fatalf("configured zero launched %d repair rounds", calls-1)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+	waitExecutorDone(t, done)
+}
+
+func TestExecutor_CustomGatesRequireOneExplicitResponsePerRepair(t *testing.T) {
+	for _, anchor := range []types.StepName{types.StepReview, types.StepTest} {
+		t.Run(string(anchor), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			stepName := types.CustomGateStepName(anchor, "policy")
+			calls := 0
+			step := &adaptiveCallStep{name: stepName, fn: func(*StepContext) (*StepOutcome, error) {
+				calls++
+				action := "ask-user"
+				if calls > 1 {
+					action = "auto-fix"
+				}
+				return &StepOutcome{NeedsApproval: true, AutoFixable: calls > 1, Findings: `{"findings":[{"id":"policy","severity":"warning","description":"policy failed","action":"` + action + `"}]}`}, nil
+			}}
+			exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 3, Test: 3}}, nil, []Step{step}, nil)
+			done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusAwaitingApproval)
+			if err := exec.Respond(stepName, types.ActionFix, []string{"policy"}); err != nil {
+				t.Fatal(err)
+			}
+			// The repair can pass through fixing between DB polls; fix_review is
+			// the durable evidence that exactly one repair completed.
+			waitForStepStatus(t, database, run.ID, stepName, types.StepStatusFixReview)
+			if calls != 2 {
+				t.Fatalf("custom gate auto-looped after one response: calls=%d", calls)
+			}
+			if err := exec.Respond(stepName, types.ActionApprove, nil); err != nil {
+				t.Fatal(err)
+			}
+			waitExecutorDone(t, done)
+		})
+	}
+}
+
+func TestExecutor_CustomGateDoesNotInheritAnchorRepairBudget(t *testing.T) {
+	exec := NewExecutor(nil, nil, &config.Config{AutoFix: config.AutoFix{Review: 3, Test: 2}}, nil, nil, nil)
+	if got := exec.autoFixLimit(types.CustomGateStepName(types.StepReview, "policy")); got != 0 {
+		t.Fatalf("review custom gate auto-fix limit = %d, want 0", got)
+	}
+	if got := exec.autoFixLimit(types.CustomGateStepName(types.StepTest, "browser")); got != 0 {
+		t.Fatalf("test custom gate auto-fix limit = %d, want 0", got)
+	}
 }
 
 func TestExecutor_ParkedStepReleasesLogFileAfterCancel(t *testing.T) {

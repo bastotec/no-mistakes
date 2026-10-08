@@ -586,7 +586,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 | `auto_fix.lint` | `int` | Inherits from global (default `3`) |
 | `auto_fix.ci` | `int` | Inherits from global (default `3`) |
 
-Set to `0` to disable the follow-up auto-fix loop for a step (findings require manual approval).
+Set to `0` to disable automatic and user-triggered follow-up repairs for a core step; findings then require approval, skip, or abort. Started automatic and user-triggered repairs share the inherited ceiling, and each explicit fix response authorizes at most one more repair. The [auto-fix loop](/no-mistakes/concepts/auto-fix/#how-it-works) owns the durable counting and exhaustion behavior.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
 For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings pause for approval instead of starting another automatic fix loop.
 

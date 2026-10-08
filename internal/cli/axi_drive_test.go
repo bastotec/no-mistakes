@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +21,33 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestAxiRespondFindingFlagPreservesExactIDs(t *testing.T) {
+	cmd := newAxiRespondCmd()
+	want := []string{"comma,id", " white space ", `quote"id`, "$()", "-leading"}
+	args := []string{"--finding", want[0], "--finding", want[1], "--finding", want[2], "--finding", want[3], "--finding=-leading"}
+	if err := cmd.ParseFlags(args); err != nil {
+		t.Fatalf("ParseFlags() error = %v", err)
+	}
+	got, err := cmd.Flags().GetStringArray("finding")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("--finding values = %#v, want %#v", got, want)
+	}
+}
+
+func TestParseLegacyFindingIDsRejectsAmbiguousValues(t *testing.T) {
+	for _, raw := range []string{"one,,two", " one", "two "} {
+		if _, err := parseLegacyFindingIDs(raw); err == nil {
+			t.Fatalf("parseLegacyFindingIDs(%q) unexpectedly succeeded", raw)
+		}
+	}
+	if got, err := parseLegacyFindingIDs("one,two"); err != nil || !slices.Equal(got, []string{"one", "two"}) {
+		t.Fatalf("parseLegacyFindingIDs() = %#v, %v", got, err)
+	}
+}
 
 func ciRunView(ciStatus types.StepStatus) runView {
 	return runView{
@@ -404,41 +432,63 @@ func TestDriveRun_YesLeavesProtectedPathRefusalAwaitingResponse(t *testing.T) {
 	defer client.Close()
 
 	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
-	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
-		t.Run(string(status), func(t *testing.T) {
-			parked := &ipc.RunInfo{
-				ID: "run-1", Status: types.RunRunning,
-				Steps: []ipc.StepResultInfo{{StepName: types.StepCI, Status: status, FindingsJSON: &refusal.Findings}},
-			}
-			source := &scriptedRunStateSource{
-				subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
-				runs:          []*ipc.RunInfo{parked},
-			}
-			reconciler := newRunReconciler(source, parked.ID)
-			defer reconciler.Close()
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			var progress bytes.Buffer
-			run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
-			if err != nil || run != parked || ciReady || responses.Load() != 0 {
-				t.Fatalf("--yes resolved a protected-path refusal: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
-			}
-			if !strings.Contains(progress.String(), "explicit response") {
-				t.Fatalf("missing explicit-response guidance: %s", progress.String())
-			}
-			var output bytes.Buffer
-			cmd := &cobra.Command{}
-			cmd.SetOut(&output)
-			if err := renderDriveResult(cmd, run, ciReady); err != nil {
-				t.Fatal(err)
-			}
-			for _, want := range []string{"gate:", "1 awaiting", "package.lock", string(status)} {
-				if !strings.Contains(output.String(), want) {
-					t.Errorf("parked output missing %q: %s", want, output.String())
+	for _, gateCase := range []struct{ name, findings, detail string }{
+		{"protected-path", refusal.Findings, "package.lock"},
+		{"repair-budget", `{"findings":[{"id":"repair-budget-ci","severity":"warning","description":"consumed 3 repairs; additional repair 4 needs explicit authority","action":"ask-user","category":"repair-budget"}]}`, "additional repair 4"},
+		{"repair-reconciliation", `{"findings":[{"id":"repair-reconciliation-ci","severity":"error","description":"repair outcome requires reconciliation","action":"ask-user","category":"repair-reconciliation"}]}`, "requires reconciliation"},
+		{"daemon-shutdown", pipeline.DaemonShutdownFindings(types.StepCI), "cannot be trusted"},
+	} {
+		for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
+			t.Run(gateCase.name+"/"+string(status), func(t *testing.T) {
+				parked := &ipc.RunInfo{
+					ID: "run-1", Status: types.RunRunning,
+					Steps: []ipc.StepResultInfo{{StepName: types.StepCI, Status: status, FindingsJSON: &gateCase.findings}},
 				}
-			}
-			t.Logf("AXI output with --yes (automatic IPC responses: %d):\n%s%s", responses.Load(), progress.String(), output.String())
-		})
+				source := &scriptedRunStateSource{
+					subscriptions: []scriptedSubscription{{events: make(chan ipc.Event)}},
+					runs:          []*ipc.RunInfo{parked},
+				}
+				reconciler := newRunReconciler(source, parked.ID)
+				defer reconciler.Close()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
+				var progress bytes.Buffer
+				run, ciReady, err := driveRunWithReconciler(ctx, &progress, client, reconciler, parked.ID, true)
+				if err != nil || run != parked || ciReady || responses.Load() != 0 {
+					t.Fatalf("--yes resolved a protected-path refusal: run=%+v ciReady=%v responses=%d err=%v", run, ciReady, responses.Load(), err)
+				}
+				if !strings.Contains(progress.String(), "explicit response") {
+					t.Fatalf("missing explicit-response guidance: %s", progress.String())
+				}
+				var output bytes.Buffer
+				cmd := &cobra.Command{}
+				cmd.SetOut(&output)
+				if err := renderDriveResult(cmd, run, ciReady); err != nil {
+					t.Fatal(err)
+				}
+				for _, want := range []string{"gate:", "1 awaiting", gateCase.detail, string(status)} {
+					if !strings.Contains(output.String(), want) {
+						t.Errorf("parked output missing %q: %s", want, output.String())
+					}
+				}
+				t.Logf("AXI output with --yes (automatic IPC responses: %d):\n%s%s", responses.Load(), progress.String(), output.String())
+			})
+		}
+	}
+}
+
+func TestValidateGateResponseAction_DaemonShutdownAcceptsOnlyAbort(t *testing.T) {
+	findings := pipeline.DaemonShutdownFindings(types.StepReview)
+	for _, action := range []types.ApprovalAction{types.ActionApprove, types.ActionFix, types.ActionSkip} {
+		if err := validateGateResponseAction(action, findings); err == nil || !strings.Contains(err.Error(), "only --action abort") {
+			t.Errorf("action %s error = %v, want abort-only refusal", action, err)
+		}
+	}
+	if err := validateGateResponseAction(types.ActionAbort, findings); err != nil {
+		t.Fatalf("abort rejected: %v", err)
+	}
+	if err := validateGateResponseAction(types.ActionAbort, `{}`); err == nil {
+		t.Fatal("ordinary gate accepted abort")
 	}
 }
 

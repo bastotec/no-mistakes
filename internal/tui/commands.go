@@ -104,7 +104,7 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if step == nil || m.yoloApproved[step.StepName] {
 		return nil
 	}
-	if pipeline.HasProtectedPathRefusal(m.stepFindings[step.StepName]) {
+	if pipeline.HasProtectedPathRefusal(m.stepFindings[step.StepName]) || pipeline.HasRepairBudgetExhaustion(m.stepFindings[step.StepName]) || pipeline.HasRepairReconciliation(m.stepFindings[step.StepName]) {
 		return nil
 	}
 	if !m.approvalReady(step) {

@@ -45,6 +45,7 @@ type Harness struct {
 	agentName         string // claude / codex / grok / opencode / antigravity
 	allowRepoCommands *bool  // mirrors SetupOpts.AllowRepoCommands
 	globalConfigExtra string // mirrors SetupOpts.GlobalConfigExtra
+	autoFix           map[types.StepName]int
 	daemonOwn         *e2edaemon.Ownership
 }
 
@@ -75,6 +76,10 @@ type SetupOpts struct {
 	// through the real loader - agent_timeout and review_agent_timeout, whose
 	// production defaults are half an hour, are the reason it was added.
 	GlobalConfigExtra string
+
+	// AutoFix overrides the harness's disabled-by-default repair limits for
+	// journeys that intentionally exercise a repair.
+	AutoFix map[types.StepName]int
 }
 
 const e2eDaemonStartTimeout = "45s"
@@ -110,6 +115,7 @@ func NewHarness(t *testing.T, opts SetupOpts) *Harness {
 		agentName:         opts.Agent,
 		allowRepoCommands: opts.AllowRepoCommands,
 		globalConfigExtra: opts.GlobalConfigExtra,
+		autoFix:           opts.AutoFix,
 	}
 
 	for _, dir := range []string{h.BinDir, h.NMHome, h.HomeDir, h.WorkDir} {
@@ -209,18 +215,26 @@ func (h *Harness) writeGlobalConfig() {
 		h.t.Fatalf("mkdir nm home: %v", err)
 	}
 	binLink := filepath.Join(h.BinDir, h.agentName)
+	limit := func(step types.StepName) int {
+		if configured, ok := h.autoFix[step]; ok {
+			return configured
+		}
+		return 0
+	}
 	cfg := fmt.Sprintf(`agent: %s
 log_level: debug
 agent_path_override:
   %s: %s
 auto_fix:
-  rebase: 0
-  lint: 0
-  test: 0
-  review: 0
-  document: 0
-  ci: 0
-`, h.agentName, h.agentName, binLink)
+  rebase: %d
+  lint: %d
+  test: %d
+  review: %d
+  document: %d
+  ci: %d
+`, h.agentName, h.agentName, binLink,
+		limit(types.StepRebase), limit(types.StepLint), limit(types.StepTest),
+		limit(types.StepReview), limit(types.StepDocument), limit(types.StepCI))
 	if extra := strings.TrimSpace(h.globalConfigExtra); extra != "" {
 		cfg += extra + "\n"
 	}

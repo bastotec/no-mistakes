@@ -364,6 +364,7 @@ func TestProtectedPathPushApprovalCannotSkipPublicationOrDiscardEdits(t *testing
 	gitCmd(t, workDir, "restore", "--source=HEAD", "--staged", "--worktree", "--", "test.txt")
 	if err := client.Call(ipc.MethodRespond, &ipc.RespondParams{
 		RunID: result.RunID, Step: types.StepPush, Action: types.ActionFix,
+		FindingIDs: []string{"protected-path-refusal"},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}

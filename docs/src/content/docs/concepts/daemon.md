@@ -55,7 +55,7 @@ no-mistakes update
 
 `no-mistakes update` stops and starts the daemon when it is running, or when stale daemon artifacts exist, so the new executable is used.
 It prefers the managed service path and falls back to a detached daemon if service startup is unavailable or fails.
-If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart the daemon anyway and accept that those runs may fail; `-y`/`--yes` does not bypass this guard.
+If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart anyway; `-y`/`--yes` does not bypass this guard. A forced orderly shutdown preserves recoverable parked gates and dispatched repairs. Any other in-progress step is preserved at a `daemon-shutdown` decision gate because its interrupted result cannot be trusted; that gate accepts only `axi respond --action abort` before replacement validation can start.
 If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
@@ -114,10 +114,12 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks for runs that were left in `pending` or `running` status (which means the daemon crashed while they were active):
+On startup, the daemon checks runs left in `pending` or `running` status by a crash or orderly shutdown:
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
-- Resumes only fully recorded parked approval gates whose worktree and step history can be validated; incomplete or ambiguous active runs fail closed
+- Resumes fully recorded parked approval gates whose worktree and step history can be validated, plus repairs whose pre-launch authorization and dispatch state were durably recorded; incomplete or ambiguous active runs fail closed
+- For a dispatched repair, consumes a completed durable result or monitors an independently running repair wrapper until it finishes. If startup cannot prove the outcome, it parks a reconciliation gate: retry is available only when no repair process identity was ever registered, and otherwise the only safe response is abort
+- Preserves an ordinary step interrupted by an orderly daemon shutdown at a `daemon-shutdown` gate rather than trusting or replaying its partial result. This gate accepts only `axi respond --action abort`; unattended `--yes` handling leaves it parked
 - Rebuilds a parked run with the repository gate list pinned in `runs.gates_json` when that run started, never the current default-branch list. An absent pin on an older run means the core pipeline, while an invalid pin refuses recovery
 - Re-resolves and validates any configured repository forge profile before rebuilding the recovered run, so resumed provider checks and agents use the same repository-scoped identity model rather than persisted credentials or ambient active accounts
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked. The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) prevents automatic reconciliation
@@ -131,6 +133,8 @@ On startup, the daemon checks for runs that were left in `pending` or `running` 
 - For a validated legacy gate, installs or refreshes the no-mistakes-managed pre-receive admission and post-receive notification hooks, preserving an existing custom pre-receive hook behind the admission wrapper, then enables push-option support and reapplies per-worktree hook-path isolation
 - Records a content-versioned gate configuration stamp only after the whole migration succeeds. Normal restarts check current stamped gates from the filesystem without rerunning the mutating Git commands
 - Clears any parked-awaiting-agent marker so a recovered failed run is not shown as still waiting for `axi respond`
+
+Repair prompts and result payloads are retained only while an invocation is active, unresolved, or waiting to be consumed after recovery. Consumption atomically schedules their deletion and clears payloads from the database. Startup retries failed file deletion a bounded number of times and reports any remaining cleanup obligation in the daemon log. Terminal runs remove resolved invocation payloads while preserving unresolved records for operator reconciliation.
 
 ## Logging
 
@@ -153,6 +157,7 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Cancels all active runs
-2. Waits up to 30 seconds for goroutines to finish
-3. Removes the PID file and socket
+1. Detaches recoverable parked gates and durably dispatched repairs so startup recovery can resume them
+2. Parks any other active step at an explicit `daemon-shutdown` decision gate; its interrupted result is not trusted or replayed, and the only valid response after restart is `axi respond --action abort`
+3. Waits up to 30 seconds for daemon-owned run goroutines to detach; an independently dispatched repair may continue and be recovered by the replacement daemon
+4. Removes the PID file and socket

@@ -151,7 +151,7 @@ Starting a fresh run also requires a runnable effective pipeline agent.
 If the configured native agent or ACP runner is unavailable, the run fails before any pipeline step starts instead of reporting command-only validation as a passed gate.
 With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` findings as standing consent for the pipeline to fix them by selecting every finding, then accepts the resulting fix review.
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
-The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) are an exception to this automatic handling.
+Protected-path refusals, repair-budget exhaustion, repair reconciliation after daemon recovery, and steps interrupted by orderly daemon shutdown are exceptions to this automatic handling. `--yes` leaves each parked for its explicit, gate-specific response.
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
@@ -250,20 +250,24 @@ Answer the current approval gate and continue until the next gate, CI-ready deci
 
 ```sh
 no-mistakes axi respond --action approve
-no-mistakes axi respond --action fix --findings F1,F2 --instructions "optional guidance"
+no-mistakes axi respond --action fix --finding F1 --finding F2 --instructions "optional guidance"
 no-mistakes axi respond --action fix --add-finding '{"description":"...","action":"auto-fix"}'
 no-mistakes axi respond --action skip
+no-mistakes axi respond --action abort # only repair-reconciliation or daemon-shutdown gates
 ```
 
 | Flag             | Type     | Default       | Description                                                          |
 | ---------------- | -------- | ------------- | -------------------------------------------------------------------- |
-| `--action`       | `string` | (none)        | `approve`, `fix`, or `skip`; required                                |
+| `--action`       | `string` | (none)        | `approve`, `fix`, `skip`, or gate-specific `abort`; required         |
 | `--step`         | `string` | awaiting step | Step to respond to                                                   |
-| `--findings`     | `string` | (none)        | Comma-separated finding IDs for `--action fix`                       |
+| `--finding`      | `string[]` | (none)      | Exact finding ID for `--action fix`; repeat for multiple IDs         |
+| `--findings`     | `string` | (none)        | Legacy comma-separated finding IDs; use `--finding` for arbitrary IDs |
 | `--instructions` | `string` | (none)        | Guidance applied to selected findings                                |
 | `--add-finding`  | `string` | (none)        | JSON finding object to add and fix                                   |
 | `-y`, `--yes`    | `bool`   | `false`       | Auto-resolve subsequent eligible gates until a decision point or outcome |
 | `--wait`         | `duration` | `8m`        | Maximum time for pre-drive reads and post-response driving before the caller must reattach |
+
+A repair-budget gate requires a fresh explicit response and `--action fix` authorizes exactly one selected repair, within the configured ceiling. A repair-reconciliation gate accepts `fix` only when no repair process identity was registered; otherwise use `abort` rather than replaying an uncertain repair. A `daemon-shutdown` gate accepts only `abort` because the interrupted ordinary step cannot be resumed or trusted. `--action abort` is rejected at every other gate; use [`axi abort`](#no-mistakes-axi-abort) to cancel an ordinary active run.
 
 After the explicit response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome, subject to the same default `--wait 8m` boundary as `axi run`. That boundary also covers its initial active-run and run-state reads plus event-subscription acknowledgement, so a caller can interrupt establishment as well as the later event wait.

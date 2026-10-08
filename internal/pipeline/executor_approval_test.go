@@ -2,7 +2,9 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +13,225 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+type repairResultAgent struct{ calls int }
+
+func (a *repairResultAgent) Name() string { return "repair-result" }
+func (a *repairResultAgent) Close() error { return nil }
+func (a *repairResultAgent) Run(context.Context, agent.RunOpts) (*agent.Result, error) {
+	a.calls++
+	return &agent.Result{Text: "durable result"}, nil
+}
+
+func TestRepairInvocationErrorClassRoundTrip(t *testing.T) {
+	tests := []struct {
+		name  string
+		err   error
+		match func(error) bool
+	}{
+		{name: "agent timeout", err: fmt.Errorf("timed out: %w", ErrAgentTimeout), match: func(err error) bool { return errors.Is(err, ErrAgentTimeout) }},
+		{name: "review timeout", err: fmt.Errorf("timed out: %w", ErrReviewAgentTimeout), match: func(err error) bool { return errors.Is(err, ErrReviewAgentTimeout) }},
+		{name: "budget", err: fmt.Errorf("max turns: %w", ErrAgentBudget), match: func(err error) bool { return errors.Is(err, ErrAgentBudget) }},
+		{name: "structured", err: agent.StructuredOutputRejection(errors.New("invalid output")), match: agent.IsStructuredOutputRejected},
+		{name: "cancellation", err: context.Canceled, match: func(err error) bool { return errors.Is(err, context.Canceled) }},
+		{name: "adapter", err: errors.New("provider failed"), match: func(err error) bool { return err.Error() == "provider failed" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			class := repairInvocationErrorClass(test.err)
+			restored := restoreRepairInvocationError(&class, test.err.Error())
+			if !test.match(restored) {
+				t.Fatalf("restored error %v lost class %q", restored, class)
+			}
+		})
+	}
+}
+
+func TestRepairInvocationAgent_ReplaysTerminalResultWithoutRerunningFixer(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := database.RegisterRepairInvocation(stepResult.ID, round.ID, 0, t.TempDir(), "repair-result", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resultJSON := []byte(`{"text":"durable result"}`)
+	if err := database.FinishRepairInvocation(invocation.ID, resultJSON, true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if state, _, err := database.RepairInvocationRecoveryState(stepResult.ID, round.ID); err != nil || state != "terminal" {
+		t.Fatalf("terminal invocation state = %q, %v", state, err)
+	}
+	if state, err := database.RestoreLegacyRepairAuthorization(stepResult.ID, round.ID); err != nil || state != "fix_authorized" {
+		t.Fatalf("recovery authorization = %q, %v", state, err)
+	}
+	inner := &repairResultAgent{}
+	recovered := &repairInvocationAgent{inner: inner, db: database, stepID: stepResult.ID, worktree: t.TempDir(), roundID: func() string { return round.ID }}
+	result, err := recovered.Run(context.Background(), agent.RunOpts{Purpose: "review-fix"})
+	if err != nil || result == nil || result.Text != "durable result" {
+		t.Fatalf("replayed Run() = %+v, %v", result, err)
+	}
+	if inner.calls != 0 {
+		t.Fatalf("terminal replay reran native fixer %d times", inner.calls)
+	}
+}
+
+func TestExecutor_RepairSelectionMustMatchParkedFindingBeforeAuthorityIsConsumed(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"comma,id","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, nil, nil)
+	exec.waiting = true
+	exec.waitingStep = types.StepReview
+	exec.waitingStepResultID = stepResult.ID
+	exec.waitingRoundID = round.ID
+	exec.waitingFindings = findings
+	exec.waitingAutoFixLimit = 1
+
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"comma", "id"}); err == nil {
+		t.Fatal("mismatched legacy selection unexpectedly authorized")
+	}
+	decision, err := database.ReserveStepRepairWithSelection(stepResult.ID, round.ID, 1, nil)
+	if err != nil || !decision.Granted || decision.Consumed != 1 {
+		t.Fatalf("invalid selection consumed authority: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestExecutor_RepairSelectionMustContainEffectiveWorkBeforeAuthorityIsConsumed(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"repair-budget-review","severity":"warning","description":"budget exhausted","action":"ask-user","category":"repair-budget"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, nil, nil)
+	exec.waiting = true
+	exec.waitingStep = types.StepReview
+	exec.waitingStepResultID = stepResult.ID
+	exec.waitingRoundID = round.ID
+	exec.waitingFindings = findings
+	exec.waitingAutoFixLimit = 1
+
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"repair-budget-review"}); err == nil {
+		t.Fatal("control-plane-only selection unexpectedly authorized")
+	}
+	decision, err := database.ReserveStepRepairWithSelection(stepResult.ID, round.ID, 1, nil)
+	if err != nil || !decision.Granted || decision.Consumed != 1 {
+		t.Fatalf("empty effective selection consumed authority: decision=%+v err=%v", decision, err)
+	}
+}
+
+func TestExecutor_ResumeReplaysAuthorizedRepairWithoutAnotherReservation(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 3); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}],"summary":"one issue"}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	if err := database.ParkStepForApproval(run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 3, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("authorize repair = %+v, %v", decision, err)
+	}
+	run, _ = database.GetRun(run.ID)
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if !sctx.Fixing || !strings.Contains(sctx.PreviousFindings, "review-1") {
+			t.Fatalf("replayed repair context = fixing:%v findings:%s", sctx.Fixing, sctx.PreviousFindings)
+		}
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 3}}, nil, []Step{step}, nil)
+	if err := exec.Resume(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatalf("Resume() error = %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("fixer calls = %d, want 1", calls)
+	}
+}
+
+func TestExecutor_ResumeParksUnresolvedRepairAtReconciliationGate(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	if err := database.ParkStepForApproval(run.ID, stepResult.ID, types.StepStatusAwaitingApproval, 0, 1, &findings); err != nil {
+		t.Fatal(err)
+	}
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("authorize repair = %+v, %v", decision, err)
+	}
+	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := database.RegisterRepairInvocation(stepResult.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.BindRepairInvocationProcess(invocation.ID, "repair process active", 4242); err != nil {
+		t.Fatal(err)
+	}
+	run, _ = database.GetRun(run.ID)
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(*StepContext) (*StepOutcome, error) {
+		calls++
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(context.Background(), run, repo, t.TempDir()) }()
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err == nil {
+		t.Fatal("reconciliation gate accepted approve")
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err == nil {
+		t.Fatal("reconciliation gate replayed a registered process")
+	}
+	if err := exec.Respond(types.StepReview, types.ActionAbort, nil); err != nil {
+		t.Fatalf("abort reconciliation: %v", err)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "aborted by user") {
+			t.Fatalf("Resume() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reconciliation gate remained permanently stalled")
+	}
+	if calls != 0 {
+		t.Fatalf("repair replayed %d times", calls)
+	}
+}
 
 func TestExecutor_ApprovalFix(t *testing.T) {
 	database, p, run, repo := setupTest(t)
@@ -23,7 +244,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				return &StepOutcome{NeedsApproval: true, Findings: `{"issues":["bug"]}`}, nil
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"bug","severity":"error","description":"bug","action":"ask-user"}]}`}, nil
 			}
 			// After fix, re-evaluate passes
 			return &StepOutcome{NeedsApproval: false, ExitCode: 0}, nil
@@ -31,7 +252,7 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	}
 
 	steps := []Step{step, newPassStep(types.StepTest)}
-	exec := NewExecutor(database, p, nil, nil, steps, nil)
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 1}}, nil, steps, nil)
 
 	done := make(chan error, 1)
 	go func() {
@@ -42,7 +263,9 @@ func TestExecutor_ApprovalFix(t *testing.T) {
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 
 	// Send fix action
-	exec.Respond(types.StepReview, types.ActionFix, nil)
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"bug"}); err != nil {
+		t.Fatalf("respond: %v", err)
+	}
 
 	// Wait for step to re-execute and complete (it passes on second call)
 	select {
@@ -132,7 +355,7 @@ func TestExecutor_ResumeRestoresParkedGateAndReviewSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := database.StartStep(stepResult.ID); err != nil {
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 2); err != nil {
 		t.Fatal(err)
 	}
 	initial, err := database.GetStepResult(stepResult.ID)
@@ -357,13 +580,13 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			callCount++
 			if callCount == 1 {
-				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"severity":"error","description":"bug one","action":"auto-fix"},{"severity":"warn","description":"bug two","action":"ask-user"}],"summary":"2 issues"}`}, nil
+				return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"gate-1","severity":"error","description":"bug one","action":"auto-fix"},{"id":"gate-2","severity":"warn","description":"bug two","action":"ask-user"}],"summary":"2 issues"}`}, nil
 			}
 			return &StepOutcome{ExitCode: 0}, nil
 		},
 	}
 
-	exec := NewExecutor(database, p, &config.Config{Agent: types.AgentClaude}, nil, []Step{step}, nil)
+	exec := NewExecutor(database, p, &config.Config{Agent: types.AgentClaude, AutoFix: config.AutoFix{Review: 1}}, nil, []Step{step}, nil)
 
 	done := make(chan error, 1)
 	go func() {
@@ -372,7 +595,7 @@ func TestExecutor_CustomGateTelemetryRedactsLabel(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, stepName, types.StepStatusAwaitingApproval)
 
-	if err := exec.Respond(stepName, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(stepName, types.ActionFix, []string{"gate-1", "gate-2"}); err != nil {
 		t.Fatalf("respond error: %v", err)
 	}
 

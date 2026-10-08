@@ -133,7 +133,7 @@ func newAxiRunCmd() *cobra.Command {
 			"prints it. With --yes it auto-resolves eligible gates (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome.\n" +
-			"Protected-path refusals require an explicit response, even with --yes.\n\n" +
+			"Protected-path refusals and repair-budget exhaustion require an explicit response, even with --yes.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -196,7 +196,7 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome; protected-path refusals require an explicit response")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome; protected-path refusals and repair-budget exhaustion require an explicit response")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
@@ -990,6 +990,14 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 			if !autoApprove {
 				return run, false, nil
 			}
+			if pipeline.HasDaemonShutdownInterruption(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: daemon shutdown interruption requires an explicit response (--action abort); --yes leaves this gate awaiting a response\n", gate.Name)
+				return run, false, nil
+			}
+			if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) || pipeline.HasRepairReconciliation(gate.FindingsJSON) {
+				fmt.Fprintf(progress, "%s: repair authority decision required; --yes leaves this gate awaiting an explicit response\n", gate.Name)
+				return run, false, nil
+			}
 			if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 				fmt.Fprintf(progress, "%s: protected-path refusal requires an explicit response; --yes leaves this gate awaiting a response\n", gate.Name)
 				return run, false, nil
@@ -1228,6 +1236,7 @@ func successReportHelp(fixes []fixRow) []string {
 
 func newAxiRespondCmd() *cobra.Command {
 	var action, step, findings, instructions, addFinding string
+	var finding []string
 	var autoYes bool
 	var wait time.Duration
 
@@ -1253,6 +1262,7 @@ func newAxiRespondCmd() *cobra.Command {
 					action:       action,
 					step:         step,
 					findings:     findings,
+					finding:      finding,
 					instructions: instructions,
 					addFinding:   addFinding,
 					autoYes:      autoYes,
@@ -1261,12 +1271,13 @@ func newAxiRespondCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip (required)")
+	cmd.Flags().StringVar(&action, "action", "", "approve | fix | skip | abort (required)")
 	cmd.Flags().StringVar(&step, "step", "", "step to respond to (default: the step awaiting approval)")
-	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated finding IDs to fix (with --action fix)")
+	cmd.Flags().StringVar(&findings, "findings", "", "comma-separated legacy finding IDs to fix (with --action fix; use --finding for arbitrary IDs)")
+	cmd.Flags().StringArrayVar(&finding, "finding", nil, "exact finding ID to fix; repeat for multiple findings (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path refusals require an explicit response")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path refusals and repair-budget exhaustion require an explicit response")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
@@ -1275,6 +1286,7 @@ type respondArgs struct {
 	action       string
 	step         string
 	findings     string
+	finding      []string
 	instructions string
 	addFinding   string
 	autoYes      bool
@@ -1294,13 +1306,13 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 
 	act := types.ApprovalAction(strings.TrimSpace(ra.action))
 	switch act {
-	case types.ActionApprove, types.ActionFix, types.ActionSkip:
+	case types.ActionApprove, types.ActionFix, types.ActionSkip, types.ActionAbort:
 	case "":
 		return emitError(cmd, 2, "--action is required",
-			"Run `no-mistakes axi respond --action approve|fix|skip`")
+			"Run `no-mistakes axi respond --action approve|fix|skip|abort`")
 	default:
 		return emitError(cmd, 2, fmt.Sprintf("unknown action %q", ra.action),
-			"Valid actions: approve, fix, skip")
+			"Valid actions: approve, fix, skip, abort")
 	}
 
 	env, err := openAxiDaemonEnv()
@@ -1348,14 +1360,33 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		}
 		stepName = types.StepName(gate.Name)
 	}
+	var reconciliation bool
+	var gateFindings string
+	for _, candidate := range rv.Steps {
+		if candidate.Name == string(stepName) {
+			gateFindings = candidate.FindingsJSON
+			reconciliation = pipeline.HasRepairReconciliation(gateFindings)
+			break
+		}
+	}
+	if err := validateGateResponseAction(act, gateFindings); err != nil {
+		return emitError(cmd, 2, err.Error())
+	}
 
-	findingIDs := splitCSV(ra.findings)
+	findingIDs := append([]string(nil), ra.finding...)
+	if ra.findings != "" {
+		legacyIDs, legacyErr := parseLegacyFindingIDs(ra.findings)
+		if legacyErr != nil {
+			return emitError(cmd, 2, legacyErr.Error(), "Use repeatable --finding <exact-id> for arbitrary finding IDs")
+		}
+		findingIDs = append(findingIDs, legacyIDs...)
+	}
 	var instructions map[string]string
 	var added []types.Finding
 
 	if act == types.ActionFix {
-		if len(findingIDs) == 0 && ra.addFinding == "" {
-			return emitError(cmd, 2, "--action fix requires --findings <id,...> or --add-finding <json>",
+		if len(findingIDs) == 0 && ra.addFinding == "" && !reconciliation {
+			return emitError(cmd, 2, "--action fix requires --finding <exact-id>, --findings <legacy-id,...>, or --add-finding <json>",
 				"Run `no-mistakes axi status` to list finding IDs")
 		}
 		if note := strings.TrimSpace(ra.instructions); note != "" && len(findingIDs) > 0 {
@@ -1395,6 +1426,17 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 		return emitError(cmd, 1, fmt.Sprintf("drive run: %v", err))
 	}
 	return renderDriveResult(cmd, final, ciReady)
+}
+
+func validateGateResponseAction(action types.ApprovalAction, findings string) error {
+	shutdownInterruption := pipeline.HasDaemonShutdownInterruption(findings)
+	if shutdownInterruption && action != types.ActionAbort {
+		return fmt.Errorf("daemon shutdown interruption accepts only --action abort")
+	}
+	if action == types.ActionAbort && !shutdownInterruption && !pipeline.HasRepairReconciliation(findings) {
+		return fmt.Errorf("--action abort is only valid at a repair reconciliation or daemon shutdown gate")
+	}
+	return nil
 }
 
 // gateStatusFor returns the current status of step in rv, defaulting to the
@@ -1757,6 +1799,21 @@ func resolveDaemonDownAbortTruth(cmd *cobra.Command, p *paths.Paths, runID strin
 func isExactRunNotFound(err error, runID string) bool {
 	var rpcErr *ipc.RPCError
 	return errors.As(err, &rpcErr) && rpcErr.Message == "run not found: "+runID
+}
+
+func parseLegacyFindingIDs(s string) ([]string, error) {
+	if s == "" {
+		return nil, nil
+	}
+	parts := strings.Split(s, ",")
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		if part == "" || part != strings.TrimSpace(part) {
+			return nil, fmt.Errorf("--findings contains an empty or whitespace-ambiguous legacy ID")
+		}
+		out = append(out, part)
+	}
+	return out, nil
 }
 
 func splitCSV(s string) []string {

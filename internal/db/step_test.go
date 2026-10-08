@@ -172,7 +172,7 @@ func TestStartStep(t *testing.T) {
 	}
 }
 
-func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
+func TestStartStepFixRoundResetsRoundClockAndPreservesLowerLimit(t *testing.T) {
 	d := openTestDB(t)
 	repo, _ := d.InsertRepo("/home/user/project", "git@github.com:user/project.git", "main")
 	run, _ := d.InsertRun(repo.ID, "feature", "abc", "def")
@@ -180,7 +180,10 @@ func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
 
 	const stepStarted = int64(123)
 	const priorAutoFixLimit = 1
-	if _, err := d.sql.Exec(`UPDATE step_results SET started_at = ?, round_started_at = ?, auto_fix_limit = ? WHERE id = ?`, stepStarted, stepStarted, priorAutoFixLimit, step.ID); err != nil {
+	if err := d.StartStepWithAutoFixLimit(step.ID, priorAutoFixLimit); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.sql.Exec(`UPDATE step_results SET started_at = ?, round_started_at = ? WHERE id = ?`, stepStarted, stepStarted, step.ID); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.SetStepOverrideReason(step.ID, "approved over failure"); err != nil {
@@ -202,8 +205,8 @@ func TestStartStepFixRoundResetsRoundClockAndUpdatesLimit(t *testing.T) {
 	if got.RoundStartedAt == nil || *got.RoundStartedAt == stepStarted {
 		t.Errorf("round_started_at = %v, want reset", got.RoundStartedAt)
 	}
-	if got.AutoFixLimit == nil || *got.AutoFixLimit != 2 {
-		t.Errorf("auto-fix limit = %v, want newly configured 2 instead of prior %d", got.AutoFixLimit, priorAutoFixLimit)
+	if got.AutoFixLimit == nil || *got.AutoFixLimit != priorAutoFixLimit {
+		t.Errorf("auto-fix limit = %v, want preserved %d", got.AutoFixLimit, priorAutoFixLimit)
 	}
 	if got.OverrideReason != nil {
 		t.Errorf("override reason = %q, want nil", *got.OverrideReason)

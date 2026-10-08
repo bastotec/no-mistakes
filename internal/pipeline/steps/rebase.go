@@ -204,6 +204,7 @@ func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome,
 			conflictTargets = append(conflictTargets, target)
 			for _, file := range conflictFiles {
 				conflictFindings = append(conflictFindings, Finding{
+					ID:          fmt.Sprintf("rebase-%d", len(conflictFindings)+1),
 					Severity:    "warning",
 					File:        file,
 					Description: fmt.Sprintf("merge conflict %s %s", integrationVerb(merging), target),

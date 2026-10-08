@@ -129,15 +129,38 @@ func (d *DB) GetStepsByRun(runID string) ([]*StepResult, error) {
 }
 
 func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
-	_, err := d.sql.Exec(`
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin reset steps for revalidation: %w", err)
+	}
+	defer tx.Rollback()
+
+	legacyArgs := []any{runID, stepOrder, types.StepStatusPending, types.StepStatusSkipped}
+	legacySteps := `SELECT id FROM step_results
+		WHERE run_id = ? AND step_order >= ? AND status != ? AND status != ?
+			AND auto_fix_limit_provenance = 'legacy_unknown'`
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions
+		SET repair_limit = 0,
+			authority_limit = CASE WHEN authority_limit IS NULL THEN NULL ELSE 0 END
+		WHERE step_result_id IN (`+legacySteps+`)`, legacyArgs...); err != nil {
+		return fmt.Errorf("cap reset step repair budgets: %w", err)
+	}
+	if _, err := tx.Exec(`UPDATE step_results
+		SET auto_fix_limit = 0, auto_fix_limit_provenance = 'initialized'
+		WHERE id IN (`+legacySteps+`)`, legacyArgs...); err != nil {
+		return fmt.Errorf("normalize reset step auto-fix limits: %w", err)
+	}
+	if _, err := tx.Exec(`
 		UPDATE step_results
 		SET status = ?, exit_code = NULL, duration_ms = NULL, log_path = NULL,
 			findings_json = NULL, error = NULL, started_at = NULL,
 			round_started_at = NULL, completed_at = NULL, last_activity_at = NULL, last_activity = NULL,
-			agent_pid = NULL, auto_fix_limit = NULL, override_reason = NULL
-		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped)
-	if err != nil {
+			agent_pid = NULL, override_reason = NULL
+		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped); err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit reset steps for revalidation: %w", err)
 	}
 	return nil
 }
@@ -202,38 +225,173 @@ func (d *DB) ParkStepForApproval(runID, stepID string, status types.StepStatus, 
 	return nil
 }
 
+func (d *DB) ParkStepForDaemonShutdown(runID, stepID, findings string) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin daemon shutdown park: %w", err)
+	}
+	defer tx.Rollback()
+
+	var runStatus types.RunStatus
+	var awaiting sql.NullInt64
+	if err := tx.QueryRow(`SELECT status, awaiting_agent_since FROM runs WHERE id = ?`, runID).Scan(&runStatus, &awaiting); err != nil {
+		return fmt.Errorf("read run for daemon shutdown park: %w", err)
+	}
+	if runStatus != types.RunRunning || awaiting.Valid {
+		return fmt.Errorf("run is not actively executing")
+	}
+
+	var stepStatus types.StepStatus
+	var startedAt sql.NullInt64
+	if err := tx.QueryRow(`SELECT status, started_at FROM step_results WHERE id = ? AND run_id = ?`, stepID, runID).Scan(&stepStatus, &startedAt); err != nil {
+		return fmt.Errorf("read step for daemon shutdown park: %w", err)
+	}
+	if stepStatus != types.StepStatusRunning && stepStatus != types.StepStatusPending {
+		return fmt.Errorf("step is not actively executable")
+	}
+
+	var round int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(round), 0) + 1 FROM step_rounds WHERE step_result_id = ?`, stepID).Scan(&round); err != nil {
+		return fmt.Errorf("read daemon shutdown round: %w", err)
+	}
+	ts := now()
+	durationMS := int64(0)
+	if startedAt.Valid && ts > startedAt.Int64 {
+		durationMS = (ts - startedAt.Int64) * 1000
+	}
+	roundID := newID()
+	if _, err := tx.Exec(`INSERT INTO step_rounds (id, step_result_id, round, trigger_type, findings_json, repair_published, duration_ms, created_at) VALUES (?, ?, ?, 'initial', ?, 0, ?, ?)`, roundID, stepID, round, findings, durationMS, ts); err != nil {
+		return fmt.Errorf("record daemon shutdown round: %w", err)
+	}
+	result, err := tx.Exec(`UPDATE step_results SET status = ?, exit_code = 1, duration_ms = ?, findings_json = ?, started_at = COALESCE(started_at, ?), round_started_at = COALESCE(round_started_at, ?), last_activity_at = ?, last_activity = ?, agent_pid = NULL WHERE id = ? AND status = ?`, types.StepStatusAwaitingApproval, durationMS, findings, ts, ts, ts, "daemon shutdown decision required", stepID, stepStatus)
+	if err != nil {
+		return fmt.Errorf("park step after daemon shutdown: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("park step after daemon shutdown: step changed concurrently")
+	}
+	result, err = tx.Exec(`UPDATE runs SET awaiting_agent_since = ?, updated_at = ? WHERE id = ? AND status = ? AND awaiting_agent_since IS NULL`, ts, ts, runID, types.RunRunning)
+	if err != nil {
+		return fmt.Errorf("park run after daemon shutdown: %w", err)
+	}
+	if changed, err := result.RowsAffected(); err != nil || changed != 1 {
+		return fmt.Errorf("park run after daemon shutdown: run changed concurrently")
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit daemon shutdown park: %w", err)
+	}
+	return nil
+}
+
 // StartStep marks a step as running with a started_at timestamp.
 func (d *DB) StartStep(id string) error {
 	return d.StartStepWithAutoFixLimit(id, 0)
+}
+
+func (d *DB) StartStepWithoutAutoFixPolicy(id string) error {
+	ts := now()
+	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = NULL, auto_fix_limit_provenance = 'unconfigured' WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", id)
+	if err != nil {
+		return fmt.Errorf("start unconfigured step: %w", err)
+	}
+	return nil
 }
 
 // StartStepWithAutoFixLimit marks a step as running and records the effective
 // auto-fix limit that status surfaces use while the step is active.
 func (d *DB) StartStepWithAutoFixLimit(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL, auto_fix_limit = ? WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", autoFixLimitDBValue(autoFixLimit), id)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin start step: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE step_results SET status = ?, started_at = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, agent_pid = NULL,
+		auto_fix_limit = CASE
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' AND status != ? THEN 0
+			WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ?
+			ELSE auto_fix_limit
+		END,
+		auto_fix_limit_provenance = CASE
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' AND status != ? THEN 'legacy_normalized'
+			ELSE 'initialized'
+		END
+		WHERE id = ?`, types.StepStatusRunning, ts, ts, ts, "step started", types.StepStatusPending, autoFixLimit, autoFixLimit, types.StepStatusPending, id)
 	if err != nil {
 		return fmt.Errorf("start step: %w", err)
+	}
+	if err := capRepairBudgetToStepLimit(tx, id); err != nil {
+		return fmt.Errorf("cap start step repair budget: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit start step: %w", err)
 	}
 	return nil
 }
 
 // StartStepFixRound marks the beginning of a distinct fix execution while
-// preserving started_at as the clock for the enclosing step. Recovery can use
-// a newly loaded trusted configuration, so its supplied limit replaces the
-// one recorded by an earlier execution.
+// preserving started_at as the clock for the enclosing step.
 func (d *DB) StartStepFixRound(id string, autoFixLimit int) error {
 	ts := now()
-	_, err := d.sql.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?, auto_fix_limit = ?, override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimitDBValue(autoFixLimit), id)
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin start step fix round: %w", err)
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE step_results SET status = ?, round_started_at = ?, last_activity_at = ?, last_activity = ?,
+		auto_fix_limit = CASE
+			WHEN auto_fix_limit_provenance = 'unconfigured' THEN NULL
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 0
+			WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ?
+			ELSE auto_fix_limit
+		END,
+		auto_fix_limit_provenance = CASE
+			WHEN auto_fix_limit_provenance = 'unconfigured' THEN 'unconfigured'
+			WHEN auto_fix_limit_provenance = 'legacy_unknown' THEN 'legacy_normalized'
+			ELSE 'initialized'
+		END,
+		override_reason = NULL WHERE id = ?`, types.StepStatusFixing, ts, ts, fmt.Sprintf("status: %s", types.StepStatusFixing), autoFixLimit, autoFixLimit, id)
 	if err != nil {
 		return fmt.Errorf("start step fix round: %w", err)
+	}
+	if err := capRepairBudgetToStepLimit(tx, id); err != nil {
+		return fmt.Errorf("cap fix round repair budget: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit start step fix round: %w", err)
 	}
 	return nil
 }
 
+func capRepairBudgetToStepLimit(tx *sql.Tx, id string) error {
+	var limit sql.NullInt64
+	if err := tx.QueryRow(`SELECT auto_fix_limit FROM step_results WHERE id = ?`, id).Scan(&limit); err != nil {
+		return err
+	}
+	if !limit.Valid {
+		return nil
+	}
+	_, err := tx.Exec(`UPDATE repair_budget_decisions
+		SET repair_limit = MIN(repair_limit, ?),
+			authority_limit = CASE WHEN authority_limit IS NULL THEN NULL ELSE MIN(authority_limit, ?) END
+		WHERE step_result_id = ?`, limit.Int64, limit.Int64, id)
+	return err
+}
+
 func (d *DB) SetStepAutoFixLimit(id string, autoFixLimit int) error {
-	if _, err := d.sql.Exec(`UPDATE step_results SET auto_fix_limit = ? WHERE id = ?`, autoFixLimitDBValue(autoFixLimit), id); err != nil {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin set step auto-fix limit: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit = CASE WHEN auto_fix_limit IS NULL OR ? < auto_fix_limit THEN ? ELSE auto_fix_limit END, auto_fix_limit_provenance = 'initialized' WHERE id = ?`, autoFixLimit, autoFixLimit, id); err != nil {
 		return fmt.Errorf("set step auto-fix limit: %w", err)
+	}
+	if err := capRepairBudgetToStepLimit(tx, id); err != nil {
+		return fmt.Errorf("cap step repair budget: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit step auto-fix limit: %w", err)
 	}
 	return nil
 }
@@ -253,13 +411,6 @@ func (d *DB) SetStepOverrideReason(id string, reason string) error {
 		return fmt.Errorf("set step override reason: %w", err)
 	}
 	return nil
-}
-
-func autoFixLimitDBValue(autoFixLimit int) any {
-	if autoFixLimit <= 0 {
-		return nil
-	}
-	return autoFixLimit
 }
 
 // CompleteStep marks a step as completed with timing and result info.

@@ -530,7 +530,31 @@ func (rv runView) automaticSkips() []automaticSkipRow {
 func gateFields(gate stepView) []toon.Field {
 	help := []string{
 		"Run `no-mistakes axi respond --action approve` to accept this step and continue",
-		"Run `no-mistakes axi respond --action fix --findings <ids>` to have the pipeline fix the selected findings (do not edit files yourself)",
+		"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) to have the pipeline fix the selected findings (do not edit files yourself)",
+	}
+	if pipeline.HasDaemonShutdownInterruption(gate.FindingsJSON) {
+		help = []string{
+			"The daemon shut down during this step, so its interrupted result cannot be resumed or trusted.",
+			"Run `no-mistakes axi respond --action abort` to stop the preserved run before starting replacement validation.",
+		}
+	} else if pipeline.HasRepairReconciliation(gate.FindingsJSON) {
+		help = []string{
+			"The daemon restarted during an authorized repair; original approve and skip actions are disabled.",
+			"Run `no-mistakes axi respond --action fix` only to declare that no repair process started and retry the already-authorized repair; this is refused when a process identity was registered.",
+			"Run `no-mistakes axi respond --action abort` to stop the run without replaying the repair.",
+		}
+	} else if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
+		help = []string{
+			"The automatic repair budget is exhausted; --yes leaves this gate awaiting a decision.",
+			"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
+		}
+		if pipeline.RepairBudgetAuthorityAvailable(gate.FindingsJSON) {
+			help = []string{
+				"The automatic repair budget is exhausted; explicit authority remains available for exactly one additional repair, and --yes leaves this gate awaiting a decision.",
+				"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) only after authorizing exactly one additional repair; it does not renew the automatic budget.",
+				"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
+			}
+		}
 	}
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {
 		help = []string{
@@ -538,12 +562,15 @@ func gateFields(gate stepView) []toon.Field {
 			"Have the operator inspect and resolve the reported protected-path edit through the repository's authorized workflow, then run `no-mistakes axi respond --action fix` to retry the refused step, including its commit and publication.",
 		}
 	}
-	return gateFieldsWithHelp(gate, append(help,
-		"Run `no-mistakes axi respond --action skip` to skip this step",
+	tail := []string{
 		fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, "")),
 		"A long-running call is working, not stalled - background it if your harness needs to, but the run never advances past a gate on its own. Read every return; on a `gate:`, respond; loop until an `outcome:`.",
 		preserveGateFixCommitsGuidance,
-	))
+	}
+	if !pipeline.HasRepairReconciliation(gate.FindingsJSON) && !pipeline.HasDaemonShutdownInterruption(gate.FindingsJSON) {
+		tail = append([]string{"Run `no-mistakes axi respond --action skip` to skip this step"}, tail...)
+	}
+	return gateFieldsWithHelp(gate, append(help, tail...))
 }
 
 func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {

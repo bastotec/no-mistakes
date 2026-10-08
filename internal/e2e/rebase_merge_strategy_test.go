@@ -322,8 +322,8 @@ func waitForRebaseConflictGate(t *testing.T, h *Harness, branch string) *ipc.Run
 	if err != nil {
 		t.Fatalf("parse rebase conflict findings: %v", err)
 	}
-	if len(findings.Items) == 0 || !strings.Contains(findings.Items[0].Description, "merging origin/main") {
-		t.Fatalf("conflict finding does not describe a merge: %+v", findings.Items)
+	if len(findings.Items) == 0 || findings.Items[0].ID != "rebase-1" || !strings.Contains(findings.Items[0].Description, "merging origin/main") {
+		t.Fatalf("conflict finding is not selectable or does not describe a merge: %+v", findings.Items)
 	}
 	return run
 }
@@ -336,6 +336,7 @@ func TestRebaseMergeStrategyAgentResolvedConflictPublishesAMergeJourney(t *testi
 	h := NewHarness(t, SetupOpts{
 		Agent:    "claude",
 		Scenario: mergeConflictScenario(t, []string{`"commit", "--no-edit"`}, true),
+		AutoFix:  map[types.StepName]int{types.StepRebase: 1},
 	})
 	commitTrustedRepoConfig(t, h, "rebase:\n  strategy: merge\n")
 	initFromOwnWorktree(t, h, "init-merge-conflict")
@@ -345,7 +346,7 @@ func TestRebaseMergeStrategyAgentResolvedConflictPublishesAMergeJourney(t *testi
 	h.PushToGate(branch)
 
 	run := waitForRebaseConflictGate(t, h, branch)
-	h.Respond(run.ID, types.StepRebase, types.ActionFix)
+	h.RespondToFindings(run.ID, types.StepRebase, types.ActionFix, []string{"rebase-1"})
 
 	completed := h.WaitForRun(branch, 120*time.Second)
 	if completed.Status != types.RunCompleted {
@@ -382,6 +383,7 @@ func TestRebaseMergeStrategyRejectsAResolutionThatDidNotMergeJourney(t *testing.
 	h := NewHarness(t, SetupOpts{
 		Agent:    "claude",
 		Scenario: mergeConflictScenario(t, []string{`"merge", "--abort"`, `"reset", "--hard", "origin/main"`}, false),
+		AutoFix:  map[types.StepName]int{types.StepRebase: 1},
 	})
 	commitTrustedRepoConfig(t, h, "rebase:\n  strategy: merge\n")
 	initFromOwnWorktree(t, h, "init-merge-rejected")
@@ -391,7 +393,7 @@ func TestRebaseMergeStrategyRejectsAResolutionThatDidNotMergeJourney(t *testing.
 	h.PushToGate(branch)
 
 	run := waitForRebaseConflictGate(t, h, branch)
-	h.Respond(run.ID, types.StepRebase, types.ActionFix)
+	h.RespondToFindings(run.ID, types.StepRebase, types.ActionFix, []string{"rebase-1"})
 
 	failed := h.WaitForRun(branch, 120*time.Second)
 	if failed.Status != types.RunFailed {
@@ -437,6 +439,7 @@ func TestRebaseMergeStrategyRejectsAnUnconcludedMergeJourney(t *testing.T) {
 	h := NewHarness(t, SetupOpts{
 		Agent:    "claude",
 		Scenario: mergeConflictScenario(t, nil, true),
+		AutoFix:  map[types.StepName]int{types.StepRebase: 1},
 	})
 	commitTrustedRepoConfig(t, h, "rebase:\n  strategy: merge\n")
 	initFromOwnWorktree(t, h, "init-merge-unconcluded")
@@ -446,7 +449,7 @@ func TestRebaseMergeStrategyRejectsAnUnconcludedMergeJourney(t *testing.T) {
 	h.PushToGate(branch)
 
 	run := waitForRebaseConflictGate(t, h, branch)
-	h.Respond(run.ID, types.StepRebase, types.ActionFix)
+	h.RespondToFindings(run.ID, types.StepRebase, types.ActionFix, []string{"rebase-1"})
 
 	failed := h.WaitForRun(branch, 120*time.Second)
 	if failed.Status != types.RunFailed {

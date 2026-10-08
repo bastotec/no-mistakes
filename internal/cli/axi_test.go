@@ -377,6 +377,69 @@ func TestWriteGateShape(t *testing.T) {
 	}
 }
 
+func TestRepairBudgetGateHelpExposesOneExplicitRepair(t *testing.T) {
+	gate := stepView{
+		Name:   "ci",
+		Status: "fix_review",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "repair-budget-ci", Severity: "warning", Action: types.ActionAskUser, Category: "repair-budget", Description: "automatic budget exhausted at zero"},
+		}, "repair authority required"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{
+		"automatic repair budget is exhausted",
+		"explicit authority remains available for exactly one additional repair",
+		"--action fix --finding <exact-id>",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("repair-budget gate missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestRepairBudgetGateHelpHidesFixAtHardCeiling(t *testing.T) {
+	gate := stepView{
+		Name:   "ci",
+		Status: "fix_review",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "repair-budget-ci", Severity: "warning", Action: types.ActionAskUser, Category: "repair-budget-hard-ceiling", Description: "configured ceiling reached"},
+		}, "repair ceiling reached"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{
+		"automatic repair budget is exhausted",
+		"--action approve",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("hard-ceiling gate missing %q:\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{"explicit authority remains available", "--action fix"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("hard-ceiling gate advertised unavailable repair %q:\n%s", absent, out)
+		}
+	}
+}
+
+func TestDaemonShutdownGateHelpExposesOnlyAbort(t *testing.T) {
+	gate := stepView{
+		Name:         "review",
+		Status:       "awaiting_approval",
+		FindingsJSON: pipeline.DaemonShutdownFindings(types.StepReview),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{"cannot be resumed or trusted", "axi respond --action abort", "starting replacement validation"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("daemon-shutdown gate missing %q:\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{"--action approve", "--action fix", "--action skip"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("daemon-shutdown gate advertised invalid response %q:\n%s", absent, out)
+		}
+	}
+}
+
 func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
 	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {
@@ -400,7 +463,7 @@ func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 			{
 				name:     "ordinary",
 				findings: findingsJSON(t, []types.Finding{{ID: "doc-1", Action: types.ActionAskUser, Description: "clarify documentation"}}, "Documentation decision"),
-				want:     []string{"no-mistakes axi respond --action approve", "--action fix --findings <ids>", "do not edit files yourself"},
+				want:     []string{"no-mistakes axi respond --action approve", "--action fix --finding <exact-id>", "do not edit files yourself"},
 				absent:   []string{"protected-path", "Approve is rejected"},
 			},
 		} {
