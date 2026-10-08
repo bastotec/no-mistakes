@@ -794,8 +794,16 @@ func TestExecutor_AutoFixRecordsSelectedFindingIDs(t *testing.T) {
 	}
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
-	if err := exec.Execute(context.Background(), run, repo, workDir); err != nil {
-		t.Fatalf("execute: %v", err)
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(context.Background(), run, repo, workDir) }()
+	approveDeferredReviewGate(t, database, run.ID, exec)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("execute: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("executor did not finish after approving the deferred finding")
 	}
 
 	dbSteps, err := database.GetStepsByRun(run.ID)
