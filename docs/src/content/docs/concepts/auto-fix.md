@@ -30,7 +30,7 @@ flowchart TD
    - If issues remain, the step pauses for user approval
    - If everything passes, the step completes and the pipeline moves on
 
-The ceiling counts every started follow-up repair, including user-triggered repairs and repairs that return no changes. Authorization is reserved durably before a fixer starts; revalidation, repeated observations, and daemon recovery do not reset the allowance. A fix response narrows unattended authority to exactly one additional repair, bounded by the configured maximum. If that repair still finds auto-fixable work, the step pauses for another explicit response instead of spending the remaining configured headroom. Each later response extends authority by one, while a purely automatic sequence can use the full configured limit. AXI `--yes` and TUI yolo mode leave budget-exhaustion gates awaiting an explicit decision. Existing over-limit round history is retained, not reset, and already-started repairs are not cancelled retroactively.
+The ceiling counts every started follow-up repair, including user-triggered repairs and repairs that return no changes. Authorization is reserved durably before a fixer starts; revalidation, repeated observations, and daemon recovery do not reset the allowance. For a configured core step, a fix response narrows unattended authority to exactly one additional repair without exceeding the configured maximum. If that repair still finds auto-fixable work, the step pauses for another explicit response instead of spending the remaining configured headroom. Each later response extends authority by one, while a purely automatic sequence can use the full configured limit. Repository-declared custom gates have no automatic allowance; an explicit response authorizes one repair at a time. AXI `--yes` and TUI yolo mode leave budget-exhaustion gates awaiting an explicit decision. Existing over-limit round history is retained, not reset, and already-started repairs are not cancelled retroactively.
 
 The document step applies fixes during its initial pass instead of relying on a follow-up automatic fix loop.
 When `commands.lint` is empty, that same invocation is a combined documentation-and-lint housekeeping pass: it updates documentation, detects relevant linters and formatters, applies safe fixes, verifies both duties, and categorizes any unresolved findings for the document or lint gate.
@@ -57,7 +57,7 @@ Nothing that survives a rerun falls into the agent loop either. A check the prov
 ## Configuration
 
 Per-step attempt limits come from the `auto_fix` config object; the [`auto_fix` field reference](/no-mistakes/reference/global-config/#auto_fix) owns the defaults, per-step meanings, and the legacy alias.
-Setting a step to `0` disables the follow-up auto-fix loop, so the pipeline pauses for human input when that step finds issues; `auto_fix.review` defaults to `0`, so review findings require manual approval unless you opt in.
+Setting a core step to `0` disables both automatic and user-triggered follow-up repairs, so the pipeline pauses for approval, skip, or abort when that step finds issues; `auto_fix.review` defaults to `0`, so review findings cannot be repaired unless you opt in. Repository-declared custom gates are different: they have no automatic allowance, but each explicit fix response can authorize one repair.
 Repo config overlays global config field by field - you can set `auto_fix.lint: 5` in a repo's `.no-mistakes.yaml` to override just that step while inheriting the rest from global.
 
 ## Finding actions
@@ -93,7 +93,7 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
 The current step's part of that history also includes one-line summaries from earlier fix commits.
 
-After a user-triggered fix, the step re-runs. It completes if the check passes, or pauses again with the new results in `fix_review` status. A manual Review fix that selects only part of its gate also keeps the omitted findings pending; the [Review reference](/no-mistakes/reference/pipeline-steps/#review) owns that subset-selection rule. You can then approve, fix again, skip, or abort, subject to the [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths).
+After a user-triggered fix, the step re-runs. It completes if the check passes, or pauses again with the new results in `fix_review` status. A manual Review fix that selects only part of its gate also keeps the omitted findings pending; the [Review reference](/no-mistakes/reference/pipeline-steps/#review) owns that subset-selection rule. You can then approve, skip, or abort. Another fix requires another explicit response and remaining authority under the configured ceiling; repository-declared custom gates require a separate response for every repair. The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) can further restrict those choices.
 
 ## Fix commits
 
