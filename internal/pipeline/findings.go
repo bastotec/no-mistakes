@@ -149,6 +149,42 @@ func mergeFindingsJSON(existingRaw, additionalRaw string) string {
 	return mergedRaw
 }
 
+func removeMatchingReviewHeldFindingsJSON(existingRaw, heldRaw string) string {
+	unmatchedRaw := removeMatchingFindingsJSON(existingRaw, heldRaw)
+	if unmatchedRaw == "" {
+		return ""
+	}
+	unmatched, err := types.ParseFindingsJSON(unmatchedRaw)
+	if err != nil {
+		return unmatchedRaw
+	}
+	held, err := types.ParseFindingsJSON(heldRaw)
+	if err != nil {
+		return unmatchedRaw
+	}
+	heldIDs := make(map[string]bool, len(held.Items))
+	for _, item := range held.Items {
+		if item.ID != "" {
+			heldIDs[item.ID] = true
+		}
+	}
+	filtered := types.FindingsMetadata(unmatched)
+	for _, item := range unmatched.Items {
+		if item.ID != "" && heldIDs[item.ID] {
+			continue
+		}
+		filtered.Items = append(filtered.Items, item)
+	}
+	if len(filtered.Items) == 0 {
+		return ""
+	}
+	filteredRaw, err := types.MarshalFindingsJSON(filtered)
+	if err != nil {
+		return unmatchedRaw
+	}
+	return filteredRaw
+}
+
 func removeMatchingFindingsJSON(existingRaw, removeRaw string) string {
 	if existingRaw == "" || removeRaw == "" {
 		return existingRaw

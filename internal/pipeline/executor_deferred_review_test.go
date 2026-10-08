@@ -10,13 +10,15 @@ import (
 
 func TestExecutor_ReviewPartialResponsePreservesDeferredFinding(t *testing.T) {
 	for _, tc := range []struct {
-		name       string
-		single     bool
-		rereported bool
+		name           string
+		single         bool
+		rereported     bool
+		sameIDReworded bool
 	}{
 		{name: "multi-finding"},
 		{name: "single-held-with-added-repair", single: true},
 		{name: "rereported-held-finding", rereported: true},
+		{name: "rereported-held-finding-with-same-id", rereported: true, sameIDReworded: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			database, p, run, repo := setupTest(t)
@@ -38,7 +40,11 @@ func TestExecutor_ReviewPartialResponsePreservesDeferredFinding(t *testing.T) {
 				}
 				if calls == 2 && tc.rereported {
 					duplicate := held
-					duplicate.ID = "fresh-review-id"
+					if tc.sameIDReworded {
+						duplicate.Description = "freshly worded authorized follow-up"
+					} else {
+						duplicate.ID = "fresh-review-id"
+					}
 					duplicate.Action = types.ActionAskUser
 					duplicate.UserInstructions = ""
 					reported, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{duplicate}})
