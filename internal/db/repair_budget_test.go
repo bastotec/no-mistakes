@@ -23,14 +23,18 @@ func TestAutomaticRepairReservationIsRecoverableUntilCompletion(t *testing.T) {
 		t.Fatal(err)
 	}
 	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 1)
-	decision, err := d.ReserveStepRepair(step.ID, round.ID, 1, false)
+	decision, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil)
 	if err != nil || !decision.Granted {
 		t.Fatalf("ReserveStepRepair() = %+v, %v", decision, err)
 	}
 	if recoverable, err := d.HasRecoverableRepairDispatch(run.ID); err != nil || !recoverable {
 		t.Fatalf("reserved automatic repair is not recoverable: %v, %v", recoverable, err)
 	}
-	if err := d.BindStepRepairProcess(step.ID, round.ID, "repair process active", 4242); err != nil {
+	invocation, err := d.RegisterRepairInvocation(step.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.BindRepairInvocationProcess(invocation.ID, "repair process active", 4242); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.CompleteStepRepair(step.ID, round.ID); err != nil {
@@ -118,7 +122,11 @@ func TestStartedRepairRecoveryStaysFixingWithoutRedispatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	pid := 4242
-	if err := d.BindStepRepairProcess(step.ID, round.ID, "repair process active", pid); err != nil {
+	invocation, err := d.RegisterRepairInvocation(step.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.BindRepairInvocationProcess(invocation.ID, "repair process active", pid); err != nil {
 		t.Fatal(err)
 	}
 	state, err := d.RestoreLegacyRepairAuthorization(step.ID, round.ID)
@@ -150,7 +158,7 @@ func TestMissingUnstartedWrapperReturnsToPreparedAuthorization(t *testing.T) {
 		t.Fatal(err)
 	}
 	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-	if decision, err := d.ReserveStepRepair(step.ID, round.ID, 1, false); err != nil || !decision.Granted {
+	if decision, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil); err != nil || !decision.Granted {
 		t.Fatalf("reserve repair = %+v, %v", decision, err)
 	}
 	invocationID, err := d.RepairInvocationForRound(step.ID, round.ID)
@@ -230,7 +238,7 @@ func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) 
 				t.Fatal(err)
 			}
 			observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-			got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+			got, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
 			if err != nil || got.Granted != tc.grant || got.Limit != tc.limit || got.AuthorityLimit != tc.limit {
 				t.Fatalf("reservation ignored persisted lifecycle limit: %+v %v", got, err)
 			}
@@ -271,12 +279,12 @@ func TestRepairBudgetRevalidationPreservesReviewLifecycleLimit(t *testing.T) {
 		t.Fatalf("review lifecycle limit after revalidation = %v, want 1", got.AutoFixLimit)
 	}
 	observation, _ := d.InsertStepRound(review.ID, 1, "initial", nil, nil, 0)
-	first, err := d.ReserveStepRepair(review.ID, observation.ID, 3, false)
+	first, err := d.ReserveStepRepairWithSelection(review.ID, observation.ID, 3, nil)
 	if err != nil || !first.Granted || first.Limit != 1 {
 		t.Fatalf("first reservation after revalidation = %+v, %v", first, err)
 	}
 	next, _ := d.InsertStepRound(review.ID, 2, "auto_fix", nil, nil, 0)
-	denied, err := d.ReserveStepRepair(review.ID, next.ID, 3, false)
+	denied, err := d.ReserveStepRepairWithSelection(review.ID, next.ID, 3, nil)
 	if err != nil || denied.Granted || denied.Limit != 1 || denied.Consumed != 1 {
 		t.Fatalf("repeated reservation widened lifecycle limit: %+v, %v", denied, err)
 	}
@@ -349,7 +357,7 @@ func TestRepairBudgetResetNormalizesLegacyExecutedSteps(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			denied, err := d.ReserveStepRepair(step.ID, next.ID, 3, true)
+			denied, err := d.AuthorizeStepRepair(step.ID, next.ID, 3, nil, nil)
 			if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 {
 				t.Fatalf("reset legacy step regained authority: %+v, %v", denied, err)
 			}
@@ -377,7 +385,7 @@ func TestRepairBudgetResetLeavesNeverStartedLegacyStepUninitialized(t *testing.T
 		t.Fatalf("never-started step provenance = %q, %v", provenance, err)
 	}
 	observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-	granted, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	granted, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || !granted.Granted || granted.Limit != 3 {
 		t.Fatalf("never-started step did not adopt configured limit: %+v, %v", granted, err)
 	}
@@ -397,20 +405,20 @@ func TestRepairBudgetLoweredLimitCannotBeRestoredByExhaustedDecision(t *testing.
 			trigger = "initial"
 		}
 		observation, _ := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
-		got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+		got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 		if err != nil || !got.Granted {
 			t.Fatalf("reserve repair %d: %+v %v", n, got, err)
 		}
 	}
 	observation, _ := d.InsertStepRound(step.ID, 4, "auto_fix", nil, nil, 0)
-	if got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false); err != nil || got.Granted {
+	if got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil); err != nil || got.Granted {
 		t.Fatalf("expected exhaustion decision: %+v %v", got, err)
 	}
-	lowered, err := d.ReserveStepRepair(step.ID, observation.ID, 1, true)
+	lowered, err := d.AuthorizeStepRepair(step.ID, observation.ID, 1, nil, nil)
 	if err != nil || lowered.Granted || lowered.Limit != 1 || lowered.AuthorityLimit != 1 {
 		t.Fatalf("exhausted decision restored larger limit: %+v %v", lowered, err)
 	}
-	retried, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	retried, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
 	if err != nil || retried.Granted || retried.Limit != 1 || retried.AuthorityLimit != 1 {
 		t.Fatalf("retry widened lowered limit: %+v %v", retried, err)
 	}
@@ -430,12 +438,12 @@ func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	first, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
 	if err != nil || !first.Granted || first.Consumed != 1 || first.AuthorityLimit != 1 || first.Limit != 3 {
 		t.Fatalf("first response did not pin one repair: %+v %v", first, err)
 	}
 	next, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
-	denied, err := d.ReserveStepRepair(step.ID, next.ID, 3, false)
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, next.ID, 3, nil)
 	if err != nil || denied.Granted || denied.Consumed != 1 || denied.AuthorityLimit != 1 || denied.Limit != 3 {
 		t.Fatalf("automatic repair exceeded response authority: %+v %v", denied, err)
 	}
@@ -451,7 +459,7 @@ func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			got, err := d.ReserveStepRepair(step.ID, next.ID, 3, true)
+			got, err := d.AuthorizeStepRepair(step.ID, next.ID, 3, nil, nil)
 			if err != nil {
 				t.Error(err)
 				return
@@ -466,7 +474,7 @@ func TestRepairBudgetResponsePinsAndExtendsAuthority(t *testing.T) {
 		t.Fatalf("later response launched %d repairs, want one", grants.Load())
 	}
 	afterGrant, _ := d.InsertStepRound(step.ID, 3, "auto_fix", nil, nil, 0)
-	got, err := d.ReserveStepRepair(step.ID, afterGrant.ID, 100, false)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, afterGrant.ID, 100, nil)
 	if err != nil || got.Granted || got.Consumed != 2 || got.AuthorityLimit != 2 || got.Limit != 3 {
 		t.Fatalf("retry or config reload widened response authority: %+v %v", got, err)
 	}
@@ -501,7 +509,7 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.ExplicitRepairAvailable {
 		t.Fatalf("legacy NULL gained repair authority: %+v %v", denied, err)
 	}
@@ -518,7 +526,7 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	retried, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	retried, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || retried.Granted || retried.ExplicitRepairAvailable {
 		t.Fatalf("legacy zero advertised repair authority: %+v %v", retried, err)
 	}
@@ -553,7 +561,7 @@ func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	firstRound, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-	first, err := d.ReserveStepRepair(step.ID, firstRound.ID, 3, false)
+	first, err := d.ReserveStepRepairWithSelection(step.ID, firstRound.ID, 3, nil)
 	if err != nil || !first.Granted {
 		t.Fatalf("initial reservation: %+v %v", first, err)
 	}
@@ -561,7 +569,7 @@ func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
-	denied, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+	denied, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
 	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.Consumed != 1 {
 		t.Fatalf("initialized zero reopened prior authority: %+v %v", denied, err)
 	}
@@ -584,7 +592,7 @@ func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
 	}
 	defer d.Close()
 	for range 2 {
-		retried, err := d.ReserveStepRepair(step.ID, observation.ID, 3, true)
+		retried, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
 		if err != nil || retried.Granted || retried.Limit != 0 || retried.AuthorityLimit != 0 || retried.Consumed != 1 {
 			t.Fatalf("resume or retry reopened initialized zero: %+v %v", retried, err)
 		}
@@ -624,7 +632,7 @@ func TestRepairBudgetLegacyOverCeilingSurvivesMigration(t *testing.T) {
 		t.Fatalf("legacy records lost: %v %v", rounds, err)
 	}
 	last := rounds[4]
-	got, err := d.ReserveStepRepair(step.ID, last.ID, 3, false)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, last.ID, 3, nil)
 	if err != nil || got.Granted || got.Consumed != 4 {
 		t.Fatalf("legacy overrun granted: %+v %v", got, err)
 	}
@@ -634,7 +642,7 @@ func TestRepairBudgetLegacyOverCeilingSurvivesMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	got, err = d.ReserveStepRepair(step.ID, last.ID, 100, false)
+	got, err = d.ReserveStepRepairWithSelection(step.ID, last.ID, 100, nil)
 	if err != nil || got.Granted || got.Consumed != 4 || got.Limit != 3 {
 		t.Fatalf("restart minted authority: %+v %v", got, err)
 	}
@@ -660,13 +668,13 @@ func TestRepairBudgetAutomaticSequenceUsesConfiguredLimit(t *testing.T) {
 			trigger = "initial"
 		}
 		observation, _ := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
-		got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+		got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 		if err != nil || !got.Granted || got.Consumed != n || got.AuthorityLimit != 3 {
 			t.Fatalf("automatic repair %d: %+v %v", n, got, err)
 		}
 	}
 	observation, _ := d.InsertStepRound(step.ID, 4, "auto_fix", nil, nil, 0)
-	got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || got.Granted || got.Consumed != 3 {
 		t.Fatalf("automatic sequence exceeded configured limit: %+v %v", got, err)
 	}
@@ -680,11 +688,11 @@ func TestRepairBudgetOneRemainingLaunchesTwoOfThree(t *testing.T) {
 	// The sole counterfactual is consumed=1 instead of consumed=3.
 	d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
 	observation, _ := d.InsertStepRound(step.ID, 2, "user_fix", nil, nil, 0)
-	got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || !got.Granted || got.Consumed != 2 || got.Limit != 3 {
 		t.Fatalf("2/3 repair refused: %+v %v", got, err)
 	}
-	retry, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	retry, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || retry.Granted || !retry.Duplicate {
 		t.Fatalf("retry launched duplicate: %+v %v", retry, err)
 	}
@@ -699,7 +707,7 @@ func TestUnconfiguredRepairPolicyRequiresOneExplicitGrantPerRepair(t *testing.T)
 		t.Fatal(err)
 	}
 	first, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-	denied, err := d.ReserveStepRepair(step.ID, first.ID, 0, false)
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, first.ID, 0, nil)
 	if err != nil || denied.Granted || !denied.ExplicitRepairAvailable || denied.PolicyConfigured {
 		t.Fatalf("unconfigured automatic decision = %+v, %v", denied, err)
 	}
@@ -709,7 +717,7 @@ func TestUnconfiguredRepairPolicyRequiresOneExplicitGrantPerRepair(t *testing.T)
 		t.Fatalf("first explicit grant = %+v, %v", granted, err)
 	}
 	next, _ := d.InsertStepRound(step.ID, 2, "user_fix", nil, nil, 0)
-	automatic, err := d.ReserveStepRepair(step.ID, next.ID, 0, false)
+	automatic, err := d.ReserveStepRepairWithSelection(step.ID, next.ID, 0, nil)
 	if err != nil || automatic.Granted || automatic.Consumed != 1 || automatic.AuthorityLimit != 1 {
 		t.Fatalf("unconfigured gate auto-looped = %+v, %v", automatic, err)
 	}
@@ -724,7 +732,7 @@ func TestConsumedRepairPayloadCleanupIsDurableAndRemovesFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	round, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-	decision, err := d.ReserveStepRepair(step.ID, round.ID, 1, false)
+	decision, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil)
 	if err != nil || !decision.Granted {
 		t.Fatalf("reserve repair: %+v, %v", decision, err)
 	}
@@ -782,7 +790,7 @@ func TestRepairBudgetInterruptedLegacySelectionsRemainConsumed(t *testing.T) {
 	// Recovery re-observes checks without a completed fixer result. Each pending
 	// selection still represents spent authority; an initial trigger is no reset.
 	observation, _ := d.InsertStepRound(step.ID, 4, "initial", nil, nil, 0)
-	got, err := d.ReserveStepRepair(step.ID, observation.ID, 3, false)
+	got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || got.Granted || got.Consumed != 3 {
 		t.Fatalf("interrupted authority discarded: %+v %v", got, err)
 	}

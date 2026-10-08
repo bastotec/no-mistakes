@@ -133,8 +133,7 @@ func (p *Paths) CLILog() string { return filepath.Join(p.root, "logs", "cli.log"
 // ServerPIDsDir holds PID-tracking files for managed agent servers
 // (opencode, rovodev) so a freshly started daemon can reap orphans left
 // behind by a crashed predecessor.
-func (p *Paths) ServerPIDsDir() string        { return filepath.Join(p.root, "servers") }
-func (p *Paths) RepairInvocationsDir() string { return filepath.Join(p.root, "repair-invocations") }
+func (p *Paths) ServerPIDsDir() string { return filepath.Join(p.root, "servers") }
 
 // EnsureDirs creates all required directories under root.
 func (p *Paths) EnsureDirs() error {

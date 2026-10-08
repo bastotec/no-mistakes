@@ -397,6 +397,30 @@ func TestRepairBudgetGateHelpExposesOneExplicitRepair(t *testing.T) {
 	}
 }
 
+func TestRepairBudgetGateHelpHidesFixAtHardCeiling(t *testing.T) {
+	gate := stepView{
+		Name:   "ci",
+		Status: "fix_review",
+		FindingsJSON: findingsJSON(t, []types.Finding{
+			{ID: "repair-budget-ci", Severity: "warning", Action: types.ActionAskUser, Category: "repair-budget-hard-ceiling", Description: "configured ceiling reached"},
+		}, "repair ceiling reached"),
+	}
+	out := axiDoc(gateFields(gate)...)
+	for _, want := range []string{
+		"automatic repair budget is exhausted",
+		"--action approve",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("hard-ceiling gate missing %q:\n%s", want, out)
+		}
+	}
+	for _, absent := range []string{"explicit authority remains available", "--action fix"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("hard-ceiling gate advertised unavailable repair %q:\n%s", absent, out)
+		}
+	}
+}
+
 func TestRenderDriveResult_ProtectedPathGateHelp(t *testing.T) {
 	refusal := pipeline.ProtectedPathOutcome(&pipeline.ProtectedPathError{Path: "package.lock", Rule: "*.lock"})
 	for _, status := range []types.StepStatus{types.StepStatusAwaitingApproval, types.StepStatusFixReview} {

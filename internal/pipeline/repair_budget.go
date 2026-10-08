@@ -8,13 +8,27 @@ import (
 )
 
 const (
-	repairBudgetFindingCategory         = "repair-budget"
-	repairReconciliationFindingCategory = "repair-reconciliation"
+	repairBudgetFindingCategory            = "repair-budget"
+	repairBudgetHardCeilingFindingCategory = "repair-budget-hard-ceiling"
+	repairReconciliationFindingCategory    = "repair-reconciliation"
 )
 
 // HasRepairBudgetExhaustion identifies a control-plane gate that unattended
 // drivers must not turn into new repair authority or a silent clean pass.
 func HasRepairBudgetExhaustion(raw string) bool {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false
+	}
+	for _, item := range findings.Items {
+		if item.Category == repairBudgetFindingCategory || item.Category == repairBudgetHardCeilingFindingCategory {
+			return true
+		}
+	}
+	return false
+}
+
+func RepairBudgetAuthorityAvailable(raw string) bool {
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil {
 		return false
@@ -45,9 +59,10 @@ func exhaustedRepairFindings(raw string, step types.StepName, runID string, deci
 	if err != nil {
 		return raw
 	} // Caller already normalized the payload.
-	category := repairBudgetFindingCategory
+	category := repairBudgetHardCeilingFindingCategory
 	description := fmt.Sprintf("Automatic repair budget exhausted for %s: consumed %d repairs, current authority limit %d, configured automatic maximum %d. No further repair is authorized by the configured ceiling; approve or abort after reviewing the remaining findings (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, runID)
 	if decision.ExplicitRepairAvailable {
+		category = repairBudgetFindingCategory
 		if decision.PolicyConfigured {
 			description = fmt.Sprintf("Automatic repair authority exhausted for %s: consumed %d repairs, current authority limit %d, configured automatic maximum %d; requested additional repair %d. No further automatic repair is authorized. An explicit response can authorize exactly one selected repair without increasing the automatic ceiling; run `no-mistakes axi status` from this run's branch for version-matched response guidance (run %s).", step, decision.Consumed, decision.AuthorityLimit, decision.Limit, decision.Consumed+1, runID)
 		} else {

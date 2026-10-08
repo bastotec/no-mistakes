@@ -62,6 +62,9 @@ func TestExecutor_NoOpAutoFixStopsSpendingAttempts(t *testing.T) {
 		t.Fatalf("step log does not say the auto-fix made no changes:\n%s", logData)
 	}
 
+	if err := exec.Respond(types.StepTest, types.ActionFix, nil); err == nil {
+		t.Fatal("no-op auto-fix gate authorized another repair")
+	}
 	if err := exec.Respond(types.StepTest, types.ActionApprove, nil); err != nil {
 		t.Fatalf("approve: %v", err)
 	}

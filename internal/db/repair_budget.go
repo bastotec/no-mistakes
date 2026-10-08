@@ -20,23 +20,20 @@ type RepairBudgetDecision struct {
 	Duplicate               bool
 }
 
-// ReserveStepRepair is the single authorization boundary for all fix launches.
-// The round whose findings prompted repair is the idempotency key. Reservations
-// count before agents/custody mutation, even if execution never returns a round.
-// Legacy completed rounds and pending selections are conservatively retained.
-func (d *DB) ReserveStepRepair(stepID, roundID string, limit int, explicit bool) (RepairBudgetDecision, error) {
-	return d.reserveStepRepair(stepID, roundID, limit, explicit, false, nil, nil)
-}
-
+// ReserveStepRepairWithSelection is the single authorization boundary for
+// automatic fix launches. The round whose findings prompted repair is the
+// idempotency key. Reservations count before agents/custody mutation, even if
+// execution never returns a round. Legacy completed rounds and pending
+// selections are conservatively retained.
 func (d *DB) ReserveStepRepairWithSelection(stepID, roundID string, limit int, selectedFindingIDs *string) (RepairBudgetDecision, error) {
-	return d.reserveStepRepair(stepID, roundID, limit, false, false, selectedFindingIDs, nil)
+	return d.reserveStepRepair(stepID, roundID, limit, false, selectedFindingIDs, nil)
 }
 
 func (d *DB) AuthorizeStepRepair(stepID, roundID string, limit int, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
-	return d.reserveStepRepair(stepID, roundID, limit, true, true, selectedFindingIDs, userFindingsJSON)
+	return d.reserveStepRepair(stepID, roundID, limit, true, selectedFindingIDs, userFindingsJSON)
 }
 
-func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, replayAuthorization bool, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
+func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit bool, selectedFindingIDs, userFindingsJSON *string) (RepairBudgetDecision, error) {
 	result := RepairBudgetDecision{Limit: limit, AuthorityLimit: limit}
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -120,7 +117,6 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit, repl
 		}
 		if source != "exhausted" {
 			result.Duplicate = true
-			result.Granted = replayAuthorization && explicit && source == RoundSelectionSourceUser && dispatchState.Valid && dispatchState.String == "fix_authorized"
 			return result, nil
 		}
 		if !explicit {
@@ -275,12 +271,22 @@ func (d *DB) ClaimStepRepair(stepID, roundID string) error {
 	return tx.Commit()
 }
 
-func (d *DB) BindStepRepairProcess(stepID, roundID, activity string, pid int) error {
-	invocation, err := d.RegisterRepairInvocation(stepID, roundID, 0, "", "", "", pid)
+func (d *DB) ExhaustStepRepairBudget(stepID, roundID string) (RepairBudgetDecision, error) {
+	result := RepairBudgetDecision{PolicyConfigured: true}
+	tx, err := d.sql.Begin()
 	if err != nil {
-		return err
+		return result, err
 	}
-	return d.BindRepairInvocationProcess(invocation.ID, activity, pid)
+	defer tx.Rollback()
+	if err := tx.QueryRow(`SELECT consumed FROM repair_budget_decisions WHERE step_result_id = ? AND round_id = ? AND source != 'exhausted'`, stepID, roundID).Scan(&result.Consumed); err != nil {
+		return result, err
+	}
+	result.Limit = result.Consumed
+	result.AuthorityLimit = result.Consumed
+	if _, err := tx.Exec(`UPDATE repair_budget_decisions SET repair_limit = MIN(repair_limit, ?), authority_limit = ? WHERE step_result_id = ?`, result.Consumed, result.Consumed, stepID); err != nil {
+		return result, err
+	}
+	return result, tx.Commit()
 }
 
 func (d *DB) CompleteStepRepair(stepID, roundID string) error {
@@ -332,30 +338,6 @@ func (d *DB) RetryUnstartedStepRepair(stepID, roundID string) error {
 		return err
 	}
 	return tx.Commit()
-}
-
-func (d *DB) StepRepairBudgetStatus(stepID string, configuredLimit int) (RepairBudgetDecision, error) {
-	result := RepairBudgetDecision{Limit: configuredLimit, AuthorityLimit: configuredLimit}
-	var stepLimit sql.NullInt64
-	var provenance string
-	if err := d.sql.QueryRow(`SELECT auto_fix_limit, auto_fix_limit_provenance FROM step_results WHERE id = ?`, stepID).Scan(&stepLimit, &provenance); err != nil {
-		return result, err
-	}
-	result.PolicyConfigured = provenance != "unconfigured"
-	if stepLimit.Valid {
-		result.Limit = min(result.Limit, int(stepLimit.Int64))
-		result.AuthorityLimit = result.Limit
-	}
-	var reserved, completed int
-	if err := d.sql.QueryRow(`SELECT COALESCE(MAX(consumed), 0) FROM repair_budget_decisions WHERE step_result_id = ? AND source != 'exhausted'`, stepID).Scan(&reserved); err != nil {
-		return result, err
-	}
-	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM step_rounds WHERE step_result_id = ? AND trigger_type IN ('auto_fix', 'user_fix')`, stepID).Scan(&completed); err != nil {
-		return result, err
-	}
-	result.Consumed = max(reserved, completed)
-	result.ExplicitRepairAvailable = !result.PolicyConfigured || result.Consumed < result.Limit
-	return result, nil
 }
 
 func (d *DB) RestoreLegacyRepairAuthorization(stepID, roundID string) (string, error) {

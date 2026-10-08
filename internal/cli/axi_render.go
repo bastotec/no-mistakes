@@ -540,9 +540,15 @@ func gateFields(gate stepView) []toon.Field {
 		}
 	} else if pipeline.HasRepairBudgetExhaustion(gate.FindingsJSON) {
 		help = []string{
-			"The automatic repair budget is exhausted; explicit authority remains available for exactly one additional repair, and --yes leaves this gate awaiting a decision.",
-			"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) only after authorizing exactly one additional repair; it does not renew the automatic budget.",
+			"The automatic repair budget is exhausted; --yes leaves this gate awaiting a decision.",
 			"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
+		}
+		if pipeline.RepairBudgetAuthorityAvailable(gate.FindingsJSON) {
+			help = []string{
+				"The automatic repair budget is exhausted; explicit authority remains available for exactly one additional repair, and --yes leaves this gate awaiting a decision.",
+				"Run `no-mistakes axi respond --action fix --finding <exact-id>` (repeat --finding as needed) only after authorizing exactly one additional repair; it does not renew the automatic budget.",
+				"Run `no-mistakes axi respond --action approve` only to deliberately accept the unresolved findings and continue.",
+			}
 		}
 	}
 	if pipeline.HasProtectedPathRefusal(gate.FindingsJSON) {

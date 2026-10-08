@@ -171,7 +171,7 @@ func TestExecutor_RestartsValidationFromRequestedStep(t *testing.T) {
 			}
 			// ResetStepsFrom leaves both history and the pre-launch budget
 			// reservation intact; a restarted observation cannot spend it again.
-			decision, err := database.ReserveStepRepair(result.ID, rounds[2].ID, 1, false)
+			decision, err := database.ReserveStepRepairWithSelection(result.ID, rounds[2].ID, 1, nil)
 			if err != nil {
 				t.Fatalf("ReserveStepRepair() error = %v", err)
 			}

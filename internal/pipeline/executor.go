@@ -464,6 +464,16 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 				continue
 			}
 			if !repairWrapperIdentityLive(token, pid, resultPath) {
+				if _, recoverErr := e.db.RecoverRepairInvocationResult(gate.stepResult.ID, gate.lastRoundID); recoverErr != nil {
+					return e.failRun(run, repo, fmt.Errorf("recover repair wrapper result: %w", recoverErr), ctx)
+				}
+				state, _, stateErr = e.db.RepairInvocationRecoveryState(gate.stepResult.ID, gate.lastRoundID)
+				if stateErr != nil {
+					return e.failRun(run, repo, fmt.Errorf("read recovered repair wrapper: %w", stateErr), ctx)
+				}
+				if state == "terminal" {
+					continue
+				}
 				retryable, markErr := e.db.MarkRepairInvocationUnresolved(gate.stepResult.ID, gate.lastRoundID)
 				if markErr != nil {
 					return e.failRun(run, repo, fmt.Errorf("mark repair wrapper unresolved: %w", markErr), ctx)
@@ -1147,6 +1157,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 	// Execute with possible fix loop
 	for {
+		completedRepairRoundID := ""
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		fixRound := sctx.Fixing
@@ -1245,11 +1256,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		} else {
 			currentRoundID = roundInsertID(currentRoundID, inserted, nil)
 			if activeRepairRoundID != "" {
-				completedRoundID := activeRepairRoundID
-				if completeErr := e.db.CompleteStepRepair(sr.ID, completedRoundID); completeErr != nil {
+				completedRepairRoundID = activeRepairRoundID
+				if completeErr := e.db.CompleteStepRepair(sr.ID, completedRepairRoundID); completeErr != nil {
 					return false, "", fmt.Errorf("complete %s repair dispatch: %w", stepName, completeErr)
 				}
-				if invocationID, lookupErr := e.db.RepairInvocationForRound(sr.ID, completedRoundID); lookupErr == nil {
+				if invocationID, lookupErr := e.db.RepairInvocationForRound(sr.ID, completedRepairRoundID); lookupErr == nil {
 					if cleanupErr := e.db.CleanupRepairInvocationFiles(invocationID); cleanupErr != nil {
 						slog.Warn("repair invocation payload cleanup remains pending", "step", stepName, "error", cleanupErr)
 					}
@@ -1272,15 +1283,19 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 
 		// A fix round that changed nothing will not fare better on the next
 		// attempt at the same failure: the agent already looked and left the
-		// tree as it was. Spending the rest of the auto-fix budget there is
-		// what burned hours per run, so the budget is treated as spent and
-		// the outcome goes where an exhausted budget sends it - its approval
-		// gate when it needs one. HEAD is the measure because every fix path
+		// tree as it was. Stop the automatic loop and park the unresolved
+		// outcome for a decision. HEAD is the measure because every fix path
 		// (commitAgentFixes, a published CI repair, a rebase resolution)
 		// records its result by advancing run.HeadSHA.
-		if fixRound && run.HeadSHA == reviewStartingHeadSHA && outcome.AutoFixable && autoFixableFindingsJSON(outcome.Findings) != "" && autoFixAttempts < autoFixLimit {
-			writeLog(fmt.Sprintf("auto-fix made no changes; not spending the remaining %d auto-fix %s on the same failure", autoFixLimit-autoFixAttempts, pluralize(autoFixLimit-autoFixAttempts, "attempt", "attempts")))
-			autoFixAttempts = autoFixLimit
+		if fixRound && completedRepairRoundID != "" && autoFixLimit > 0 && run.HeadSHA == reviewStartingHeadSHA && outcome.AutoFixable && autoFixableFindingsJSON(outcome.Findings) != "" {
+			decision, exhaustErr := e.db.ExhaustStepRepairBudget(sr.ID, completedRepairRoundID)
+			if exhaustErr != nil {
+				return false, "", fmt.Errorf("exhaust %s repair budget after no-op: %w", stepName, exhaustErr)
+			}
+			writeLog("auto-fix made no changes; not spending the remaining auto-fix attempts on the same failure")
+			outcome.Findings = exhaustedRepairFindings(outcome.Findings, stepName, run.ID, decision)
+			outcome.AutoFixable = false
+			outcome.NeedsApproval = true
 		}
 
 		// Check if auto-fix should be attempted.

@@ -250,7 +250,7 @@ func (d *DB) MarkRepairInvocationUnresolved(stepID, roundID string) (bool, error
 }
 
 func (d *DB) ResetUnstartedRepairInvocation(invocationID string) error {
-	result, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'prepared', wrapper_token = NULL, control_state = 'active', updated_at = ? WHERE id = ? AND state = 'launching' AND wrapper_pid IS NULL AND fixer_pid IS NULL AND result_present = 0`, now(), invocationID)
+	result, err := d.sql.Exec(`UPDATE repair_invocations SET state = 'prepared', wrapper_token = NULL, control_state = 'active', updated_at = ? WHERE id = ? AND state IN ('registered', 'launching') AND wrapper_pid IS NULL AND fixer_pid IS NULL AND result_present = 0`, now(), invocationID)
 	if err != nil {
 		return err
 	}

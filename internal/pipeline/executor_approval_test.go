@@ -103,7 +103,7 @@ func TestExecutor_RepairSelectionMustMatchParkedFindingBeforeAuthorityIsConsumed
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"comma", "id"}); err == nil {
 		t.Fatal("mismatched legacy selection unexpectedly authorized")
 	}
-	decision, err := database.ReserveStepRepair(stepResult.ID, round.ID, 1, false)
+	decision, err := database.ReserveStepRepairWithSelection(stepResult.ID, round.ID, 1, nil)
 	if err != nil || !decision.Granted || decision.Consumed != 1 {
 		t.Fatalf("invalid selection consumed authority: decision=%+v err=%v", decision, err)
 	}
@@ -128,7 +128,7 @@ func TestExecutor_RepairSelectionMustContainEffectiveWorkBeforeAuthorityIsConsum
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"repair-budget-review"}); err == nil {
 		t.Fatal("control-plane-only selection unexpectedly authorized")
 	}
-	decision, err := database.ReserveStepRepair(stepResult.ID, round.ID, 1, false)
+	decision, err := database.ReserveStepRepairWithSelection(stepResult.ID, round.ID, 1, nil)
 	if err != nil || !decision.Granted || decision.Consumed != 1 {
 		t.Fatalf("empty effective selection consumed authority: decision=%+v err=%v", decision, err)
 	}
@@ -191,7 +191,11 @@ func TestExecutor_ResumeParksUnresolvedRepairAtReconciliationGate(t *testing.T) 
 	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.BindStepRepairProcess(stepResult.ID, round.ID, "repair process active", 4242); err != nil {
+	invocation, err := database.RegisterRepairInvocation(stepResult.ID, round.ID, 0, t.TempDir(), "agent", "review-fix", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.BindRepairInvocationProcess(invocation.ID, "repair process active", 4242); err != nil {
 		t.Fatal(err)
 	}
 	run, _ = database.GetRun(run.ID)

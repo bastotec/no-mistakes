@@ -17,7 +17,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/intent"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
-	"github.com/kunchenguid/no-mistakes/internal/shellenv"
+	"github.com/kunchenguid/no-mistakes/internal/winproc"
 )
 
 const repairAgentDescriptorEnv = "NM_REPAIR_AGENT_DESCRIPTOR"
@@ -92,7 +92,29 @@ func repairProcessToken() (string, error) {
 
 var ErrDaemonShutdown = fmt.Errorf("daemon shutting down")
 
-func launchIndependentRepair(ctx context.Context, database *db.DB, root, invocationID string, inner agent.Agent, opts agent.RunOpts) (*agent.Result, error) {
+func launchIndependentRepair(ctx context.Context, database *db.DB, root, invocationID string, inner agent.Agent, opts agent.RunOpts) (result *agent.Result, runErr error) {
+	dir := filepath.Join(root, "repair-invocations")
+	descriptorPath := filepath.Join(dir, invocationID+".json")
+	resultPath := filepath.Join(dir, invocationID+".result.json")
+	started := false
+	defer func() {
+		if started || runErr == nil {
+			return
+		}
+		resetErr := database.ResetUnstartedRepairInvocation(invocationID)
+		var cleanupErr error
+		for _, path := range []string{descriptorPath, descriptorPath + ".tmp", resultPath, resultPath + ".tmp", repairWrapperHeartbeatPath(resultPath)} {
+			if err := os.Remove(path); err != nil && !os.IsNotExist(err) && cleanupErr == nil {
+				cleanupErr = err
+			}
+		}
+		if resetErr != nil {
+			runErr = fmt.Errorf("%w (reset repair invocation: %v)", runErr, resetErr)
+		}
+		if cleanupErr != nil {
+			runErr = fmt.Errorf("%w (clean up repair invocation payload: %v)", runErr, cleanupErr)
+		}
+	}()
 	descriptor, environment, err := agent.DescribeRepairAgent(inner, opts.Purpose)
 	if err != nil {
 		return nil, err
@@ -105,9 +127,6 @@ func launchIndependentRepair(ctx context.Context, database *db.DB, root, invocat
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(root, "repair-invocations")
-	descriptorPath := filepath.Join(dir, invocationID+".json")
-	resultPath := filepath.Join(dir, invocationID+".result.json")
 	wire := repairInvocationDescriptor{
 		Prompt: opts.Prompt, CWD: opts.CWD, JSONSchema: opts.JSONSchema,
 		Session: opts.Session, SessionFallback: opts.SessionFallback, Purpose: opts.Purpose,
@@ -144,21 +163,17 @@ func launchIndependentRepair(ctx context.Context, database *db.DB, root, invocat
 		repairWrapperTokenEnv+"="+token,
 	)
 	cmd.Dir = opts.CWD
-	shellenv.ConfigureShellCommand(cmd)
-	if err := shellenv.StartShellCommand(cmd); err != nil {
-		if resetErr := database.ResetUnstartedRepairInvocation(invocationID); resetErr != nil {
-			return nil, fmt.Errorf("start repair invocation wrapper: %w (reset failed: %v)", err, resetErr)
-		}
+	winproc.Harden(cmd)
+	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start repair invocation wrapper: %w", err)
 	}
+	started = true
 	if opts.OnLifecycle != nil {
 		opts.OnLifecycle(agent.LifecycleEvent{Agent: inner.Name(), Phase: agent.LifecyclePhaseStart, PID: cmd.Process.Pid, Message: "repair invocation wrapper started"})
 	}
 	waited := make(chan error, 1)
 	go func() {
-		waitErr := cmd.Wait()
-		shellenv.TerminateShellCommandGroup(cmd)
-		waited <- waitErr
+		waited <- cmd.Wait()
 	}()
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
