@@ -208,6 +208,7 @@ func TestExecutor_FixingEventIncludesFindingStats(t *testing.T) {
 	}
 
 	close(releaseFix)
+	approveDeferredReviewGate(t, database, run.ID, exec)
 	select {
 	case err := <-done:
 		if err != nil {
@@ -293,6 +294,7 @@ func TestExecutor_FixSetsPreviousFindings(t *testing.T) {
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
 	exec.Respond(types.StepReview, types.ActionFix, nil)
+	approveDeferredReviewGate(t, database, run.ID, exec)
 
 	select {
 	case err := <-done:
@@ -407,6 +409,7 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 	if err := exec.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"review-1"}, instructions, added); err != nil {
 		t.Fatal(err)
 	}
+	approveDeferredReviewGate(t, database, run.ID, exec)
 
 	select {
 	case err := <-done:
@@ -456,6 +459,14 @@ func TestExecutor_FixAppliesUserInstructionsAndAddedFindings(t *testing.T) {
 	}
 }
 
+func approveDeferredReviewGate(t *testing.T, database *db.DB, runID string, exec *Executor) {
+	t.Helper()
+	waitForStepStatus(t, database, runID, types.StepReview, types.StepStatusFixReview)
+	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func firstStepID(t *testing.T, database *db.DB, runID string) string {
 	t.Helper()
 	steps, err := database.GetStepsByRun(runID)
@@ -500,6 +511,7 @@ func TestExecutor_FixUsesSelectedFindingIDsOnly(t *testing.T) {
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
 		t.Fatal(err)
 	}
+	approveDeferredReviewGate(t, database, run.ID, exec)
 
 	select {
 	case err := <-done:
@@ -546,7 +558,7 @@ func TestExecutor_FixClearsStoredFindingsAfterSuccessfulReRun(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -595,7 +607,7 @@ func TestExecutor_FixPersistsFollowUpRoundAsAutoFix(t *testing.T) {
 	}()
 
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, nil); err != nil {
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-1"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -663,6 +675,7 @@ func TestExecutor_FixSelectedFindingsRewritesSummary(t *testing.T) {
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
 		t.Fatal(err)
 	}
+	approveDeferredReviewGate(t, database, run.ID, exec)
 
 	select {
 	case err := <-done:
@@ -718,6 +731,7 @@ func TestExecutor_UserFixRecordsSelectedFindingIDsAndFixSummary(t *testing.T) {
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"review-2"}); err != nil {
 		t.Fatal(err)
 	}
+	approveDeferredReviewGate(t, database, run.ID, exec)
 
 	select {
 	case err := <-done:
