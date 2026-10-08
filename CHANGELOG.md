@@ -1,5 +1,34 @@
 # Changelog
 
+## [1.77.0](https://github.com/bastotec/no-mistakes/compare/v1.76.0...v1.77.0) (2026-10-08)
+
+
+### Features
+
+* **agent:** support Deck and select it for this fork ([#7](https://github.com/bastotec/no-mistakes/issues/7)) ([ec03d66](https://github.com/bastotec/no-mistakes/commit/ec03d669d4d0b5583c60fbc7742fce8a95155277))
+* **cli:** add --existing-pr to bind a branch to an existing upstream PR ([#1](https://github.com/bastotec/no-mistakes/issues/1)) ([4c73c3e](https://github.com/bastotec/no-mistakes/commit/4c73c3edd690a35b38941726d218d6d8b0751078))
+* **pipeline:** add --preserve-history runs that pin the integration and refuse rebase or force pushes ([#2](https://github.com/bastotec/no-mistakes/issues/2)) ([34d5856](https://github.com/bastotec/no-mistakes/commit/34d5856f063fd12afaa27cc42792df071cf37042))
+* **pipeline:** add advisory Jev evaluation step after review ([#5](https://github.com/bastotec/no-mistakes/issues/5)) ([60ad4af](https://github.com/bastotec/no-mistakes/commit/60ad4af245a4bef80d752c5efa7fa02616c4acf9))
+* **pipeline:** cap review rounds, stop no-op auto-fix loops, and add trusted test.skip ([#12](https://github.com/bastotec/no-mistakes/issues/12)) ([06ee817](https://github.com/bastotec/no-mistakes/commit/06ee8172200b8f7416d4c3bbba046490f3f21a67))
+* **pipeline:** integrate a moved base by merging behind rebase.strategy ([#1081](https://github.com/bastotec/no-mistakes/issues/1081)) ([ae2e99a](https://github.com/bastotec/no-mistakes/commit/ae2e99a8b250eb90e66211ae98508f1b21442293))
+* stamp fork builds with an upstream-semver fork version ([#9](https://github.com/bastotec/no-mistakes/issues/9)) ([21dbb3d](https://github.com/bastotec/no-mistakes/commit/21dbb3dbbeaa8e2932edec25d546064dfd10363b))
+
+
+### Bug Fixes
+
+* **agent:** preserve Deck exit diagnostics and terminal contract ([#8](https://github.com/bastotec/no-mistakes/issues/8)) ([6911e03](https://github.com/bastotec/no-mistakes/commit/6911e03548dfae93308d0ba08e0850f3f4d7f55d))
+* **branchsync:** release stale terminal bindings and stop false at-risk mirror verdicts ([#6](https://github.com/bastotec/no-mistakes/issues/6)) ([3eaeb18](https://github.com/bastotec/no-mistakes/commit/3eaeb18a827dfacdd96a80efee8527370a067681))
+* **gate:** safely publish content-preserving mirror joins ([#16](https://github.com/bastotec/no-mistakes/issues/16)) ([e7c16d0](https://github.com/bastotec/no-mistakes/commit/e7c16d0b39b430b738aeef8bea0d006fc9f11648))
+* **pipeline:** don't refuse PR publication for prose-only body rules ([#15](https://github.com/bastotec/no-mistakes/issues/15)) ([cb221cd](https://github.com/bastotec/no-mistakes/commit/cb221cd141ba6ccc72966213b34d7710d48b4f13))
+* **pipeline:** enforce durable repair budget ceilings ([#18](https://github.com/bastotec/no-mistakes/issues/18)) ([7692bea](https://github.com/bastotec/no-mistakes/commit/7692beaaa0c3ea4f004b0733a60b67af05ded7b6))
+* **pipeline:** honor repository PR formats in English ([#10](https://github.com/bastotec/no-mistakes/issues/10)) ([2805e9b](https://github.com/bastotec/no-mistakes/commit/2805e9b3b5b64f81e97442b370168316fffb0bd8))
+* **pipeline:** let review fixes run at the round cap ([#14](https://github.com/bastotec/no-mistakes/issues/14)) ([e0bfc53](https://github.com/bastotec/no-mistakes/commit/e0bfc531126ccb687d45a0a2ee112237ce4b59cf))
+* **pipeline:** park approval-held CI checks and name the real PR base in bundled-commit findings ([#3](https://github.com/bastotec/no-mistakes/issues/3)) ([7e84d0d](https://github.com/bastotec/no-mistakes/commit/7e84d0d1d6b30a41e2ce12e68457c312c7339b0f))
+* **pipeline:** publish PRs when committed prose-only rules exist ([#13](https://github.com/bastotec/no-mistakes/issues/13)) ([0f97481](https://github.com/bastotec/no-mistakes/commit/0f97481f6f01c3936e8d5775295632c6b73d9fa6))
+* **pipeline:** retain deferred findings across review gates ([#17](https://github.com/bastotec/no-mistakes/issues/17)) ([58a7dd6](https://github.com/bastotec/no-mistakes/commit/58a7dd6087b68a69dea309c45e28c9e3a871afce))
+* reconcile rewritten mirror history by patch identity ([#11](https://github.com/bastotec/no-mistakes/issues/11)) ([d19fa58](https://github.com/bastotec/no-mistakes/commit/d19fa581a24307d85bcbbfdba7f68d96771a5d39))
+* stamp a comparable version into every build and refuse labels without one ([a9e4271](https://github.com/bastotec/no-mistakes/commit/a9e4271e9373605077416892bd513466f6371a93))
+
 ## [1.76.0](https://github.com/kunchenguid/no-mistakes/compare/v1.75.3...v1.76.0) (2026-09-15)
 
 
