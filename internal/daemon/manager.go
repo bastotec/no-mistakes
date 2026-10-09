@@ -656,6 +656,10 @@ func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason str
 		slog.Warn("preserving run worktree: cannot read run", "run_id", runID, "error", err)
 		return
 	}
+	if refusal := survivedWorkCleanupReason(m.db, run, wtDir); refusal != "" {
+		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
+		return
+	}
 	if refusal := protectedPathCleanupReason(m.db, run); refusal != "" {
 		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
 		return

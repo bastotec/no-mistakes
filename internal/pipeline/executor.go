@@ -1196,6 +1196,20 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		fixRound := sctx.Fixing
 		outcome, err := step.Execute(sctx)
+		if fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout)) {
+			if work := InspectSurvivedWork(sctx.WorkDir); work != nil {
+				prior, _ := types.ParseFindingsJSON(sctx.PreviousFindings)
+				prior.SurvivedWork = work
+				raw, marshalErr := types.MarshalFindingsJSON(prior)
+				if marshalErr != nil {
+					return false, "", marshalErr
+				}
+				if persistErr := e.db.SetStepFindings(sr.ID, raw); persistErr != nil {
+					return false, "", persistErr
+				}
+				writeLog("interrupted repair left uncommitted work; retained in " + work.Worktree)
+			}
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}

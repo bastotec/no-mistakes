@@ -281,7 +281,7 @@ CI logs:
 	prompt += roundHistoryPromptSection(sctx)
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
-	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
+	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt)) + pipeline.SurvivedWorkPrompt(sctx.WorkDir)
 
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
@@ -539,19 +539,11 @@ func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err e
 		return nil
 	}
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
-	return ciFixAgentTimeoutOutcome(issueDesc, dirtyRunWorktree(sctx), err)
-}
-
-// dirtyRunWorktree reports the run worktree path when the timed-out agent left
-// uncommitted work there, so the gate can say where it is instead of letting it
-// disappear with the worktree at cleanup. Best effort: an unreadable status
-// simply omits the detail.
-func dirtyRunWorktree(sctx *pipeline.StepContext) string {
-	status, err := stepGitRun(sctx, "status", "--porcelain")
-	if err != nil || strings.TrimSpace(status) == "" {
-		return ""
-	}
-	return sctx.WorkDir
+	outcome := ciFixAgentTimeoutOutcome(issueDesc, err)
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	findings.SurvivedWork = pipeline.InspectSurvivedWork(sctx.WorkDir)
+	outcome.Findings, _ = types.MarshalFindingsJSON(findings)
+	return outcome
 }
 
 // ciRepairResult reports what a repair did to the run. The monitor needs both
