@@ -135,6 +135,38 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 	}
 	defer tx.Rollback()
 
+	var resetTargetID string
+	var survivedWork *types.SurvivedWork
+	rows, err := tx.Query(`SELECT id, findings_json FROM step_results
+		WHERE run_id = ? AND step_order >= ? AND status != ?
+		ORDER BY step_order, id`, runID, stepOrder, types.StepStatusSkipped)
+	if err != nil {
+		return fmt.Errorf("read reset step findings: %w", err)
+	}
+	for rows.Next() {
+		var id string
+		var findingsJSON *string
+		if err := rows.Scan(&id, &findingsJSON); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan reset step findings: %w", err)
+		}
+		if resetTargetID == "" {
+			resetTargetID = id
+		}
+		if survivedWork == nil && findingsJSON != nil {
+			findings, parseErr := types.ParseFindingsJSON(*findingsJSON)
+			if parseErr == nil {
+				survivedWork = findings.SurvivedWork
+			}
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("close reset step findings: %w", err)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read reset step findings: %w", err)
+	}
+
 	legacyArgs := []any{runID, stepOrder, types.StepStatusPending, types.StepStatusSkipped}
 	legacySteps := `SELECT id FROM step_results
 		WHERE run_id = ? AND step_order >= ? AND status != ? AND status != ?
@@ -158,6 +190,15 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 			agent_pid = NULL, override_reason = NULL
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped); err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
+	}
+	if survivedWork != nil && resetTargetID != "" {
+		findingsJSON, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: survivedWork})
+		if err != nil {
+			return fmt.Errorf("marshal survived work for revalidation: %w", err)
+		}
+		if _, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, findingsJSON, resetTargetID); err != nil {
+			return fmt.Errorf("preserve survived work for revalidation: %w", err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit reset steps for revalidation: %w", err)

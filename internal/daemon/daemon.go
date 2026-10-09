@@ -877,6 +877,10 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 		slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
 		return false
 	}
+	if reason := survivedWorkCleanupReason(d, run, wt.dir); reason != "" {
+		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
+		return false
+	}
 	if reason := protectedPathCleanupReason(d, run); reason != "" {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
 		return false
@@ -937,6 +941,43 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		}
 	}
 	return false, ""
+}
+
+// survivedWorkCleanupReason has no abort exemption: aborting a run is not
+// authorization to destroy uncommitted repairs. A clean live status releases
+// retention after the operator or a later repair has dealt with the files.
+func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
+	if run == nil {
+		return ""
+	}
+	results, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		return "cannot read survived-work evidence"
+	}
+	for _, step := range results {
+		if step.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+		if err != nil {
+			return "cannot parse survived-work evidence"
+		}
+		if findings.SurvivedWork == nil {
+			continue
+		}
+		if pipeline.InspectSurvivedWork(workDir) != nil {
+			return "interrupted repair has uncommitted or unreadable work; preserving worktree"
+		}
+		findings.SurvivedWork = nil
+		raw, err := types.MarshalFindingsJSON(findings)
+		if err != nil {
+			return "cannot clear survived-work evidence"
+		}
+		if err := d.SetStepFindings(step.ID, raw); err != nil {
+			return "cannot clear survived-work evidence"
+		}
+	}
+	return ""
 }
 
 // protectedPathCleanupReason protects only the index and working files. It must

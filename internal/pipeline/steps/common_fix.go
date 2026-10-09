@@ -340,7 +340,7 @@ func executeFixMode(sctx *pipeline.StepContext, stepName types.StepName, opts fi
 		purpose = string(stepName) + "-fix"
 	}
 	runOpts := agent.RunOpts{
-		Prompt:     fixerPrompt(opts.Prompt),
+		Prompt:     fixerPrompt(opts.Prompt) + pipeline.SurvivedWorkPrompt(sctx.WorkDir),
 		CWD:        sctx.WorkDir,
 		JSONSchema: commitSummarySchema,
 		OnChunk:    sctx.LogChunk,

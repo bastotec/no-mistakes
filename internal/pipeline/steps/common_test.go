@@ -598,6 +598,32 @@ func TestStepCmd_OverridesPathWithoutDuplicateEntries(t *testing.T) {
 	}
 }
 
+func TestCommitAgentFixes_StagesOnlyFilesChangedDuringRound(t *testing.T) {
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	if err := os.WriteFile(filepath.Join(dir, "survived.txt"), []byte("prior"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "survived.txt")
+	snapshot, err := pipeline.SnapshotWorktree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.RoundStartWorktree = snapshot
+	if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := commitAgentFixes(sctx, types.StepTest, "selected repair", "fallback"); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, dir, "show", "--format=", "--name-only", "HEAD"); got != "selected.txt" {
+		t.Fatalf("committed paths = %q, want selected.txt", got)
+	}
+	if got := gitCmd(t, dir, "status", "--porcelain", "--", "survived.txt"); got != "?? survived.txt" {
+		t.Fatalf("survived work status = %q, want retained and unstaged", got)
+	}
+}
+
 func TestCommitAgentFixes_PersistsUncertifiedRangeForReview(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)

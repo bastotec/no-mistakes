@@ -1195,7 +1195,36 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		fixRound := sctx.Fixing
-		outcome, err := step.Execute(sctx)
+		var outcome *StepOutcome
+		var err error
+		sctx.RoundStartWorktree = nil
+		if fixRound {
+			sctx.RoundStartWorktree, err = SnapshotWorktree(sctx.WorkDir)
+		} else {
+			var survived bool
+			survived, err = HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
+			if err == nil && survived {
+				sctx.RoundStartWorktree, err = SnapshotWorktree(sctx.WorkDir)
+			}
+		}
+		if err == nil {
+			outcome, err = step.Execute(sctx)
+		}
+		if fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout)) {
+			if work := InspectSurvivedWork(sctx.WorkDir); work != nil {
+				priorRaw := mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings)
+				prior, _ := types.ParseFindingsJSON(priorRaw)
+				prior.SurvivedWork = work
+				raw, marshalErr := types.MarshalFindingsJSON(prior)
+				if marshalErr != nil {
+					return false, "", marshalErr
+				}
+				if persistErr := e.db.SetStepFindings(sr.ID, raw); persistErr != nil {
+					return false, "", persistErr
+				}
+				writeLog("interrupted repair left uncommitted work; retained in " + work.Worktree)
+			}
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1221,6 +1250,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
 			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
+		outcome.Findings = e.retainSurvivedWork(sr.ID, sctx.WorkDir, outcome.Findings)
 		restartFrom = outcome.RestartFrom
 
 		// A fix accepted at review.max_rounds reviews nothing: the round
@@ -1563,6 +1593,34 @@ done:
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, restartFrom, nil
+}
+
+func (e *Executor) retainSurvivedWork(stepResultID, workDir, findingsRaw string) string {
+	step, err := e.db.GetStepResult(stepResultID)
+	if err != nil || step == nil || step.FindingsJSON == nil {
+		return findingsRaw
+	}
+	previous, err := types.ParseFindingsJSON(*step.FindingsJSON)
+	if err != nil || previous.SurvivedWork == nil {
+		return findingsRaw
+	}
+	work := InspectSurvivedWork(workDir)
+	if work == nil {
+		return findingsRaw
+	}
+	var findings types.Findings
+	if findingsRaw != "" {
+		findings, err = types.ParseFindingsJSON(findingsRaw)
+		if err != nil {
+			return findingsRaw
+		}
+	}
+	findings.SurvivedWork = work
+	raw, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return findingsRaw
+	}
+	return raw
 }
 
 // applyReviewRoundCap enforces review.max_rounds on one review outcome. Once

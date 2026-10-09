@@ -496,6 +496,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	rows := make([]stepRow, 0, len(rv.Steps))
 	sharedRows := make([]sharedWorkRow, 0, 1)
 	for _, s := range rv.Steps {
+		if parsed, err := types.ParseFindingsJSON(s.FindingsJSON); err == nil && parsed.SurvivedWork != nil {
+			fields = append(fields, toon.Field{Key: "survived_work", Value: parsed.SurvivedWork})
+		}
 		rows = append(rows, stepRow{Step: s.Name, Status: s.Status, Findings: s.findingCount(), DurationMS: s.DurationMS})
 		if s.WorkScope != "" {
 			sharedRows = append(sharedRows, sharedWorkRow{AttributedTo: s.Name, Scope: s.WorkScope, DurationMS: s.DurationMS})
@@ -585,6 +588,9 @@ func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
 	gfields := []toon.Field{
 		{Key: "step", Value: gate.Name},
 		{Key: "status", Value: gate.Status},
+	}
+	if parsed.SurvivedWork != nil {
+		gfields = append(gfields, toon.Field{Key: "survived_work", Value: parsed.SurvivedWork})
 	}
 	if parsed.Summary != "" {
 		gfields = append(gfields, toon.Field{Key: "summary", Value: truncate(parsed.Summary, maxGateSummary)})
