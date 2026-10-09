@@ -1197,8 +1197,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		fixRound := sctx.Fixing
 		var outcome *StepOutcome
 		var err error
+		sctx.RoundStartWorktree = nil
 		if fixRound {
 			sctx.RoundStartWorktree, err = SnapshotWorktree(sctx.WorkDir)
+		} else {
+			var survived bool
+			survived, err = HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
+			if err == nil && survived {
+				sctx.RoundStartWorktree, err = SnapshotWorktree(sctx.WorkDir)
+			}
 		}
 		if err == nil {
 			outcome, err = step.Execute(sctx)

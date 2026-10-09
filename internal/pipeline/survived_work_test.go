@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -89,6 +90,119 @@ func TestExecutor_TimedOutRepairPersistsSurvivedWork(t *testing.T) {
 				t.Fatalf("repair erased: %s %v", data, err)
 			}
 		})
+	}
+}
+
+func TestChangedPathsSince_IgnoresStagingOnlyTransition(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	path := filepath.Join(dir, "partial.txt")
+	if err := os.WriteFile(path, []byte("partial repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := SnapshotWorktree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), dir, "add", "partial.txt"); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := ChangedPathsSince(dir, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 0 {
+		t.Fatalf("staging-only transition selected paths: %v", changed)
+	}
+}
+
+func TestChangedPathsSince_DetectsDirtySubmoduleHeadChange(t *testing.T) {
+	sub := survivedWorkRepo(t)
+	commits := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		if err := os.WriteFile(filepath.Join(sub, "value.txt"), []byte(fmt.Sprintf("value %d\n", i)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := git.Run(context.Background(), sub, "add", "value.txt"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := git.Run(context.Background(), sub, "commit", "-m", fmt.Sprintf("value %d", i)); err != nil {
+			t.Fatal(err)
+		}
+		head, err := git.HeadSHA(context.Background(), sub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		commits = append(commits, head)
+	}
+
+	parent := survivedWorkRepo(t)
+	if _, err := git.Run(context.Background(), parent, "-c", "protocol.file.allow=always", "submodule", "add", sub, "nested"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), filepath.Join(parent, "nested"), "checkout", commits[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), parent, "add", "nested"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), parent, "commit", "-m", "add submodule"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), filepath.Join(parent, "nested"), "checkout", commits[1]); err != nil {
+		t.Fatal(err)
+	}
+	before, err := SnapshotWorktree(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), filepath.Join(parent, "nested"), "checkout", commits[2]); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := ChangedPathsSince(parent, before)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(changed) != 1 || changed[0] != "nested" {
+		t.Fatalf("dirty submodule head change selected %v", changed)
+	}
+}
+
+func TestExecutor_SeedsLaterStepsFromDurableSurvivedWork(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "deferred.txt"), []byte("survived\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	prior, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: InspectSurvivedWork(dir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepFindings(prior.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if sctx.RoundStartWorktree == nil {
+			t.Fatal("later step did not receive survived-work snapshot")
+		}
+		if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		changed, err := ChangedPathsSince(dir, sctx.RoundStartWorktree)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(changed) != 1 || changed[0] != "selected.txt" {
+			t.Fatalf("later step selected %v", changed)
+		}
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, dir); err != nil {
+		t.Fatal(err)
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func setupGateMirror(t *testing.T, sctx *pipeline.StepContext) string {
@@ -495,6 +496,59 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "https://redacted@example.com/fork/project.git") {
 		t.Fatalf("expected redacted fork URL in error, got %v", err)
+	}
+}
+
+func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, headSHA)
+
+	deferred := filepath.Join(dir, "deferred.txt")
+	if err := os.WriteFile(deferred, []byte("survived but unselected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: pipeline.InspectSurvivedWork(dir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepFindings(step.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	sctx.RoundStartWorktree, err = pipeline.SnapshotWorktree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	pushedHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
+	if !fileAtRef(t, upstream, pushedHead, "selected.txt") {
+		t.Fatal("selected repair was not published")
+	}
+	if fileAtRef(t, upstream, pushedHead, "deferred.txt") {
+		t.Fatal("deferred survived work was published")
+	}
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "deferred.txt") {
+		t.Fatalf("deferred survived work was not retained: %q", got)
 	}
 }
 

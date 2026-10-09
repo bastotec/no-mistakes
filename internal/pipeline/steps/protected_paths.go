@@ -10,6 +10,15 @@ import (
 // stagePipelineChanges guards every pipeline-owned catch-all staging path,
 // including Push's leftover commit. Refusal preserves the index and worktree.
 func stagePipelineChanges(sctx *pipeline.StepContext) error {
+	if sctx.RoundStartWorktree == nil && sctx.DB != nil && sctx.Run != nil {
+		survived, err := pipeline.HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
+		if err != nil {
+			return fmt.Errorf("inspect survived work: %w", err)
+		}
+		if survived && pipeline.InspectSurvivedWork(sctx.WorkDir) != nil {
+			return fmt.Errorf("survived work requires a scoped worktree snapshot")
+		}
+	}
 	var paths []string
 	if sctx.RoundStartWorktree != nil {
 		var err error

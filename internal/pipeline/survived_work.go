@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -20,11 +21,11 @@ type WorktreeSnapshot map[string]string
 func SnapshotWorktree(workDir string) (WorktreeSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	status, err := git.Run(ctx, workDir, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
+	statusRaw, err := git.RunRaw(ctx, workDir, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
 	if err != nil {
 		return nil, err
 	}
-	paths, err := statusPaths(status)
+	paths, err := statusPaths(string(statusRaw))
 	if err != nil {
 		return nil, err
 	}
@@ -77,22 +78,17 @@ func statusPaths(status string) ([]string, error) {
 }
 
 func worktreePathSignature(ctx context.Context, workDir, path string) (string, error) {
-	index, err := git.Run(ctx, workDir, "ls-files", "--stage", "-z", "--", path)
-	if err != nil {
-		return "", err
-	}
-	hash := sha256.New()
-	_, _ = io.WriteString(hash, index)
 	fullPath := filepath.Join(workDir, filepath.FromSlash(path))
 	info, err := os.Lstat(fullPath)
+	hash := sha256.New()
 	if os.IsNotExist(err) {
-		_, _ = io.WriteString(hash, "\x00missing")
+		_, _ = io.WriteString(hash, "missing")
 		return fmt.Sprintf("%x", hash.Sum(nil)), nil
 	}
 	if err != nil {
 		return "", err
 	}
-	_, _ = fmt.Fprintf(hash, "\x00%d\x00", info.Mode())
+	_, _ = fmt.Fprintf(hash, "%d\x00", info.Mode())
 	if info.Mode()&os.ModeSymlink != 0 {
 		target, err := os.Readlink(fullPath)
 		if err != nil {
@@ -112,8 +108,40 @@ func worktreePathSignature(ctx context.Context, workDir, path string) (string, e
 		if closeErr != nil {
 			return "", closeErr
 		}
+	} else if info.IsDir() {
+		index, err := git.Run(ctx, workDir, "ls-files", "--stage", "--", path)
+		if err != nil {
+			return "", err
+		}
+		if strings.HasPrefix(index, "160000 ") {
+			head, err := git.Run(ctx, fullPath, "rev-parse", "HEAD")
+			if err != nil {
+				return "", err
+			}
+			_, _ = io.WriteString(hash, strings.TrimSpace(head))
+		}
 	}
 	return fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+func HasSurvivedWorkEvidence(database *db.DB, runID string) (bool, error) {
+	steps, err := database.GetStepsByRun(runID)
+	if err != nil {
+		return false, err
+	}
+	for _, step := range steps {
+		if step.FindingsJSON == nil {
+			continue
+		}
+		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
+		if err != nil {
+			return false, err
+		}
+		if findings.SurvivedWork != nil {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // InspectSurvivedWork runs outside the expired agent context. An unreadable
