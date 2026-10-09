@@ -1,0 +1,52 @@
+name: Publish current no-mistakes verdict
+description: >-
+  Record the original PR event verdict and publish it only if that snapshot
+  is still current, without letting an older event overwrite a newer verdict.
+  Requires a trusted pull_request_target caller and a non-cancelling,
+  per-PR job concurrency lock. See README.md before migrating.
+inputs:
+  github-token:
+    description: Token with pull-requests read, actions read, and checks write.
+    required: false
+    default: ${{ github.token }}
+  exempt-authors:
+    description: Trusted caller policy; newline- or comma-separated exempt authors.
+    required: false
+    default: ""
+  exempt-bot-authors:
+    description: Trusted caller policy; exempt bot authors.
+    required: false
+    default: "false"
+  exempt-head-branches:
+    description: Trusted caller policy; newline- or comma-separated exempt branch globs.
+    required: false
+    default: ""
+outputs:
+  event-verdict:
+    description: Original snapshot result (success, failure, or exempt), including obsolete events.
+    value: ${{ steps.publish.outputs.event-verdict }}
+  publication:
+    description: published, obsolete, or unchanged; never treats an obsolete failure as compliant.
+    value: ${{ steps.publish.outputs.publication }}
+runs:
+  using: composite
+  steps:
+    - name: Record event evidence and publish authoritative verdict
+      id: publish
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ inputs.github-token }}
+        NM_EXEMPT_AUTHORS: ${{ inputs.exempt-authors }}
+        NM_EXEMPT_BOT_AUTHORS: ${{ inputs.exempt-bot-authors }}
+        NM_EXEMPT_HEAD_BRANCHES: ${{ inputs.exempt-head-branches }}
+      run: |
+        set -eu
+        if command -v python3 >/dev/null 2>&1; then
+          PY=python3
+        elif command -v python >/dev/null 2>&1; then
+          PY=python
+        else
+          echo "::error::python interpreter not found" >&2
+          exit 1
+        fi
+        "$PY" "${GITHUB_ACTION_PATH}/publish.py"
