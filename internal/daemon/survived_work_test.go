@@ -73,6 +73,14 @@ func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 	if reason := survivedWorkCleanupReason(database, run, dir); reason != "" {
 		t.Fatalf("clean worktree retained: %s", reason)
 	}
+	cleared, err := database.GetStepResult(sr.ID)
+	if err != nil || cleared.FindingsJSON == nil {
+		t.Fatalf("read cleared survival metadata: %+v %v", cleared, err)
+	}
+	clearedFindings, err := types.ParseFindingsJSON(*cleared.FindingsJSON)
+	if err != nil || clearedFindings.SurvivedWork != nil {
+		t.Fatalf("stale survival metadata remains: %+v %v", clearedFindings.SurvivedWork, err)
+	}
 	cleanupOrphanWorktrees(database, p, nil)
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("clean worktree not reclaimed: %v", err)

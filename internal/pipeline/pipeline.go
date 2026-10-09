@@ -32,6 +32,7 @@ type StepContext struct {
 	ReviewStartingHeadSHA string
 	PreviousFindings      string // JSON findings selected for the current fix round
 	DeferredFindings      string // JSON findings left unselected when the current fix round began
+	RoundStartWorktree    WorktreeSnapshot
 	// FixWithoutRereview is set on a review fix accepted at review.max_rounds:
 	// the fix turn runs and commits, and no rereview follows it. The executor
 	// records the outcome from the gate findings instead.

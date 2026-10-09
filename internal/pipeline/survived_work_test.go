@@ -63,7 +63,7 @@ func TestExecutor_TimedOutRepairPersistsSurvivedWork(t *testing.T) {
 			dir := survivedWorkRepo(t)
 			step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
 				if !sctx.Fixing {
-					return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+					return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"},{"id":"deferred","severity":"warning","description":"wait","action":"ask-user"}]}`}, nil
 				}
 				if err := os.WriteFile(filepath.Join(dir, "progress.txt"), []byte("survived"), 0600); err != nil {
 					t.Fatal(err)
@@ -82,9 +82,37 @@ func TestExecutor_TimedOutRepairPersistsSurvivedWork(t *testing.T) {
 			if err != nil || findings.SurvivedWork == nil || findings.SurvivedWork.Worktree != dir || len(findings.SurvivedWork.Files) != 1 {
 				t.Fatalf("survival missing: %+v %v", findings, err)
 			}
+			if len(findings.Items) != 2 || findings.Items[0].ID != "selected" || findings.Items[1].ID != "deferred" {
+				t.Fatalf("selected and deferred findings not preserved: %+v", findings.Items)
+			}
 			if data, err := os.ReadFile(filepath.Join(dir, "progress.txt")); err != nil || string(data) != "survived" {
 				t.Fatalf("repair erased: %s %v", data, err)
 			}
 		})
+	}
+}
+
+func TestExecutor_RetainsSurvivedWorkAcrossLaterOutcome(t *testing.T) {
+	database, p, run, _ := setupTest(t)
+	dir := survivedWorkRepo(t)
+	if err := os.WriteFile(filepath.Join(dir, "partial.txt"), []byte("survived"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	step, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prior, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: InspectSurvivedWork(dir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepFindings(step.ID, prior); err != nil {
+		t.Fatal(err)
+	}
+	next := `{"findings":[{"id":"later","severity":"error","description":"still red","action":"auto-fix"}]}`
+	exec := NewExecutor(database, p, &config.Config{}, nil, nil, nil)
+	retained, err := types.ParseFindingsJSON(exec.retainSurvivedWork(step.ID, dir, next))
+	if err != nil || retained.SurvivedWork == nil || len(retained.Items) != 1 || retained.Items[0].ID != "later" {
+		t.Fatalf("later outcome lost survival metadata: %+v %v", retained, err)
 	}
 }

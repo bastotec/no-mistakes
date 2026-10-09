@@ -962,8 +962,19 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 		if err != nil {
 			return "cannot parse survived-work evidence"
 		}
-		if findings.SurvivedWork != nil && pipeline.InspectSurvivedWork(workDir) != nil {
+		if findings.SurvivedWork == nil {
+			continue
+		}
+		if pipeline.InspectSurvivedWork(workDir) != nil {
 			return "interrupted repair has uncommitted or unreadable work; preserving worktree"
+		}
+		findings.SurvivedWork = nil
+		raw, err := types.MarshalFindingsJSON(findings)
+		if err != nil {
+			return "cannot clear survived-work evidence"
+		}
+		if err := d.SetStepFindings(step.ID, raw); err != nil {
+			return "cannot clear survived-work evidence"
 		}
 	}
 	return ""
