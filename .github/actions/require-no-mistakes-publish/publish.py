@@ -28,6 +28,8 @@ verify = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(verify)
 
 CHECK_NAME = "PR must be raised via no-mistakes"
+CHECK_SUMMARY_MAX = 65535
+CHECK_SUMMARY_TRUNCATED = "\n\n[Event evidence truncated; full evidence remains in workflow logs.]"
 PREFIX = "no-mistakes-current-v1:"
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 
@@ -111,6 +113,12 @@ def evidence(pr):
             os.environ["GITHUB_OUTPUT"] = old_output
 
 
+def check_summary(detail):
+    if len(detail) <= CHECK_SUMMARY_MAX:
+        return detail
+    return detail[:CHECK_SUMMARY_MAX - len(CHECK_SUMMARY_TRUNCATED)] + CHECK_SUMMARY_TRUNCATED
+
+
 def publish(api, pr, run, verdict, detail):
     """Called only inside the caller's non-cancelling, per-PR publisher lock."""
     number = pr["number"]
@@ -151,7 +159,7 @@ def publish(api, pr, run, verdict, detail):
         "details_url": run["html_url"],
         "output": {
             "title": f"Event {rank[0]}, attempt {rank[1]}: {verdict}",
-            "summary": detail,
+            "summary": check_summary(detail),
         },
     }
     if current:

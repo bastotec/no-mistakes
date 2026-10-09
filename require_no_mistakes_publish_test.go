@@ -93,6 +93,12 @@ func (f *publishForge) serve(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad body", 400)
 			return
 		}
+		output, _ := data["output"].(map[string]any)
+		summary, _ := output["summary"].(string)
+		if len(summary) > 65535 {
+			http.Error(w, "summary exceeds Checks API limit", http.StatusUnprocessableEntity)
+			return
+		}
 		f.writes = append(f.writes, data)
 		data["id"] = 100
 		data["app"] = map[string]any{"slug": "github-actions"}
@@ -121,7 +127,16 @@ func startPublisherAttempt(t *testing.T, api string, number, attempt int, pr map
 	if err := os.WriteFile(path, event, 0600); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(pythonInterpreter(t), publishActionDir+"/publish.py")
+	action := loadRequireAction(t, publishActionDir)
+	if len(action.Runs.Steps) != 1 {
+		t.Fatalf("publisher action steps = %d, want 1", len(action.Runs.Steps))
+	}
+	actionPath, err := filepath.Abs(publishActionDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pythonInterpreter(t)
+	cmd := exec.Command(action.Runs.Steps[0].Shell, "-c", action.Runs.Steps[0].Run)
 	// Do not inherit caller inputs, exemptions, tokens or an Actions output path.
 	for _, item := range os.Environ() {
 		key := strings.SplitN(item, "=", 2)[0]
@@ -131,7 +146,8 @@ func startPublisherAttempt(t *testing.T, api string, number, attempt int, pr map
 		cmd.Env = append(cmd.Env, item)
 	}
 	cmd.Env = append(cmd.Env,
-		"PYTHONDONTWRITEBYTECODE=1", "GITHUB_TOKEN=test-token", "GITHUB_REPOSITORY=owner/repo",
+		"PYTHONDONTWRITEBYTECODE=1", "GITHUB_ACTION_PATH="+actionPath,
+		"GITHUB_TOKEN=test-token", "GITHUB_REPOSITORY=owner/repo",
 		"GITHUB_API_URL="+api, "GITHUB_EVENT_NAME=pull_request_target", "GITHUB_EVENT_PATH="+path,
 		fmt.Sprintf("GITHUB_RUN_ID=%d", number), fmt.Sprintf("GITHUB_RUN_NUMBER=%d", number),
 		fmt.Sprintf("GITHUB_RUN_ATTEMPT=%d", attempt), "GITHUB_OUTPUT="+filepath.Join(dir, "outputs"),
@@ -197,6 +213,35 @@ func TestPublishVerdict_InOrderFailureThenEditedSuccess(t *testing.T) {
 	}
 	if _, recreated := forge.writes[1]["head_sha"]; recreated {
 		t.Fatal("must update the same check, not create another")
+	}
+}
+
+func TestPublishVerdict_BoundsFailureSummaryWithoutDroppingRedVerdict(t *testing.T) {
+	head := strings.Repeat("8", 40)
+	attestedHead := strings.Repeat("x", 65250)
+	body := publishBody(attestedHead)
+	if len(body) > 65536 {
+		t.Fatalf("test PR body exceeds GitHub limit: %d", len(body))
+	}
+	current := publishPR(body, head)
+	forge := &publishForge{pr: current}
+	server := httptest.NewServer(http.HandlerFunc(forge.serve))
+	defer server.Close()
+
+	result := <-startPublisher(t, server.URL, 93, current)
+	if result.err != nil {
+		t.Fatalf("publisher: %v\n%s", result.err, result.output)
+	}
+	if !strings.Contains(result.output, attestedHead) {
+		t.Fatal("full event evidence was not retained in workflow output")
+	}
+	if len(forge.writes) != 1 || forge.check["conclusion"] != "failure" {
+		t.Fatalf("oversized failure did not publish red verdict: %#v", forge.writes)
+	}
+	output := forge.check["output"].(map[string]any)
+	summary := output["summary"].(string)
+	if len(summary) != 65535 || !strings.HasSuffix(summary, "[Event evidence truncated; full evidence remains in workflow logs.]") {
+		t.Fatalf("check summary was not safely truncated: length=%d", len(summary))
 	}
 }
 
@@ -287,9 +332,6 @@ func TestPublishVerdict_CallerIsTrustedAndSerializesWholeJob(t *testing.T) {
 		t.Fatal("trusted caller must run only immutable published action, no checkout or PR code")
 	}
 	action := loadRequireAction(t, publishActionDir)
-	if len(action.Runs.Steps) != 1 || !strings.Contains(action.Runs.Steps[0].Run, "${GITHUB_ACTION_PATH}/publish.py") {
-		t.Fatal("action must execute tested publisher")
-	}
 	for _, forbidden := range []string{"pr-body", "pr-head-sha"} {
 		if _, ok := action.Inputs[forbidden]; ok {
 			t.Fatal("cannot override event snapshot")
