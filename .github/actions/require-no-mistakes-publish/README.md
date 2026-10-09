@@ -6,7 +6,9 @@ payloads retain their success/failure/exemption result in outputs, logs, and the
 job summary; a stale failure is never relabeled compliant. The runner-owned job
 reports whether recording/publication executed, not whether the PR is compliant.
 Only the action-created **PR must be raised via no-mistakes** check is the
-compliance verdict. A current invalid attestation publishes FAILURE.
+compliance verdict. A current invalid attestation publishes FAILURE. Check
+summaries are bounded to GitHub's 65,535-character limit; when failure evidence
+is longer, the full evidence remains in the workflow log.
 
 ## Caller contract
 
