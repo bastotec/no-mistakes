@@ -3096,6 +3096,28 @@ func TestPublishedArchiveMovedAtRecoveryBoundaryRefuses(t *testing.T) {
 	}
 }
 
+func TestPublishedArchiveRecoveryRefusesCompetingRunWithoutLeavingAnchors(t *testing.T) {
+	t.Parallel()
+	f, _ := newPublishedArchiveRecoverFixture(t)
+	localRefs := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	gateRefs := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	f.service.beforeGateReset = func() {
+		if _, err := f.db.InsertRun(f.repo.ID, f.run.Branch, f.submitted, f.base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := f.service.Recover(f.ctx, true)
+	if result.Recovered || result.Changed || f.custodyReturned() || result.Safety != "blocked_recover_run_active" {
+		t.Fatalf("competing-run refusal = %#v", result)
+	}
+	if got := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != localRefs {
+		t.Fatal("competing-run refusal left local recovery anchors")
+	}
+	if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != gateRefs {
+		t.Fatal("competing-run refusal moved gate refs")
+	}
+}
+
 func TestPublishedTerminalDivergenceRequiresExplicitArchiveBinding(t *testing.T) {
 	t.Parallel()
 	f, ref := newPublishedArchiveRecoverFixture(t, false)

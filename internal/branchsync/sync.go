@@ -1272,7 +1272,7 @@ func (s *Service) recoverKeepLocalAtCurrentHead(ctx context.Context, run *db.Run
 // revalidates the bound archive at the recovery boundary, never selects or
 // replays the archived head, and rolls the gate branch back if custody
 // stamping fails after the gate already moved.
-func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, state State, gateHead string, archive *db.RecoveryArchive) State {
+func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, state State, gateHead string, archive *db.RecoveryArchive) (result State) {
 	if s.beforeGateReset != nil {
 		s.beforeGateReset()
 	}
@@ -1303,6 +1303,13 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		if err != nil || fresh == nil {
 			return unavailableRecoverySource("blocked_recover_assumptions_changed", "the terminal run could not be reloaded; custody was not recorded")
 		}
+		active, err := s.DB.GetActiveRun(s.Repo.ID, state.Local.Branch)
+		if err != nil {
+			return unavailableRecoverySource("blocked_recover_assumptions_changed", "active branch custody could not be verified; custody was not recorded")
+		}
+		if active != nil {
+			return unavailableRecoverySource("blocked_recover_run_active", "another run is active on this branch; custody was not recorded")
+		}
 		current := state
 		current.Local.Branch, branchErr = git.CurrentBranch(ctx, s.workDir())
 		current.Local.Head, headErr = git.HeadSHA(ctx, s.workDir())
@@ -1316,14 +1323,39 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		}
 		return checked
 	}
+	createdAnchors := []struct {
+		ref string
+		sha string
+	}{}
+	defer func() {
+		if result.Recovered {
+			return
+		}
+		for _, anchor := range createdAnchors {
+			if _, err := git.Run(context.WithoutCancel(ctx), s.workDir(), "update-ref", "--no-deref", "-d", anchor.ref, anchor.sha); err != nil {
+				result.Error += fmt.Sprintf("; rollback could not remove recovery anchor %s", anchor.ref)
+			}
+		}
+	}()
 	// Retain BOTH exact histories locally before returning custody. These
 	// create-only anchors never select, merge, or replay either head.
-	for ref, sha := range map[string]string{
-		custody.RecoveryLocalRef(run.ID): archive.RequiredHeadSHA,
-		custody.RecoveryRef(run.ID):      archive.PreservedHeadSHA,
-	} {
-		if err := custody.PreserveRecoveryAnchor(ctx, s.workDir(), ref, sha); err != nil {
+	anchors := []struct {
+		ref string
+		sha string
+	}{
+		{ref: custody.RecoveryLocalRef(run.ID), sha: archive.RequiredHeadSHA},
+		{ref: custody.RecoveryRef(run.ID), sha: archive.PreservedHeadSHA},
+	}
+	for _, anchor := range anchors {
+		_, existed, err := git.ExactRefTarget(ctx, s.workDir(), anchor.ref)
+		if err != nil {
 			return blockedPlan(state, StatePipelineOwned, "blocked_recover_anchor_mismatch", "the required or preserved history could not be anchored; custody was not recorded")
+		}
+		if err := custody.PreserveRecoveryAnchor(ctx, s.workDir(), anchor.ref, anchor.sha); err != nil {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_anchor_mismatch", "the required or preserved history could not be anchored; custody was not recorded")
+		}
+		if !existed {
+			createdAnchors = append(createdAnchors, anchor)
 		}
 	}
 	gateMoved := false
@@ -1369,7 +1401,6 @@ func (s *Service) recoverKeepLocalFromArchive(ctx context.Context, run *db.Run, 
 		}
 		gateMoved = true
 	}
-	var result State
 	if checked := revalidate(); !checked.available {
 		result = checked.apply(state)
 	} else {
