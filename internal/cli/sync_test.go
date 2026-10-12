@@ -1710,3 +1710,70 @@ func asExitError(err error, target **exitError) bool {
 	}
 	return false
 }
+
+func TestAxiPublishedTerminalArchiveReturnsCustodyWithoutSelectingEitherHistory(t *testing.T) {
+	f := newCLIDivergentArchiveFixture(t)
+	// Model a crash after publishing the divergent fixes. All stores and refs
+	// are private test fixtures, never the shared daemon or a real remote.
+	cliGit(t, f.remote, "fetch", "--no-tags", f.local, f.preserved)
+	cliGit(t, f.remote, "update-ref", "refs/heads/feature/recover", f.preserved, f.submitted)
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPushBinding(f.runID, db.PushBinding{
+		HeadSHA: f.preserved, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatusWithVerifiedHead(f.runID, types.RunFailed, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before := cliRecoveryGitSnapshot(t, f)
+	out, err := executeCmd("axi", "sync", "--bind-archive-ref", f.archiveRef)
+	if err != nil {
+		t.Fatalf("bind published archive: %v\n%s", err, out)
+	}
+	for _, want := range []string{"source: bound_archive", "code: recover_custody", "command: no-mistakes axi sync --recover --keep-local", "status: failed", f.submitted, f.preserved} {
+		if !strings.Contains(out, want) {
+			t.Errorf("binding missing %q:\n%s", want, out)
+		}
+	}
+	if got := cliRecoveryGitSnapshot(t, f); got != before {
+		t.Fatal("binding changed Git state")
+	}
+	out, err = executeCmd("axi", "sync", "--recover", "--keep-local")
+	if err != nil {
+		t.Fatalf("published recovery: %v\n%s", err, out)
+	}
+	for _, want := range []string{"recovered: true", "changed: false", "state: custody_returned"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("recovery missing %q:\n%s", want, out)
+		}
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatalf("caller head = %s", got)
+	}
+	if got := cliGit(t, f.local, "rev-parse", f.archiveRef); got != f.preserved {
+		t.Fatalf("archive = %s", got)
+	}
+	if got := cliGit(t, f.local, "rev-parse", "refs/no-mistakes/recover/"+f.runID); got != f.preserved {
+		t.Fatalf("preserved local anchor = %s", got)
+	}
+	if got := cliGit(t, f.local, "rev-parse", "refs/no-mistakes/recover-local/"+f.runID); got != f.submitted {
+		t.Fatalf("required local anchor = %s", got)
+	}
+	if got := cliGit(t, f.remote, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("published remote changed to %s", got)
+	}
+	if got := cliGit(t, f.local, "status", "--porcelain=v1"); got != "" {
+		t.Fatalf("caller worktree touched: %s", got)
+	}
+}
