@@ -163,6 +163,44 @@ func TestReconcileStaleBranchDiagnosticsPreserveLeadingSpacePath(t *testing.T) {
 	}
 }
 
+func TestReconcileStaleBranchBoundsRetentionDiagnostics(t *testing.T) {
+	t.Parallel()
+	work := initReconcileRepo(t)
+	writeReconcileFile(t, work, "large.txt", "shared\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "shared large path")
+	base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	writeReconcileFile(t, work, "large.txt", "private\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "private large edit")
+	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	reconcileGit(t, work, "checkout", "--detach", base)
+	writeReconcileFile(t, work, "large.txt", strings.Repeat("live output that must be drained\n", 100000)+"unbuffered tail marker\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "large live edit")
+	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	gateDir := filepath.Join(t.TempDir(), "gate.git")
+	reconcileGit(t, "", "init", "--bare", gateDir)
+	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature")
+	result, err := ReconcileStaleBranch(context.Background(), gateDir, work, "feature", liveHead, "")
+	if err == nil || result.Reconciled {
+		t.Fatalf("conflicting private edit reconciled: result=%+v err=%v", result, err)
+	}
+	message := err.Error()
+	if !strings.Contains(message, "[patch excerpt truncated; inspect the full diff]") {
+		t.Fatalf("missing truncation notice: %v", err)
+	}
+	if strings.Contains(message, "unbuffered tail marker") {
+		t.Fatalf("diagnostic retained output beyond its bound")
+	}
+	if len(message) > 12*1024 {
+		t.Fatalf("diagnostic grew beyond its bound: %d bytes", len(message))
+	}
+}
+
 func TestReconcileStaleBranchArchivesPatchEquivalentHeadBeforeNonForcePush(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

@@ -375,15 +375,16 @@ func privateRetentionDiagnostics(ctx context.Context, repoDir, liveHead, private
 			args = append(args, path)
 		}
 	}
-	edits, err := git.Run(ctx, repoDir, args...)
+	const maxDiagnosticBytes = 8192
+	edits, truncated, err := git.RunRawLimited(ctx, repoDir, maxDiagnosticBytes, args...)
 	if err != nil {
 		return "Private-path edit diagnostics unavailable: " + err.Error()
 	}
-	const maxDiagnosticBytes = 8192
-	if len(edits) > maxDiagnosticBytes {
-		edits = edits[:maxDiagnosticBytes] + "\n[patch excerpt truncated; inspect the full diff]"
+	excerpt := string(edits)
+	if truncated {
+		excerpt += "\n[patch excerpt truncated; inspect the full diff]"
 	}
-	return "Recent live-only edits on private paths (may supersede or reverse private hunks; not every edit implies loss):\n" + edits
+	return "Recent live-only edits on private paths (may supersede or reverse private hunks; not every edit implies loss):\n" + excerpt
 }
 
 func commitList(ctx context.Context, repoDir string, args ...string) ([]string, error) {
