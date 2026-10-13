@@ -9,6 +9,110 @@ import (
 	"testing"
 )
 
+// A fresh submission after custody return has no run-owned exception. Three
+// rebased patches drift with the moved base, while the fourth is exact. A
+// later wording reversal must remain a refusal, not acquire replay authority.
+func TestReconcileStaleBranchFreshMovedBaseAndLaterReversal(t *testing.T) {
+	for _, reverse := range []bool{false, true} {
+		name := "content survives"
+		if reverse {
+			name = "later wording reversal"
+		}
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			work := initReconcileRepo(t)
+			files := []string{"code.txt", "ordering.txt", "docs.txt"}
+			original := "one\ntwo\nthree\nold wording\nfive\nsix\n"
+			for _, file := range files {
+				writeReconcileFile(t, work, file, original)
+			}
+			reconcileGit(t, work, "add", "-A")
+			reconcileGit(t, work, "commit", "-m", "shared base")
+			base := reconcileGit(t, work, "rev-parse", "HEAD")
+			var privateCommits []string
+			for _, file := range files {
+				writeReconcileFile(t, work, file, strings.ReplaceAll(original, "old wording", "private wording"))
+				reconcileGit(t, work, "add", "-A")
+				reconcileGit(t, work, "commit", "-m", "private "+file)
+				privateCommits = append(privateCommits, reconcileGit(t, work, "rev-parse", "HEAD"))
+			}
+			writeReconcileFile(t, work, "tests.txt", "exact patch\n")
+			reconcileGit(t, work, "add", "-A")
+			reconcileGit(t, work, "commit", "-m", "pin test")
+			privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+			privateCommits = append(privateCommits, privateHead)
+			reconcileGit(t, work, "checkout", "-b", "advanced", base)
+			for _, file := range files {
+				writeReconcileFile(t, work, file, strings.ReplaceAll(original, "one\n", "upstream one\n"))
+			}
+			reconcileGit(t, work, "add", "-A")
+			reconcileGit(t, work, "commit", "-m", "moved base")
+			var replayed []string
+			for _, commit := range privateCommits {
+				reconcileGit(t, work, "cherry-pick", commit)
+				replayed = append(replayed, reconcileGit(t, work, "rev-parse", "HEAD"))
+			}
+			patchID := func(commit string) string {
+				patch := reconcileGit(t, work, "show", "--format=", commit)
+				cmd := exec.Command("git", "-C", work, "patch-id", "--stable")
+				cmd.Stdin = strings.NewReader(patch)
+				out, err := cmd.Output()
+				if err != nil {
+					t.Fatal(err)
+				}
+				return strings.Fields(string(out))[0]
+			}
+			for i := range privateCommits {
+				if same := patchID(privateCommits[i]) == patchID(replayed[i]); same != (i == 3) {
+					t.Fatalf("fixture patch %d: exact=%v, want only fourth exact", i, same)
+				}
+			}
+			reversal := ""
+			if reverse {
+				writeReconcileFile(t, work, "code.txt", strings.ReplaceAll(original, "one\n", "upstream one\n"))
+				reconcileGit(t, work, "add", "-A")
+				reconcileGit(t, work, "commit", "-m", "restore original wording for parity")
+				reversal = reconcileGit(t, work, "rev-parse", "HEAD")
+			}
+			liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+			gateDir := filepath.Join(t.TempDir(), "gate.git")
+			reconcileGit(t, "", "init", "--bare", gateDir)
+			reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature")
+			if _, err := reconcileGitErr(t, work, "push", gateDir, liveHead+":refs/heads/feature"); err == nil {
+				t.Fatal("fixture must strand an ordinary fresh push")
+			}
+			result, err := ReconcileStaleBranch(context.Background(), gateDir, work, "feature", liveHead, "")
+			if reverse {
+				if err == nil || result.Reconciled {
+					t.Fatalf("reversal accepted: %+v %v", result, err)
+				}
+				for _, want := range []string{"retention could not be proven", reversal, "restore original wording for parity", "-private wording", "+old wording", "Next step:", "explicitly decide", "No mirror refs were changed"} {
+					if !strings.Contains(err.Error(), want) {
+						t.Fatalf("missing diagnostic %q: %v", want, err)
+					}
+				}
+				if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature"); got != privateHead {
+					t.Fatalf("refusal moved mirror: %s", got)
+				}
+				if got := reconcileGit(t, gateDir, "tag", "--list", "no-mistakes-abandoned/*"); got != "" {
+					t.Fatalf("refusal created archive: %s", got)
+				}
+				return
+			}
+			if err != nil || !result.Reconciled {
+				t.Fatalf("fresh preserved replay refused: %+v %v", result, err)
+			}
+			if got := reconcileGit(t, gateDir, "rev-parse", result.ArchivedTag); got != privateHead {
+				t.Fatalf("wrong archive: %s", got)
+			}
+			reconcileGit(t, work, "push", gateDir, liveHead+":refs/heads/feature")
+			if got := reconcileGit(t, gateDir, "rev-parse", "refs/heads/feature"); got != liveHead {
+				t.Fatalf("fresh non-force push failed: %s", got)
+			}
+		})
+	}
+}
+
 func TestReconcileStaleBranchArchivesPatchEquivalentHeadBeforeNonForcePush(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()

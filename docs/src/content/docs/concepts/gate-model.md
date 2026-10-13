@@ -120,7 +120,16 @@ same patch-identity comparison backs
 the custody decisions that used to require SHA containment (rerun head
 selection and terminal-run supersession). If neither proof holds, the
 unaccounted private-only range is reported
-as at risk.
+as at risk, not asserted to be lost: a conflict or context drift can also make
+retention unprovable. The refusal includes a bounded excerpt of recent
+live-only commits and hunks on private paths, plus a full head-to-head diff
+command. These edits are diagnostic candidates, not automatically classified
+as reversals. An operator must explicitly decide whether to restore private
+changes or authorize a content-changing history join before retrying; fresh
+submission cannot borrow another run's ownership exception. A moved base
+with preserved content already satisfies the ordinary survival proof, even
+when rebased patch identities drift; a later reversal of private wording does
+not gain authority merely because an earlier replay retained it.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to `Run.SubmittedHeadSHA`** without

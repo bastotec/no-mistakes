@@ -162,9 +162,10 @@ func planStaleBranchReconciliation(ctx context.Context, gateDir, workDir, branch
 				}
 				atRisk = append(atRisk, description)
 			}
+			diagnostics := privateRetentionDiagnostics(ctx, gateDir, liveHead, gateHead, atRiskCommits)
 			return plan, fmt.Errorf(
-				"refusing to reconcile private mirror ref %s: %d at-risk commit(s) contain content absent from live head %s: %s",
-				branchRef, len(atRisk), liveHead, strings.Join(atRisk, "; "),
+				"refusing to reconcile private mirror ref %s: retention could not be proven for %d at-risk commit(s) in live head %s: %s\n%s\nNext step: review git diff %s %s -- and explicitly decide whether to restore the private changes or authorize a content-changing history join before retrying axi run. No mirror refs were changed; fresh submission cannot waive retention using another run's ownership.",
+				branchRef, len(atRisk), liveHead, strings.Join(atRisk, "; "), diagnostics, gateHead, liveHead,
 			)
 		}
 	}
@@ -355,6 +356,34 @@ func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privat
 		return retention.Unretained, nil
 	}
 	return privateOnly, nil
+}
+
+// privateRetentionDiagnostics shows candidate edits, not inferred reversals:
+// conflict resolutions and context drift can also defeat a retention proof.
+// Bound the supplementary patch excerpt; the at-risk listing above remains
+// complete. Failure to read diagnostics never relaxes the refusal.
+func privateRetentionDiagnostics(ctx context.Context, repoDir, liveHead, privateHead string, atRisk []string) string {
+	pathArgs := append([]string{"show", "--format=", "--name-only", "-z"}, atRisk...)
+	pathArgs = append(pathArgs, "--")
+	paths, err := git.Run(ctx, repoDir, pathArgs...)
+	if err != nil {
+		return "Private-path edit diagnostics unavailable: " + err.Error()
+	}
+	args := []string{"log", "-5", "--format=commit %H %s", "-p", "--unified=0", "--no-ext-diff", liveHead, "--not", privateHead, "--"}
+	for _, path := range strings.Split(paths, "\x00") {
+		if path != "" {
+			args = append(args, path)
+		}
+	}
+	edits, err := git.Run(ctx, repoDir, args...)
+	if err != nil {
+		return "Private-path edit diagnostics unavailable: " + err.Error()
+	}
+	const maxDiagnosticBytes = 8192
+	if len(edits) > maxDiagnosticBytes {
+		edits = edits[:maxDiagnosticBytes] + "\n[patch excerpt truncated; inspect the full diff]"
+	}
+	return "Recent live-only edits on private paths (may supersede or reverse private hunks; not every edit implies loss):\n" + edits
 }
 
 func commitList(ctx context.Context, repoDir string, args ...string) ([]string, error) {
