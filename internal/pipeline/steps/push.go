@@ -55,16 +55,11 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err != nil {
 		return nil, fmt.Errorf("check agent changes: %w", err)
 	}
-	// The subject honors commit.fix_message like every other pipeline-authored
-	// correction commit (see commitAgentFixesWithResult); the literal is only a
-	// last-resort fallback when the configured template cannot render.
-	correctionSubject := "no-mistakes: apply agent fixes"
-	if rendered, err := sctx.Config.Commit.RenderFixMessageForBranch(s.Name(), "apply agent fixes", sctx.Run.Branch); err != nil {
-		sctx.Log(fmt.Sprintf("warning: render correction commit subject: %v", err))
-	} else {
-		correctionSubject = rendered
-	}
 	if strings.TrimSpace(status) != "" {
+		correctionSubject, err := sctx.Config.Commit.RenderFixMessageForBranch(s.Name(), "apply agent fixes", sctx.Run.Branch)
+		if err != nil {
+			return nil, fmt.Errorf("render correction commit subject: %w", err)
+		}
 		sctx.Log("committing agent changes...")
 		if err := stagePipelineChanges(sctx); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)

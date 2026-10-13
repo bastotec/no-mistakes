@@ -498,19 +498,11 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	}
 }
 
-// TestPushStep_CommitsLeftoverChangesWhenLegacyHuskyRuntimeIsMissing pins the
-// Push step's leftover-worktree commit against the same fresh-worktree hook
-// failure the correction-commit helper exists to survive: core.hooksPath=.husky
-// with a tracked pre-commit hook sourcing the generated .husky/_/husky.sh that
-// this worktree never had. The formatter or the Test step's evidence agent left
-// an uncommitted edit behind, and the run must still deliver it.
 // TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate pins the
 // Push step's catch-all correction commit to commit.fix_message: it is a
 // pipeline-authored commit like the Review/Test/Document/Lint/CI correction
 // commits, so its subject must honor the configured template instead of the
-// historical "no-mistakes: apply agent fixes" literal (captain's ruling
-// 2026-10-13). The literal survives only as the fallback when the template
-// cannot render.
+// historical "no-mistakes: apply agent fixes" literal.
 func TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
@@ -552,6 +544,49 @@ func TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate(t *test
 	}
 }
 
+func TestPushStep_RenderFixMessageErrorLeavesChangesUnstaged(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("formatted feature code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.Commit = config.Commit{
+		FixMessage:        "{{.Branch}}: {{.Summary}}",
+		BranchPattern:     `^PROJ/([0-9]+)$`,
+		BranchReplacement: "PROJ-${1}",
+	}
+
+	_, err := (&PushStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "render correction commit subject") {
+		t.Fatalf("push error = %v, want correction subject rendering error", err)
+	}
+	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
+		t.Fatalf("staged files after template error = %q, want none", got)
+	}
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("head after template error = %s, want %s", got, headSHA)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote head after template error = %s, want %s", got, headSHA)
+	}
+}
+
+// TestPushStep_CommitsLeftoverChangesWhenLegacyHuskyRuntimeIsMissing pins the
+// Push step's leftover-worktree commit against the same fresh-worktree hook
+// failure the correction-commit helper exists to survive: core.hooksPath=.husky
+// with a tracked pre-commit hook sourcing the generated .husky/_/husky.sh that
+// this worktree never had. The formatter or the Test step's evidence agent left
+// an uncommitted edit behind, and the run must still deliver it.
 func TestPushStep_CommitsLeftoverChangesWhenLegacyHuskyRuntimeIsMissing(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
