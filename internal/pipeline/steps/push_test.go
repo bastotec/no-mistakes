@@ -504,6 +504,54 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 // with a tracked pre-commit hook sourcing the generated .husky/_/husky.sh that
 // this worktree never had. The formatter or the Test step's evidence agent left
 // an uncommitted edit behind, and the run must still deliver it.
+// TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate pins the
+// Push step's catch-all correction commit to commit.fix_message: it is a
+// pipeline-authored commit like the Review/Test/Document/Lint/CI correction
+// commits, so its subject must honor the configured template instead of the
+// historical "no-mistakes: apply agent fixes" literal (captain's ruling
+// 2026-10-13). The literal survives only as the fallback when the template
+// cannot render.
+func TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	// Leftover worktree change the Push step must commit before pushing.
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("formatted feature code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.Commit = config.Commit{FixMessage: "fix({{.Step}}): {{.Summary}}"}
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, headSHA)
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("push failed: %v", err)
+	}
+
+	pushedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if pushedHead == headSHA {
+		t.Fatal("expected a correction commit carrying the leftover change")
+	}
+	subject := gitCmd(t, dir, "log", "-1", "--format=%s", pushedHead)
+	if subject != "fix(push): apply agent fixes" {
+		t.Fatalf("correction commit subject = %q, want the configured commit.fix_message rendering %q", subject, "fix(push): apply agent fixes")
+	}
+	if strings.HasPrefix(subject, "no-mistakes") {
+		t.Fatalf("correction commit subject %q still carries the hardcoded no-mistakes prefix", subject)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != pushedHead {
+		t.Fatalf("remote head = %s, want pushed correction commit %s", got, pushedHead)
+	}
+}
+
 func TestPushStep_CommitsLeftoverChangesWhenLegacyHuskyRuntimeIsMissing(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
