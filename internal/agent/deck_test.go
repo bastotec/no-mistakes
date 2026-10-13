@@ -184,3 +184,133 @@ printf '%s\n' '{"type":"run_started","model":"provider/model"}' '{"type":"text_d
 		})
 	}
 }
+
+// fakeDeck writes a Deck stand-in whose `run --help` lists the given flags
+// (counting each probe in ./probes) and whose runs record their argv in ./args.
+func fakeDeck(t *testing.T, helpFlags string) (bin, dir string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	dir = t.TempDir()
+	bin = filepath.Join(dir, "deck")
+	script := `#!/bin/sh
+cd "$(dirname "$0")"
+if [ "$1" = run ] && [ "$2" = --help ]; then
+  echo probe >> probes
+  printf 'Usage: deck run [OPTIONS] <PROMPT>\n      --ephemeral\n` + helpFlags + `'
+  exit 0
+fi
+printf '%s\n' "$@" > args
+cat >/dev/null
+printf '%s\n' '{"type":"run_finished","output":"{\"ok\":true}"}'
+`
+	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return bin, dir
+}
+
+func deckRunArgs(t *testing.T, a Agent, dir string) []string {
+	t.Helper()
+	if _, err := a.Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "review", JSONSchema: json.RawMessage(`{"type":"object","required":["ok"]}`)}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "args"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Fields(string(raw))
+}
+
+func countProbes(t *testing.T, dir string) int {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(dir, "probes"))
+	if os.IsNotExist(err) {
+		return 0
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Count(string(raw), "probe")
+}
+
+func TestDeckOptOutPassesNoProjectContextAndNeutralizes(t *testing.T) {
+	bin, dir := fakeDeck(t, `      --no-project-context\n`)
+	a, err := NewWithOptions(types.AgentDeck, bin, []string{"--effort", "high"}, Options{DisableProjectSettings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !NeutralizesGateInstructions(a) {
+		t.Fatal("a Deck build listing --no-project-context must neutralize under the opt-out")
+	}
+	if err := EnsureGateNeutralized(a); err != nil {
+		t.Fatalf("gate refused a neutralizing Deck: %v", err)
+	}
+	got := strings.Join(deckRunArgs(t, a, dir), " ")
+	if got != "run --no-project-context --effort high --ephemeral -" {
+		t.Fatalf("argv = %q", got)
+	}
+	// A second agent for the same unchanged binary reuses the probe.
+	if _, err := NewWithOptions(types.AgentDeck, bin, nil, Options{DisableProjectSettings: true}); err != nil {
+		t.Fatal(err)
+	}
+	if n := countProbes(t, dir); n != 1 {
+		t.Fatalf("probes = %d, want 1 (cached per binary identity)", n)
+	}
+}
+
+func TestDeckOptOutKeepsAnOperatorPinnedFlagOnce(t *testing.T) {
+	bin, dir := fakeDeck(t, `      --no-project-context\n`)
+	a, err := NewWithOptions(types.AgentDeck, bin, []string{"--no-project-context"}, Options{DisableProjectSettings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !NeutralizesGateInstructions(a) {
+		t.Fatal("an operator-pinned --no-project-context must stay neutralized")
+	}
+	if got := strings.Join(deckRunArgs(t, a, dir), " "); got != "run --no-project-context --ephemeral -" {
+		t.Fatalf("argv = %q", got)
+	}
+}
+
+func TestDeckWithoutTheFlagFailsTheGateClosed(t *testing.T) {
+	bin, dir := fakeDeck(t, "")
+	a, err := NewWithOptions(types.AgentDeck, bin, nil, Options{DisableProjectSettings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if NeutralizesGateInstructions(a) {
+		t.Fatal("a Deck build without --no-project-context must not report neutralized")
+	}
+	if err := EnsureGateNeutralized(a); err == nil || !strings.Contains(err.Error(), "deck") || !strings.Contains(err.Error(), "--no-project-context") {
+		t.Fatalf("gate error = %v", err)
+	}
+	if countProbes(t, dir) != 1 {
+		t.Fatal("the opt-out must probe the binary")
+	}
+	missing, err := NewWithOptions(types.AgentDeck, filepath.Join(t.TempDir(), "deck"), nil, Options{DisableProjectSettings: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if NeutralizesGateInstructions(missing) {
+		t.Fatal("a missing Deck binary must not report neutralized")
+	}
+}
+
+func TestDeckWithoutOptOutIsUnchanged(t *testing.T) {
+	bin, dir := fakeDeck(t, `      --no-project-context\n`)
+	a, err := NewWithOptions(types.AgentDeck, bin, []string{"--effort", "high"}, Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if NeutralizesGateInstructions(a) {
+		t.Fatal("without the opt-out Deck must not claim neutralization")
+	}
+	if got := strings.Join(deckRunArgs(t, a, dir), " "); got != "run --effort high --ephemeral -" {
+		t.Fatalf("argv = %q", got)
+	}
+	if countProbes(t, dir) != 0 {
+		t.Fatal("without the opt-out the binary must not be probed")
+	}
+}
