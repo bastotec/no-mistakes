@@ -365,12 +365,12 @@ func privateCommitsAbsentFromLive(ctx context.Context, repoDir, liveHead, privat
 func privateRetentionDiagnostics(ctx context.Context, repoDir, liveHead, privateHead string, atRisk []string) string {
 	pathArgs := append([]string{"show", "--format=", "--name-only", "-z"}, atRisk...)
 	pathArgs = append(pathArgs, "--")
-	paths, err := git.Run(ctx, repoDir, pathArgs...)
+	paths, err := git.RunRaw(ctx, repoDir, pathArgs...)
 	if err != nil {
 		return "Private-path edit diagnostics unavailable: " + err.Error()
 	}
 	args := []string{"log", "-5", "--format=commit %H %s", "-p", "--unified=0", "--no-ext-diff", liveHead, "--not", privateHead, "--"}
-	for _, path := range strings.Split(paths, "\x00") {
+	for _, path := range strings.Split(string(paths), "\x00") {
 		if path != "" {
 			args = append(args, path)
 		}

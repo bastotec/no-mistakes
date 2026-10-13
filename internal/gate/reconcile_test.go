@@ -10,8 +10,9 @@ import (
 )
 
 // A fresh submission after custody return has no run-owned exception. Three
-// rebased patches drift with the moved base, while the fourth is exact. A
-// later wording reversal must remain a refusal, not acquire replay authority.
+// patches require conflict resolution over a moved base, while the fourth is
+// exact. A later superseding edit cannot acquire authority from the replay and
+// must fail with enough evidence for an explicit operator decision.
 func TestReconcileStaleBranchFreshMovedBaseAndLaterReversal(t *testing.T) {
 	for _, reverse := range []bool{false, true} {
 		name := "content survives"
@@ -43,13 +44,26 @@ func TestReconcileStaleBranchFreshMovedBaseAndLaterReversal(t *testing.T) {
 			privateCommits = append(privateCommits, privateHead)
 			reconcileGit(t, work, "checkout", "-b", "advanced", base)
 			for _, file := range files {
-				writeReconcileFile(t, work, file, strings.ReplaceAll(original, "one\n", "upstream one\n"))
+				moved := strings.ReplaceAll(original, "one\n", "upstream one\n")
+				moved = strings.ReplaceAll(moved, "old wording", "upstream wording")
+				writeReconcileFile(t, work, file, moved)
 			}
 			reconcileGit(t, work, "add", "-A")
 			reconcileGit(t, work, "commit", "-m", "moved base")
 			var replayed []string
-			for _, commit := range privateCommits {
-				reconcileGit(t, work, "cherry-pick", commit)
+			for i, commit := range privateCommits {
+				if i < len(files) {
+					if _, err := reconcileGitErr(t, work, "cherry-pick", commit); err == nil {
+						t.Fatalf("fixture patch %d must conflict over the moved base", i)
+					}
+					resolved := strings.ReplaceAll(original, "one\n", "upstream one\n")
+					resolved = strings.ReplaceAll(resolved, "old wording", "private wording")
+					writeReconcileFile(t, work, files[i], resolved)
+					reconcileGit(t, work, "add", files[i])
+					reconcileGit(t, work, "cherry-pick", "--continue")
+				} else {
+					reconcileGit(t, work, "cherry-pick", commit)
+				}
 				replayed = append(replayed, reconcileGit(t, work, "rev-parse", "HEAD"))
 			}
 			patchID := func(commit string) string {
@@ -69,9 +83,11 @@ func TestReconcileStaleBranchFreshMovedBaseAndLaterReversal(t *testing.T) {
 			}
 			reversal := ""
 			if reverse {
-				writeReconcileFile(t, work, "code.txt", strings.ReplaceAll(original, "one\n", "upstream one\n"))
+				reversed := strings.ReplaceAll(original, "one\n", "upstream one\n")
+				reversed = strings.ReplaceAll(reversed, "old wording", "upstream wording")
+				writeReconcileFile(t, work, "code.txt", reversed)
 				reconcileGit(t, work, "add", "-A")
-				reconcileGit(t, work, "commit", "-m", "restore original wording for parity")
+				reconcileGit(t, work, "commit", "-m", "restore upstream wording for parity")
 				reversal = reconcileGit(t, work, "rev-parse", "HEAD")
 			}
 			liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
@@ -86,7 +102,7 @@ func TestReconcileStaleBranchFreshMovedBaseAndLaterReversal(t *testing.T) {
 				if err == nil || result.Reconciled {
 					t.Fatalf("reversal accepted: %+v %v", result, err)
 				}
-				for _, want := range []string{"retention could not be proven", reversal, "restore original wording for parity", "-private wording", "+old wording", "Next step:", "explicitly decide", "No mirror refs were changed"} {
+				for _, want := range []string{"retention could not be proven", reversal, "restore upstream wording for parity", "-private wording", "+upstream wording", "Next step:", "explicitly decide", "No mirror refs were changed"} {
 					if !strings.Contains(err.Error(), want) {
 						t.Fatalf("missing diagnostic %q: %v", want, err)
 					}
@@ -110,6 +126,40 @@ func TestReconcileStaleBranchFreshMovedBaseAndLaterReversal(t *testing.T) {
 				t.Fatalf("fresh non-force push failed: %s", got)
 			}
 		})
+	}
+}
+
+func TestReconcileStaleBranchDiagnosticsPreserveLeadingSpacePath(t *testing.T) {
+	t.Parallel()
+	work := initReconcileRepo(t)
+	path := " private.txt"
+	writeReconcileFile(t, work, path, "shared wording\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "shared leading-space path")
+	base := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	writeReconcileFile(t, work, path, "private wording\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "private leading-space edit")
+	privateHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	reconcileGit(t, work, "checkout", "--detach", base)
+	writeReconcileFile(t, work, path, "live wording\n")
+	reconcileGit(t, work, "add", "-A")
+	reconcileGit(t, work, "commit", "-m", "live leading-space edit")
+	liveHead := reconcileGit(t, work, "rev-parse", "HEAD")
+
+	gateDir := filepath.Join(t.TempDir(), "gate.git")
+	reconcileGit(t, "", "init", "--bare", gateDir)
+	reconcileGit(t, gateDir, "fetch", work, privateHead+":refs/heads/feature")
+	result, err := ReconcileStaleBranch(context.Background(), gateDir, work, "feature", liveHead, "")
+	if err == nil || result.Reconciled {
+		t.Fatalf("conflicting private edit reconciled: result=%+v err=%v", result, err)
+	}
+	for _, want := range []string{"live leading-space edit", "+live wording"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("leading-space path diagnostic missing %q: %v", want, err)
+		}
 	}
 }
 
