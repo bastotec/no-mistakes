@@ -325,6 +325,9 @@ func agentNeutralGlobalConfig(data []byte) ([]byte, error) {
 	delete(raw, "agent_args_override")
 	delete(raw, "agent_config")
 	delete(raw, "review_agents")
+	if review, ok := raw["review"].(map[string]any); ok {
+		delete(review, "routes")
+	}
 	out, err := yaml.Marshal(raw)
 	if err != nil {
 		return nil, fmt.Errorf("serialize agent-neutral global config: %w", err)

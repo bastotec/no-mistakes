@@ -37,3 +37,19 @@ document:
     and regression tests. Do not duplicate generic command catalogs, but retain
     its project-specific verification sequence and other load-bearing operating
     guidance.
+
+# Review sizing: changes to gate custody, publication, history safety, the
+# config trust boundary, or the enforcement action get the multi-angle review
+# whatever their size.
+review:
+  sizing:
+    risky_paths:
+      - "internal/gate/**"
+      - "internal/branchsync/**"
+      - "internal/config/**"
+      - "internal/pipeline/steps/push.go"
+      - "internal/pipeline/steps/history.go"
+      - ".github/actions/require-no-mistakes/**"
+      - "*auth*"
+      - "*secret*"
+      - "*credential*"

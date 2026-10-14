@@ -70,7 +70,7 @@ func (a *claudeAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error
 	if opts.Session != nil {
 		resumeID = opts.Session.ID
 	}
-	args := a.buildArgs(opts.JSONSchema, resumeID)
+	args := a.buildArgs(opts.JSONSchema, resumeID, opts.Tuning)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	// Claude Code print mode documents text stdin as its non-interactive
@@ -171,9 +171,16 @@ func finalizeClaudeResult(result *claudeResult, schema json.RawMessage, usage To
 // is not added. A non-empty resumeID continues that session via --resume
 // (never --fork-session: the session identity must stay stable so later
 // turns keep resuming the same conversation).
-func (a *claudeAgent) buildArgs(schema json.RawMessage, resumeID string) []string {
-	args := make([]string, 0, len(a.extraArgs)+11)
-	args = append(args, a.extraArgs...)
+func (a *claudeAgent) buildArgs(schema json.RawMessage, resumeID string, tuning *InvocationTuning) []string {
+	extra := a.extraArgs
+	if tuning != nil {
+		// Claude takes a model and effort per invocation; it has no
+		// model-call bound flag, so MaxTurns and DeadlineSecs do not apply.
+		extra = withValueFlag(extra, tuning.Model, "--model")
+		extra = withValueFlag(extra, tuning.Effort, "--effort")
+	}
+	args := make([]string, 0, len(extra)+11)
+	args = append(args, extra...)
 	args = append(args,
 		"-p",
 		"--verbose",

@@ -356,23 +356,32 @@ Risk assessment (after listing all findings):
 		Purpose:    "review",
 		Workload:   workload,
 	}
-	var findings Findings
-	for attempt := 1; ; attempt++ {
-		result, err := s.runReviewAgent(sctx, "agent review", "", opts)
-		if err == nil {
-			findings, err = parseReviewAnalyzerOutput(result)
-			if err == nil {
-				break
-			}
-		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
-			return nil, err
-		}
-		if attempt == reviewAnalyzerMaxAttempts {
-			return nil, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
-		}
-		sctx.Log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", strings.ReplaceAll(err.Error(), "\n", "; "), attempt+1, reviewAnalyzerMaxAttempts))
-		opts.Prompt = prompt + reviewRetryNote(err)
+	//
+	// How much review the change gets is sized from its diff: a small change
+	// gets one light reviewer, a normal one today's single reviewer, and a
+	// large or risky one the multi-angle review (review_multiangle.go). The
+	// chosen level is recorded on the findings for the PR attestation.
+	// A rereview sizes the head it certifies: the fixer may have grown the
+	// change past a threshold since the workload above was measured.
+	sizedWorkload := workload
+	if sctx.Fixing {
+		sizedWorkload = reviewWorkload(ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA)
 	}
+	plan := planReview(reviewSizingOf(sctx.Config), sctx.Config.Review.Routes, sizedWorkload, changed)
+	sctx.Log(fmt.Sprintf("review level %s: %s", plan.Effort, plan.Reason))
+	var findings Findings
+	if plan.multiAngle() {
+		verifyContext := fmt.Sprintf("Context:\n- branch: %s\n- base commit: %s\n- target commit: %s\n- review scope: %s\n- default branch: %s",
+			branch, baseSHA, sctx.Run.HeadSHA, reviewScope, integrationBranchPromptLabel(sctx)) + userIntentPromptSection(sctx) + pathInstructions
+		findings, err = s.runMultiAngleReview(sctx, opts, plan, verifyContext)
+	} else {
+		opts.Tuning = plan.Tuning
+		findings, err = s.reviewWithSchemaRetry(sctx, "agent review", opts, sctx.Log)
+	}
+	if err != nil {
+		return nil, err
+	}
+	findings.ReviewEffort, findings.ReviewEffortReason = plan.Effort, plan.Reason
 
 	// Phase ownership boundary: drop findings that only claim later pipeline-
 	// owned delivery (push/PR/CI for this run) has not happened yet. Prompt
@@ -394,9 +403,34 @@ Risk assessment (after listing all findings):
 	})
 }
 
-// reviewAnalyzerMaxAttempts bounds the review turns one Execute spends on
+// reviewAnalyzerMaxAttempts bounds the review turns one reviewer spends on
 // output that fails validation, including the first.
 const reviewAnalyzerMaxAttempts = 3
+
+// reviewWithSchemaRetry runs one reviewer, rerunning it fresh with the
+// validation error when its final JSON fails the review schema, up to
+// reviewAnalyzerMaxAttempts. Every other failure returns at once, and so does
+// a rejection from a turn its deadline or a cancellation cut short.
+func (s *ReviewStep) reviewWithSchemaRetry(sctx *pipeline.StepContext, prefix string, opts agent.RunOpts, log func(string)) (Findings, error) {
+	prompt := opts.Prompt
+	for attempt := 1; ; attempt++ {
+		result, err := s.runReviewAgent(sctx, prefix, "", opts)
+		if err == nil {
+			findings, parseErr := parseReviewAnalyzerOutput(result)
+			if parseErr == nil {
+				return findings, nil
+			}
+			err = parseErr
+		} else if !agent.IsStructuredOutputRejected(err) || sctx.Ctx.Err() != nil || errors.Is(err, errReviewAgentTimeout) {
+			return Findings{}, err
+		}
+		if attempt == reviewAnalyzerMaxAttempts {
+			return Findings{}, fmt.Errorf("validate review analyzer findings after %d attempts: %w", reviewAnalyzerMaxAttempts, err)
+		}
+		log(fmt.Sprintf("review analyzer findings rejected (%s); rerunning the review (attempt %d of %d)", oneLine(err), attempt+1, reviewAnalyzerMaxAttempts))
+		opts.Prompt = prompt + reviewRetryNote(err)
+	}
+}
 
 // parseReviewAnalyzerOutput validates a review turn's structured findings. A
 // review that produced no structured output, or one whose risk assessment is

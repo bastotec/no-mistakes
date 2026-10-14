@@ -84,7 +84,7 @@ func TestNewWithOptions_RawOverrideKeepsWinning(t *testing.T) {
 		t.Fatalf("extraArgs = %v, want %v", got, want)
 	}
 	ca := ag.(*claudeAgent)
-	built := ca.buildArgs(nil, "")
+	built := ca.buildArgs(nil, "", nil)
 	if strings.Count(strings.Join(built, " "), "--model") != 1 {
 		t.Fatalf("claude received --model more than once: %v", built)
 	}

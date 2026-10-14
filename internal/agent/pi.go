@@ -61,7 +61,7 @@ func (a *piAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 		// turn a recovery attempt into an arbitrary session-file selection.
 		return nil, fmt.Errorf("invalid pi session identity")
 	}
-	args := a.buildArgs(opts.Session)
+	args := a.buildArgs(opts.Session, opts.Tuning)
 	cmd := exec.CommandContext(ctx, a.bin, args...)
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
@@ -170,9 +170,16 @@ func piStdinError(err error) error {
 // intentionally cold step; an empty SessionRef starts a durable session; a
 // populated SessionRef resumes the UUID that no-mistakes previously recorded.
 // Under the project-settings opt-out, the context-file suppression flag comes
-// first. User extras otherwise precede managed JSON/session flags.
-func (a *piAgent) buildArgs(session *SessionRef) []string {
-	args := make([]string, 0, len(a.extraArgs)+5)
+// first. User extras otherwise precede managed JSON/session flags. A tuning
+// replaces the operator's --model and --thinking for this invocation; Pi has
+// no model-call bound, so MaxTurns and DeadlineSecs do not apply.
+func (a *piAgent) buildArgs(session *SessionRef, tuning *InvocationTuning) []string {
+	extra := a.extraArgs
+	if tuning != nil {
+		extra = withValueFlag(extra, tuning.Model, "--model")
+		extra = withValueFlag(extra, tuning.Effort, "--thinking")
+	}
+	args := make([]string, 0, len(extra)+5)
 	// Project-settings opt-out (trusted-only; see config.DisableProjectSettings):
 	// disable AGENTS.md/CLAUDE.md discovery so an agent-orchestration target
 	// (firstmate) cannot install a fleet-captain identity on the gate agent.
@@ -181,14 +188,14 @@ func (a *piAgent) buildArgs(session *SessionRef) []string {
 	// instruction files exactly as before (backward-compat).
 	pinIndex := -1
 	if a.disableProjectSettings {
-		pinIndex = piNoContextFilesArgIndex(a.extraArgs)
+		pinIndex = piNoContextFilesArgIndex(extra)
 		contextFlag := "--no-context-files"
 		if pinIndex >= 0 {
-			contextFlag = a.extraArgs[pinIndex]
+			contextFlag = extra[pinIndex]
 		}
 		args = append(args, contextFlag)
 	}
-	for i, arg := range a.extraArgs {
+	for i, arg := range extra {
 		if i != pinIndex {
 			args = append(args, arg)
 		}

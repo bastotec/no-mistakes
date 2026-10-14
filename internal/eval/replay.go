@@ -478,7 +478,14 @@ func replayConfig(c Case) (*config.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("load captured repo config: %w", err)
 	}
-	return config.Merge(global, repo), nil
+	cfg := config.Merge(global, repo)
+	// A replay measures one candidate profile against one captured review, so
+	// it always runs the single reviewer at the candidate's own model and
+	// effort: review sizing and routes would replace exactly the knobs the
+	// comparison pins.
+	cfg.Review.Sizing.Fixed = config.ReviewEffortMedium
+	cfg.Review.Routes = config.ReviewRoutesRaw{}
+	return cfg, nil
 }
 
 type observedAgent struct {
@@ -529,12 +536,12 @@ func (a *observedAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Res
 	}
 	started := time.Now()
 	result, err := a.inner.Run(ctx, opts)
-	a.durationMS += time.Since(started).Milliseconds()
-	a.result = result
 	if attempts == 0 {
 		a.observeUsage(result)
 	}
 	a.mu.Lock()
+	a.durationMS += time.Since(started).Milliseconds()
+	a.result = result
 	ownershipErr := a.ownershipErr
 	a.mu.Unlock()
 	if ownershipErr != nil {
@@ -543,7 +550,10 @@ func (a *observedAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Res
 	return result, err
 }
 
+// observeUsage may run on several review agents at once, so it holds a.mu.
 func (a *observedAgent) observeUsage(result *agent.Result) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	if result == nil || !result.UsageReported {
 		a.usageMissing = true
 		return

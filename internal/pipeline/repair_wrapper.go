@@ -35,6 +35,7 @@ type repairInvocationDescriptor struct {
 	Workload              *agent.InvocationWorkload `json:"workload,omitempty"`
 	DeadlineUnixNano      int64                     `json:"deadline_unix_nano,omitempty"`
 	DeadlineClass         string                    `json:"deadline_class,omitempty"`
+	Tuning                *agent.InvocationTuning   `json:"tuning,omitempty"`
 }
 
 type repairInvocationResultFile struct {
@@ -131,6 +132,7 @@ func launchIndependentRepair(ctx context.Context, database *db.DB, root, invocat
 		Prompt: opts.Prompt, CWD: opts.CWD, JSONSchema: opts.JSONSchema,
 		Session: opts.Session, SessionFallback: opts.SessionFallback, Purpose: opts.Purpose,
 		SessionFallbackReason: opts.SessionFallbackReason, Workload: opts.Workload,
+		Tuning: opts.Tuning,
 	}
 	if deadline, ok := ctx.Deadline(); ok {
 		wire.DeadlineUnixNano = deadline.UnixNano()
@@ -307,6 +309,7 @@ func RunRepairInvocationWrapper(invocationID string) error {
 		Prompt: invocation.Prompt, Env: runEnvironment, CWD: invocation.CWD, JSONSchema: invocation.JSONSchema,
 		Session: invocation.Session, SessionFallback: invocation.SessionFallback, Purpose: invocation.Purpose,
 		SessionFallbackReason: invocation.SessionFallbackReason, Workload: invocation.Workload,
+		Tuning: invocation.Tuning,
 		OnLifecycle: func(event agent.LifecycleEvent) {
 			if event.Phase == agent.LifecyclePhaseStart {
 				activity := event.Message

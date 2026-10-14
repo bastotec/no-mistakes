@@ -50,6 +50,9 @@ review:
       instructions: |
         Prose changes only. Do not request test coverage.
   # max_rounds: 2
+  # How much review a change gets (see review.sizing below).
+  # sizing:
+  #   risky_paths: ["internal/gate/**", "*auth*"]
 
 # For orchestration repos whose project instructions would misidentify gate agents.
 # Read only from the trusted default branch. Defaults to false.
@@ -459,6 +462,45 @@ Overrides the global [`review.max_rounds`](/no-mistakes/reference/global-config/
 | Default | Inherits from global (default `0`, unlimited) |
 
 Like the rest of the `review` block it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`, so a pushed branch cannot shorten its own review.
+
+### review.sizing
+
+Sizes the Review step to the change. Every field is optional.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `min_effort` | `string` | `low` | The lightest level any change gets: `low`, `medium`, `high`, `xhigh` or `max`. Sizing can raise a change above it, never below; `xhigh` and `max` are only reachable through it |
+| `small_max_lines` | `int` | `80` | A change at or under both small limits gets `low` |
+| `small_max_files` | `int` | `3` | |
+| `large_min_lines` | `int` | `800` | A change at or over either large limit gets `high` |
+| `large_min_files` | `int` | `20` | |
+| `risky_paths` | `string[]` | see below | A change touching any of these gets `high` whatever its size |
+
+Lines are added plus deleted lines in the branch diff, before `ignore_patterns` filtering. Risky paths and large limits take precedence over small limits; the numeric limits must be non-negative. Anything between small and large gets `medium`. An unreadable diff size gets `medium` unless a risky path raises it to `high`; `min_effort` still applies.
+A `risky_paths` glob containing `/` matches like `ignore_patterns` (a trailing `/**` is a subtree); one without `/` matches any single path segment, case-insensitively, so `*auth*` matches both `internal/auth/session.go` and `oauth.go`.
+Risky paths are matched against every changed file, including ignored ones. Unset, the defaults are `*auth*`, `*secur*`, `*secret*`, `*credential*`, `*password*`, `*crypto*`, `*permission*` and `*migration*`; an empty list turns path risk off.
+What each level runs is described under [Review](/no-mistakes/reference/pipeline-steps/#review).
+
+```yaml
+review:
+  sizing:
+    large_min_lines: 600
+    risky_paths: ["internal/gate/**", "internal/branchsync/**", "*auth*"]
+```
+
+Like the rest of the `review` block it is honored **only from the trusted default-branch copy**, so a pushed branch cannot lighten its own review.
+
+### review.routes
+
+Overrides the global [`review.routes`](/no-mistakes/reference/global-config/#reviewroutes) for this repository, field by field: a nonempty `finders` list and nonblank `light` or `verify` strings replace their global values. Empty values inherit rather than clearing a global route.
+
+```yaml
+review:
+  routes:
+    finders: [chain/review, zai/glm-5.3, claude/sonnet-5-5]
+```
+
+Honored **only from the trusted default-branch copy**, like the rest of the `review` block, so a pushed branch cannot pick the models that review it.
 
 ### gates
 

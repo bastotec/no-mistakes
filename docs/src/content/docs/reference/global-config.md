@@ -140,7 +140,7 @@ The effective agent configuration must resolve to a runnable runner before a new
 If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
 
-This fork configures `agent: deck` in its repository config; other agents remain available. Deck runs `deck run --ephemeral -`, feeds the prompt and output schema on stdin, and validates the terminal JSONL `run_finished.output`. A missing terminal event or `run_failed` is an error, even with exit status zero. Review, fix, and Test use the same adapter with fresh sessions. Deck model selection uses `agent_config.deck.model`; effort is unsupported and fails closed. Deck supports [`disable_project_settings: true`](/no-mistakes/reference/repo-config/#disable_project_settings) subject to the feature-probe requirement documented there. Native Deck turn/deadline limits still apply and can be configured through `agent_args_override.deck`.
+This fork configures `agent: deck` in its repository config; other agents remain available. Deck runs `deck run --ephemeral -`, feeds the prompt and output schema on stdin, and validates the terminal JSONL `run_finished.output`. A missing terminal event or `run_failed` is an error, even with exit status zero. Review, fix, and Test use the same adapter with fresh sessions. Deck model selection uses `agent_config.deck.model`; `agent_config.deck.effort` remains unsupported and fails closed (Review's per-invocation tuning is separate; see [Review](/no-mistakes/reference/pipeline-steps/#review)). Deck supports [`disable_project_settings: true`](/no-mistakes/reference/repo-config/#disable_project_settings) subject to the feature-probe requirement documented there. Native Deck turn/deadline limits still apply and can be configured through `agent_args_override.deck`.
 
 You can also set an ordered fallback list:
 
@@ -268,7 +268,7 @@ How each field maps:
 
 `agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored.
 
-**Precedence.** `agent_args_override` always wins. If a raw flag already pins a knob natively - for example, `-m`, `--model`, or a `-c`/`--config` assignment whose exact key is `model` or `model_reasoning_effort` for Codex, plus the other harnesses' `--effort`, `--reasoning-effort`, or `--thinking` forms - then `agent_config` does not emit its value for that knob. Text such as `model=` nested inside an unrelated option's value is not a pin. Any knob the raw flags leave alone still comes from `agent_config`, so adding `agent_config` to an existing configuration never changes the arguments that configuration already supplied:
+**Precedence.** `agent_args_override` wins over `agent_config`; Review's supported [per-invocation tuning](/no-mistakes/reference/pipeline-steps/#review) is a separate override that can replace either. If a raw flag already pins a knob natively - for example, `-m`, `--model`, or a `-c`/`--config` assignment whose exact key is `model` or `model_reasoning_effort` for Codex, plus the other harnesses' `--effort`, `--reasoning-effort`, or `--thinking` forms - then `agent_config` does not emit its value for that knob. Text such as `model=` nested inside an unrelated option's value is not a pin. Any knob the raw flags leave alone still comes from `agent_config`, so adding `agent_config` to an existing configuration never changes the arguments that configuration already supplied:
 
 ```yaml
 agent_config:
@@ -303,7 +303,7 @@ The only role keys are `reviewer` and `fixer`. Each configured role requires one
 explicit `agent` (the same harness names as `agent_config`; no `auto` or lists).
 Model and effort are optional and inherit `agent_config` for that harness when
 empty. Nonempty role values override that profile, but native
-`agent_args_override` flags still win. Model availability, credentials, and
+`agent_args_override` flags still win over role values. Review's [per-invocation tuning](/no-mistakes/reference/pipeline-steps/#review) applies after this profile selection. Model availability, credentials, and
 supported effort levels remain the harness/provider's responsibility.
 
 Both roles can use the same harness with different models. Reviews and rereviews
@@ -323,7 +323,7 @@ Use this for anything [`agent_config`](#agent_config) does not cover - service t
 | Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `deck`, `copilot`, `antigravity` |
 | Default | Empty (no extra flags)                                    |
 
-User-supplied flags are normally inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. Security suppression selected by trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) may be placed first while preserving a compatible operator pin. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
+User-supplied flags are normally inserted ahead of no-mistakes' managed flags, so your choices usually take precedence, except for supported [Review per-invocation tuning](/no-mistakes/reference/pipeline-steps/#review). Security suppression selected by trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) may be placed first while preserving a compatible operator pin. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
 
 | Agent      | Reserved flags                                                                                              |
 | ---------- | ----------------------------------------------------------------------------------------------------------- |
@@ -504,8 +504,8 @@ It is global-only: repository config and environment variables cannot override i
 ### review_agent_timeout
 
 Maximum wall-clock time for **one** Review-step agent invocation.
-The optional fixer gets the full configured limit, and its fresh, session-free independent rereviewer gets a new full limit of its own. Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
-When an invocation reaches this absolute deadline, the review agent is cancelled and the run fails with a diagnostic naming the wall-clock limit instead of remaining active indefinitely.
+Each reviewer, finder, verifier and optional fixer gets a new full configured limit, including schema-validation retries and later rereviews; no invocation inherits time spent by an earlier turn.
+When an invocation reaches this absolute deadline, the agent is cancelled with a diagnostic naming the wall-clock limit. A reviewer, finder or fixer timeout fails the step; a verifier timeout keeps its claim plausible under the [Review failure policy](/no-mistakes/reference/pipeline-steps/#review).
 That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 
 |         |                        |
@@ -515,7 +515,7 @@ That diagnostic carries the same measured evidence and adapter report described 
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose reviews legitimately run long; it bounds only the Review step, and no other step or environment variable overrides it.
+Raise it for repositories whose reviews legitimately run long; it bounds only Review-step invocations. Deck's native per-level deadline from [review sizing](/no-mistakes/reference/pipeline-steps/#review) also applies and may end an invocation earlier.
 
 ### test_agent_timeout
 
@@ -682,6 +682,28 @@ When round N reaches the cap and still has findings:
 - blocking findings (`error`) still park at the Review approval gate. `fix` there runs the fix agent once on the selected findings and commits its change, and the review then completes without another rereview: the fixed findings are recorded as resolved by that fix, every finding left unfixed (unselected, or selected when the fix changed nothing) becomes an unresolved review note, and the pipeline continues. Approve continues with the findings recorded; skip and abort work as at any gate.
 
 The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
+
+### review.routes
+
+Model routes the Review step's agents run on. Every field is optional; an unset route keeps the configured agent model.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `finders` | `string[]` | Spread round-robin across a multi-angle review's parallel finders, so different models look at the change |
+| `light` | `string` | The single light reviewer of a small change |
+| `verify` | `string` | The per-finding verify agents |
+
+```yaml
+review:
+  routes:
+    finders: [chain/review, claude/sonnet-5-5, zai/glm-5.3]
+    light: zai/glm-5.3
+    verify: chain/review
+```
+
+A route is passed as the agent's model for that one invocation, so it must be a model id the review agent accepts. Only adapters that take a model per invocation apply it (Deck, Pi and Claude); others ignore it.
+For route failures and verification outcomes, see [Review](/no-mistakes/reference/pipeline-steps/#review).
+A repository's trusted [`review.routes`](/no-mistakes/reference/repo-config/#reviewroutes) overrides these field by field. How much review a change gets is the repository's [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing).
 
 ### ci.rerun_transient
 
