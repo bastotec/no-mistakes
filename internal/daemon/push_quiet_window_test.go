@@ -81,8 +81,14 @@ func TestPushQuietWindowCoalescesAFollowUpPush(t *testing.T) {
 	if first.Status != types.RunCancelled || first.Error == nil || *first.Error != types.RunCancelReasonCoalesced {
 		t.Fatalf("first run = %s %v, want cancelled with %q", first.Status, first.Error, types.RunCancelReasonCoalesced)
 	}
-	if second := waitForRunFinal(t, d, secondRun); second.Status != types.RunCompleted {
+	second := waitForRunFinal(t, d, secondRun)
+	if second.Status != types.RunCompleted {
 		t.Fatalf("second run status = %s, want completed", second.Status)
+	}
+	// The burst is one push: the replacement keeps the base the branch had
+	// before it, not the coalesced run's head.
+	if second.BaseSHA != first.BaseSHA {
+		t.Fatalf("second run base = %s, want the coalesced run's base %s", second.BaseSHA, first.BaseSHA)
 	}
 	if got := review.execCnt.Load(); got != 1 {
 		t.Fatalf("review executed %d times, want 1 (only the run that outlived its quiet window)", got)

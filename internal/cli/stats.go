@@ -272,7 +272,7 @@ func renderStatsDashboard(stats *db.Stats) string {
 		"",
 		"  Pushes",
 		metricStatsLine("Coalesced", fmt.Sprintf("%d", stats.CoalescedRuns), "restarts avoided"),
-		metricStatsLine("Superseded", fmt.Sprintf("%d", stats.SupersededRuns), "cancelled mid-run"),
+		metricStatsLine("Superseded", fmt.Sprintf("%d", stats.SupersededRuns), "runs replaced"),
 		"",
 		"  Fixes by step",
 	)
