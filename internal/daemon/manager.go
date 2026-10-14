@@ -1765,6 +1765,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			delete(m.executors, run.ID)
 			delete(m.cancels, run.ID)
 			delete(m.dones, run.ID)
+			delete(m.quieting, run.ID)
 			m.mu.Unlock()
 		}()
 
