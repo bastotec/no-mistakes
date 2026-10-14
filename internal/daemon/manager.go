@@ -1410,9 +1410,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// A burst of pushes coalesced inside one quiet window is one push: the
 	// replacement keeps the base the branch had before the burst, so a
 	// force-push followed by a quick follow-up still reads as a history
-	// rewrite to the rebase step. The branch lock held here keeps the waiting
-	// run inside its window until it is cancelled below.
-	if trigger == "push" && active != nil {
+	// rewrite to the rebase step. A zero base (the burst opened the branch)
+	// carries no such evidence, so the push's own previous head is kept then:
+	// it is what shows a rewrite inside the burst. The branch lock held here
+	// keeps the waiting run inside its window until it is cancelled below.
+	if trigger == "push" && active != nil && !git.IsZeroSHA(active.BaseSHA) {
 		m.mu.Lock()
 		quieting := m.quieting[active.ID]
 		m.mu.Unlock()
