@@ -467,7 +467,7 @@ A push that lands after the window has passed keeps the usual semantics: the run
 `no-mistakes stats` counts both.
 
 Only pushes wait. `no-mistakes axi run` against a head the gate already has, reruns, and recovered runs start at once.
-`0s` (or any non-positive value) starts every pushed run immediately.
+`0s` starts every pushed run immediately; a negative value fails the config.
 It is global-only: repository config cannot override it.
 
 ### agent_timeout

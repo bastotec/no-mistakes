@@ -14,7 +14,6 @@ func TestLoadGlobal_PushQuietWindow(t *testing.T) {
 		{"default", "log_level: info\n", DefaultPushQuietWindow},
 		{"configured", "push_quiet_window: \"30s\"\n", 30 * time.Second},
 		{"disabled", "push_quiet_window: \"0s\"\n", 0},
-		{"negative disables", "push_quiet_window: \"-5s\"\n", 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := LoadGlobalFromBytes([]byte(tc.yaml))
@@ -26,8 +25,10 @@ func TestLoadGlobal_PushQuietWindow(t *testing.T) {
 			}
 		})
 	}
-	if _, err := LoadGlobalFromBytes([]byte("push_quiet_window: soon\n")); err == nil {
-		t.Fatal("an unparseable push_quiet_window must fail the config")
+	for _, bad := range []string{"soon", "-5s"} {
+		if _, err := LoadGlobalFromBytes([]byte("push_quiet_window: " + bad + "\n")); err == nil {
+			t.Fatalf("push_quiet_window %q must fail the config", bad)
+		}
 	}
 }
 

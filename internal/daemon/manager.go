@@ -76,10 +76,6 @@ type RunManager struct {
 	completedOrder []string                   // insertion order for FIFO eviction
 }
 
-// testPushQuietWindow, when set by a test binary, replaces the configured
-// push quiet window so tests that push do not each wait it out.
-var testPushQuietWindow *time.Duration
-
 // maxSubscribersPerRun bounds the global mailbox footprint: queued bytes can
 // never exceed activeRuns × maxSubscribersPerRun × mailboxMaxBytes. Refusing
 // past the cap is an ordinary error, never unbounded growth.
@@ -1293,12 +1289,47 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 }
 
 func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
-	lockKey := repoID + "/" + branch
-	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	branchMu := lockVal.(*sync.Mutex)
+	branchMu := m.branchLock(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
 	return action()
+}
+
+func (m *RunManager) branchLock(repoID, branch string) *sync.Mutex {
+	lockVal, _ := m.branchLocks.LoadOrStore(repoID+"/"+branch, &sync.Mutex{})
+	return lockVal.(*sync.Mutex)
+}
+
+// endQuietWindow waits out a pushed run's quiet window, then leaves it under
+// the branch lock. Every launch holds that lock from before it reads anything
+// until it has cancelled the branch's active run, so a push that arrived
+// inside the window always replaces this run before it starts a step, however
+// long that launch's own setup takes. It polls with TryLock rather than
+// blocking, because the launch holding the lock waits for this goroutine to
+// finish once it has cancelled it.
+func (m *RunManager) endQuietWindow(ctx context.Context, repoID, branch, runID string, window time.Duration) {
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return
+	}
+	branchMu := m.branchLock(repoID, branch)
+	for !branchMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	defer branchMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	m.mu.Lock()
+	delete(m.quieting, runID)
+	m.mu.Unlock()
 }
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns
@@ -1377,7 +1408,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; run `no-mistakes axi run --retire-existing-pr` on the branch to retarget it", branch, target)
 	}
 	// Cancel any active run for this repo+branch.
-	m.cancelActiveRuns(repo.ID, branch)
+	m.cancelActiveRuns(repo.ID, branch, trigger)
 
 	storedIntent := intent
 	if source != db.RunIntentSourceRerun && launchNonce == "" {
@@ -1669,9 +1700,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	quietWindow := time.Duration(0)
 	if trigger == "push" {
 		quietWindow = globalCfg.PushQuietWindow
-		if testPushQuietWindow != nil {
-			quietWindow = *testPushQuietWindow
-		}
 	}
 
 	// Track executor.
@@ -1742,15 +1770,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 
 		if quietWindow > 0 {
 			slog.Info("waiting for push quiet window", "run_id", run.ID, "branch", branch, "window", quietWindow)
-			timer := time.NewTimer(quietWindow)
-			select {
-			case <-timer.C:
-			case <-runCtx.Done():
-				timer.Stop()
-			}
-			m.mu.Lock()
-			delete(m.quieting, run.ID)
-			m.mu.Unlock()
+			m.endQuietWindow(runCtx, repo.ID, branch, run.ID, quietWindow)
 		}
 
 		// A run replaced inside its quiet window still goes through Execute,
@@ -2083,7 +2103,7 @@ func (m *RunManager) HandleCancel(runID string) error {
 // concurrent pushes to upstream.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
-func (m *RunManager) cancelActiveRuns(repoID, branch string) {
+func (m *RunManager) cancelActiveRuns(repoID, branch, trigger string) {
 	runs, err := m.db.GetRunsByRepo(repoID)
 	if err != nil {
 		slog.Error("failed to query active runs for cancellation", "repo", repoID, "branch", branch, "error", err)
@@ -2108,10 +2128,12 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 			continue
 		}
 		// A run still waiting out its push quiet window has started no step,
-		// so replacing it costs nothing; it is recorded as coalesced rather
-		// than superseded so stats can count the restarts the window avoided.
+		// so a newer push replacing it costs nothing; it is recorded as
+		// coalesced rather than superseded so stats can count the restarts the
+		// window avoided. A rerun or explicit launch is not a push and keeps
+		// the superseded reason.
 		reason := types.RunCancelReasonSuperseded
-		if quieting {
+		if quieting && trigger == "push" {
 			reason = types.RunCancelReasonCoalesced
 		}
 
