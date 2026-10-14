@@ -48,6 +48,57 @@ func RunRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
 	return runInDirWithEnvRaw(ctx, dir, nil, args...)
 }
 
+// RunRawLimited executes a git command while retaining at most maxBytes of
+// stdout. Output beyond the limit is drained without being buffered.
+func RunRawLimited(ctx context.Context, dir string, maxBytes int, args ...string) ([]byte, bool, error) {
+	if maxBytes < 0 {
+		return nil, false, fmt.Errorf("git stdout limit must not be negative")
+	}
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.Env = nonInteractiveEnvForContext(ctx, dir)
+	winproc.Harden(cmd)
+	var stdout limitedBuffer
+	stdout.remaining = maxBytes
+	cmd.Stdout = &stdout
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	shellenv.ConfigureShellCommand(cmd)
+	if err := shellenv.RunShellCommand(cmd); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = fmt.Errorf("%w (%v)", ctxErr, err)
+		}
+		return nil, stdout.truncated, fmt.Errorf("git %s: %w: %s", safeurl.RedactText(strings.Join(args, " ")), err, safeurl.RedactText(strings.TrimSpace(stderr.String())))
+	}
+	return stdout.Bytes(), stdout.truncated, nil
+}
+
+type limitedBuffer struct {
+	buffer    bytes.Buffer
+	remaining int
+	truncated bool
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	if len(p) > b.remaining {
+		p = p[:b.remaining]
+		b.truncated = true
+	}
+	if len(p) > 0 {
+		_, _ = b.buffer.Write(p)
+		b.remaining -= len(p)
+	}
+	return originalLen, nil
+}
+
+func (b *limitedBuffer) Bytes() []byte {
+	return b.buffer.Bytes()
+}
+
 // RunWithInput executes a git command with exact standard input and returns
 // trimmed stdout. It carries the same bare-repository handling as Run.
 func RunWithInput(ctx context.Context, dir, input string, args ...string) (string, error) {
