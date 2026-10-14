@@ -90,6 +90,30 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 	}
 }
 
+func TestPlanReviewExactTuningPerLevel(t *testing.T) {
+	for _, tc := range []struct {
+		level                  string
+		single, finder, verify agent.InvocationTuning
+	}{
+		{"low", agent.InvocationTuning{Effort: "low", MaxTurns: 80, DeadlineSecs: 900}, agent.InvocationTuning{}, agent.InvocationTuning{}},
+		{"medium", agent.InvocationTuning{MaxTurns: 400, DeadlineSecs: 1800}, agent.InvocationTuning{}, agent.InvocationTuning{}},
+		{"high", agent.InvocationTuning{}, agent.InvocationTuning{Effort: "high", MaxTurns: 150, DeadlineSecs: 1500}, agent.InvocationTuning{Effort: "low", MaxTurns: 60, DeadlineSecs: 900}},
+		{"xhigh", agent.InvocationTuning{}, agent.InvocationTuning{Effort: "high", MaxTurns: 200, DeadlineSecs: 1800}, agent.InvocationTuning{Effort: "high", MaxTurns: 80, DeadlineSecs: 1200}},
+		{"max", agent.InvocationTuning{}, agent.InvocationTuning{Effort: "high", MaxTurns: 300, DeadlineSecs: 1800}, agent.InvocationTuning{Effort: "high", MaxTurns: 100, DeadlineSecs: 1200}},
+	} {
+		t.Run(tc.level, func(t *testing.T) {
+			plan := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: tc.level}), config.ReviewRoutesRaw{}, &agent.InvocationWorkload{}, nil)
+			var single agent.InvocationTuning
+			if plan.Tuning != nil {
+				single = *plan.Tuning
+			}
+			if single != tc.single || plan.FinderTuning != tc.finder || plan.VerifyTuning != tc.verify {
+				t.Fatalf("single/finder/verify tuning = %+v / %+v / %+v, want %+v / %+v / %+v", single, plan.FinderTuning, plan.VerifyTuning, tc.single, tc.finder, tc.verify)
+			}
+		})
+	}
+}
+
 // concurrentAgent is a goroutine-safe fake for the multi-angle review, which
 // runs its agents in parallel.
 type concurrentAgent struct {
