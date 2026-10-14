@@ -70,7 +70,7 @@ type RunOpts struct {
 	// reasoning effort and run bounds, overriding the operator's configured
 	// values for it alone. The review step sizes its agents with it. Only
 	// adapters that can express it per invocation apply it: deck all of it,
-	// pi the model and effort. Every other adapter runs at its configured
+	// pi and claude the model and effort. Every other adapter runs at its configured
 	// profile.
 	Tuning *InvocationTuning
 }

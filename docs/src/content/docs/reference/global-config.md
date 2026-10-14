@@ -678,7 +678,7 @@ review:
     verify: chain/review
 ```
 
-A route is passed as the agent's model for that one invocation, so it must be a model id the review agent accepts. Only adapters that take a model per invocation apply it (Deck and Pi); others ignore it.
+A route is passed as the agent's model for that one invocation, so it must be a model id the review agent accepts. Only adapters that take a model per invocation apply it (Deck, Pi and Claude); others ignore it.
 A finder whose route fails fails the Review step; a verifier whose route fails leaves its claim plausible.
 A repository's trusted [`review.routes`](/no-mistakes/reference/repo-config/#reviewroutes) overrides these field by field. How much review a change gets is the repository's [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing).
 

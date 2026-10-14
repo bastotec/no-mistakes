@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"slices"
 	"sort"
 	"strings"
@@ -177,9 +178,14 @@ func dedupeFindings(results []Findings, dimensions []string) []candidateFinding 
 				if !sameClaim(out[j].Finding, item) {
 					continue
 				}
+				// The most severe copy survives, and the most cautious action
+				// any finder asked for rides on it: one finder calling for a
+				// human decision is never overruled by another's auto-fix.
+				action := mostCautiousAction(out[j].ActionOrDefault(), item.ActionOrDefault())
 				if severityRank(item.Severity) < severityRank(out[j].Severity) {
 					out[j].Finding = item
 				}
+				out[j].Action = action
 				if !slices.Contains(out[j].Dimensions, dimensions[i]) {
 					out[j].Dimensions = append(out[j].Dimensions, dimensions[i])
 				}
@@ -207,6 +213,12 @@ func sameClaim(a, b Finding) bool {
 	// most of their vocabulary and still be different defects, and merging
 	// them would leave one unverified and unfixed. The same line with similar
 	// wording is one claim; nearby lines need near-identical wording.
+	// Findings naming different code identifiers (ReadTimeout and
+	// WriteTimeout on one line) are about different things however much
+	// other wording they share.
+	if idsA, idsB := codeIdentifiers(a.Description), codeIdentifiers(b.Description); len(idsA) > 0 && len(idsB) > 0 && !maps.Equal(idsA, idsB) {
+		return false
+	}
 	overlap := wordOverlap(a.Description, b.Description)
 	switch {
 	case fileA == "" || a.Line == b.Line:
@@ -216,6 +228,34 @@ func sameClaim(a, b Finding) bool {
 	default:
 		return false
 	}
+}
+
+// codeIdentifiers returns the words in a description that look like code
+// identifiers: mixed case, snake_case, or dotted.
+func codeIdentifiers(s string) map[string]bool {
+	ids := map[string]bool{}
+	for _, w := range strings.FieldsFunc(s, func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || r == '_' || r == '.')
+	}) {
+		w = strings.Trim(w, ".")
+		inner := w
+		if len(inner) > 1 {
+			inner = inner[1:]
+		}
+		if strings.ContainsAny(w, "_.") || strings.ContainsAny(inner, "ABCDEFGHIJKLMNOPQRSTUVWXYZ") {
+			ids[w] = true
+		}
+	}
+	return ids
+}
+
+var actionCaution = map[string]int{types.ActionNoOp: 0, types.ActionAutoFix: 1, types.ActionAskUser: 2}
+
+func mostCautiousAction(a, b string) string {
+	if actionCaution[b] > actionCaution[a] {
+		return b
+	}
+	return a
 }
 
 // wordOverlap is the Jaccard similarity of two descriptions' content words.
@@ -399,7 +439,9 @@ func verifiedRisk(f *Findings) {
 	level := 0
 	var worst Finding
 	for _, item := range f.Items {
-		if item.ActionOrDefault() == types.ActionNoOp {
+		// A deferred delivery claim is stripped after review and owned by
+		// later steps, so it must not rate the source.
+		if item.ActionOrDefault() == types.ActionNoOp || isDeferredPipelineOwnedDeliveryFinding(item) {
 			continue
 		}
 		rank := 0

@@ -357,6 +357,21 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	if len(timeouts) != 2 {
 		t.Fatalf("timeout claims merged: %+v", timeouts)
 	}
+	sameLine := dedupeFindings([]Findings{{Items: []Finding{
+		{Severity: "warning", File: "srv.go", Line: 10, Description: "ReadTimeout multiplies by seconds instead of milliseconds"},
+		{Severity: "warning", File: "srv.go", Line: 10, Description: "WriteTimeout multiplies by milliseconds instead of seconds"},
+	}}}, []string{"correctness"})
+	if len(sameLine) != 2 {
+		t.Fatalf("same-line claims about different identifiers merged: %+v", sameLine)
+	}
+	// A merged claim keeps the most cautious action any finder asked for.
+	cautious := dedupeFindings([]Findings{
+		{Items: []Finding{{Severity: "error", Action: "auto-fix", File: "a.go", Line: 5, Description: "retry budget is never reset after success"}}},
+		{Items: []Finding{{Severity: "warning", Action: "ask-user", File: "a.go", Line: 5, Description: "retry budget is never reset after a success"}}},
+	}, []string{"correctness", "regressions"})
+	if len(cautious) != 1 || cautious[0].Severity != "error" || cautious[0].Action != "ask-user" {
+		t.Fatalf("merged = %+v, want the error copy carrying ask-user", cautious)
+	}
 	results := []Findings{
 		{Items: []Finding{{Severity: "warning", File: "a.go", Line: 10, Description: "missing nil check on config loader result"}}},
 		{Items: []Finding{
@@ -371,5 +386,15 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	}
 	if got[0].Severity != "error" || len(got[0].Dimensions) != 2 {
 		t.Fatalf("merged claim = %+v, want the error copy found by both dimensions", got[0])
+	}
+}
+
+// A deferred delivery claim is stripped after review, so it never rates the
+// change.
+func TestVerifiedRiskIgnoresDeferredDeliveryFindings(t *testing.T) {
+	f := Findings{Items: []Finding{{Severity: "error", Action: "auto-fix", ReviewScope: "pipeline-owned-delivery", Description: "PR is not open yet"}}}
+	verifiedRisk(&f)
+	if f.RiskLevel != "low" {
+		t.Fatalf("risk = %s (%s), want low", f.RiskLevel, f.RiskRationale)
 	}
 }

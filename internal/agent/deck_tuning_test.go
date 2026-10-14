@@ -33,3 +33,11 @@ func TestPiBuildArgsAppliesModelAndThinkingTuning(t *testing.T) {
 		t.Fatalf("args = %q\nwant %q", got, want)
 	}
 }
+
+func TestClaudeBuildArgsAppliesModelAndEffortTuning(t *testing.T) {
+	ca := &claudeAgent{extraArgs: []string{"--model", "opus", "--effort", "high"}}
+	got := ca.buildArgs(nil, "", &InvocationTuning{Model: "sonnet", Effort: "low", MaxTurns: 60})
+	if !reflect.DeepEqual(got[:4], []string{"--model", "sonnet", "--effort", "low"}) {
+		t.Fatalf("args = %q, want the tuned model and effort replacing the operator's", got)
+	}
+}
