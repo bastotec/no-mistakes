@@ -56,11 +56,15 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 		return nil, fmt.Errorf("check agent changes: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
+		correctionSubject, err := sctx.Config.Commit.RenderFixMessageForBranch(s.Name(), "apply agent fixes", sctx.Run.Branch)
+		if err != nil {
+			return nil, fmt.Errorf("render correction commit subject: %w", err)
+		}
 		sctx.Log("committing agent changes...")
 		if err := stagePipelineChanges(sctx); err != nil {
 			return nil, fmt.Errorf("stage agent changes: %w", err)
 		}
-		if err := commitPipelineCorrection(ctx, sctx.WorkDir, "no-mistakes: apply agent fixes", sctx.Log); err != nil {
+		if err := commitPipelineCorrection(ctx, sctx.WorkDir, correctionSubject, sctx.Log); err != nil {
 			return nil, fmt.Errorf("commit agent changes: %w", err)
 		}
 		headSHA, err := git.HeadSHA(ctx, sctx.WorkDir)
