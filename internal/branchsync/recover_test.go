@@ -153,7 +153,7 @@ func newRecoverFixture(t *testing.T, status types.RunStatus) *recoverFixture {
 	}
 }
 
-func newDivergentArchiveRecoverFixture(t *testing.T) (*recoverFixture, string) {
+func newDivergentArchiveRecoverFixture(t *testing.T, bindArchive ...bool) (*recoverFixture, string) {
 	t.Helper()
 	ctx := context.Background()
 	root := t.TempDir()
@@ -213,11 +213,13 @@ func newDivergentArchiveRecoverFixture(t *testing.T) (*recoverFixture, string) {
 		t.Fatal(err)
 	}
 	run, _ = database.GetRun(run.ID)
-	if _, err := database.RecordRecoveryArchive(db.RecoveryArchive{
-		OwnerRunID: run.ID, RepoID: repo.ID, RunID: run.ID, Branch: run.Branch,
-		RequiredHeadSHA: submitted, PreservedHeadSHA: preserved, ArchiveRef: archiveRef,
-	}); err != nil {
-		t.Fatal(err)
+	if len(bindArchive) == 0 || bindArchive[0] {
+		if _, err := database.RecordRecoveryArchive(db.RecoveryArchive{
+			OwnerRunID: run.ID, RepoID: repo.ID, RunID: run.ID, Branch: run.Branch,
+			RequiredHeadSHA: submitted, PreservedHeadSHA: preserved, ArchiveRef: archiveRef,
+		}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	fixture := &recoverFixture{
 		t: t, ctx: ctx, db: database, repo: repo, run: run,
@@ -2898,5 +2900,250 @@ func TestRecoverSquashedPreservedHeadStillEscalatesForDroppedLocalWork(t *testin
 	}
 	if f.custodyReturned() {
 		t.Fatal("dropped-work escalation stamped custody")
+	}
+}
+
+// Published terminal divergence reproduces the failed-run shape: the clean
+// caller still has its submitted head, the pipeline's divergent fixes were
+// published, and both the archive and run-specific gate anchor retain them.
+func newPublishedArchiveRecoverFixture(t *testing.T, bindArchive ...bool) (*recoverFixture, string) {
+	t.Helper()
+	f, archiveRef := newDivergentArchiveRecoverFixture(t, false)
+	writer := filepath.Join(filepath.Dir(f.local), "divergent-archive-writer")
+	mustWrite(t, filepath.Join(writer, "fix.txt"), "review R1 fix\n")
+	mustRun(t, writer, "add", "fix.txt")
+	mustRun(t, writer, "commit", "-m", "review R1 fix")
+	mustWrite(t, filepath.Join(writer, "fix.txt"), "review R1 and R2 fixes\n")
+	mustRun(t, writer, "commit", "-am", "review R2 fix")
+	mustWrite(t, filepath.Join(writer, "documentation.md"), "retained documentation fixes\n")
+	mustRun(t, writer, "add", "documentation.md")
+	mustRun(t, writer, "commit", "-m", "documentation fixes")
+	preserved := mustRun(t, writer, "rev-parse", "HEAD")
+	mustRun(t, writer, "push", f.gate, "HEAD:refs/heads/feature/recover", "HEAD:"+f.anchorRef())
+	mustRun(t, f.local, "fetch", "--no-tags", f.gate, f.anchorRef())
+	mustRun(t, f.local, "update-ref", archiveRef, preserved, f.preserved)
+	f.preserved = preserved
+	// Seed the synthetic published binding; no live remote is involved.
+	mustRun(t, f.remote, "fetch", "--no-tags", f.local, f.preserved)
+	mustRun(t, f.remote, "update-ref", "refs/heads/feature/recover", f.preserved, f.submitted)
+	if err := f.db.UpdateRunPushBinding(f.run.ID, db.PushBinding{
+		HeadSHA: f.preserved, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/recover",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatusWithVerifiedHead(f.run.ID, types.RunFailed, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	f.run, _ = f.db.GetRun(f.run.ID)
+	if len(bindArchive) == 0 || bindArchive[0] {
+		if _, err := f.db.RecordRecoveryArchive(db.RecoveryArchive{
+			OwnerRunID: f.run.ID, RepoID: f.repo.ID, RunID: f.run.ID, Branch: f.run.Branch,
+			RequiredHeadSHA: f.submitted, PreservedHeadSHA: f.preserved, ArchiveRef: archiveRef,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return f, archiveRef
+}
+
+func TestPublishedTerminalDivergenceReturnsCustodyKeepingBothHistories(t *testing.T) {
+	t.Parallel()
+	f, archiveRef := newPublishedArchiveRecoverFixture(t)
+	state := f.service.InspectCached(f.ctx)
+	assertKeepLocalRecoveryOffer(t, state)
+	if state.Recovery == nil || state.Recovery.Source != "bound_archive" || state.Recovery.RequiredHead != f.submitted || state.Recovery.PreservedHead != f.preserved {
+		t.Fatalf("published recovery evidence = %#v", state)
+	}
+	localRefs := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	gateRefs := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	if refused := f.service.Recover(f.ctx, false); refused.Recovered || refused.Safety != "blocked_recover_archive_requires_keep_local" {
+		t.Fatalf("plain recovery = %#v", refused)
+	}
+	if got := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != localRefs {
+		t.Fatal("plain recovery changed local refs")
+	}
+	if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != gateRefs {
+		t.Fatal("plain recovery changed gate refs")
+	}
+	result := f.service.Recover(f.ctx, true)
+	if !result.Recovered || result.Changed || !f.custodyReturned() {
+		t.Fatalf("published recovery = %#v", result)
+	}
+	for _, ref := range []string{"HEAD", custody.RecoveryLocalRef(f.run.ID)} {
+		if got := mustRun(t, f.local, "rev-parse", ref); got != f.submitted {
+			t.Fatalf("kept %s = %s", ref, got)
+		}
+	}
+	for _, ref := range []string{archiveRef, f.anchorRef()} {
+		if got := mustRun(t, f.local, "rev-parse", ref); got != f.preserved {
+			t.Fatalf("preserved %s = %s", ref, got)
+		}
+	}
+	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != f.submitted {
+		t.Fatalf("gate head = %s", got)
+	}
+	if got := mustRun(t, f.gate, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatalf("gate preserved head = %s", got)
+	}
+	if got := mustRun(t, f.remote, "rev-parse", "refs/heads/feature/recover"); got != f.preserved {
+		t.Fatalf("remote changed to %s", got)
+	}
+	if got := mustRun(t, f.local, "show", archiveRef+":later.txt"); got != "divergent later validation work" {
+		t.Fatalf("retained pipeline work = %q", got)
+	}
+	if got := mustRun(t, f.local, "status", "--porcelain"); got != "" {
+		t.Fatalf("worktree touched: %s", got)
+	}
+}
+
+func TestPublishedTerminalArchiveRecoveryRefusesUnsafeEvidence(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		mutate func(*recoverFixture, string)
+	}{
+		{"active run", func(f *recoverFixture, _ string) {
+			if err := f.db.UpdateRunStatus(f.run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"unknown status", func(f *recoverFixture, _ string) {
+			if err := f.db.UpdateRunStatus(f.run.ID, types.RunStatus("unknown")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"successful run", func(f *recoverFixture, _ string) {
+			if err := f.db.UpdateRunStatus(f.run.ID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"dirty worktree", func(f *recoverFixture, _ string) {
+			mustWrite(t, filepath.Join(f.local, "file.txt"), "uncommitted local work\n")
+		}},
+		{"moved archive", func(f *recoverFixture, ref string) { mustRun(t, f.local, "update-ref", ref, f.submitted) }},
+		{"symbolic archive", func(f *recoverFixture, ref string) {
+			mustRun(t, f.local, "symbolic-ref", ref, "refs/heads/feature/recover")
+		}},
+		{"moved gate anchor", func(f *recoverFixture, _ string) {
+			mustRun(t, f.gate, "fetch", "--no-tags", f.local, f.submitted)
+			mustRun(t, f.gate, "update-ref", f.anchorRef(), f.submitted)
+		}},
+		{"conflicting local anchor", func(f *recoverFixture, _ string) {
+			mustRun(t, f.local, "update-ref", custody.RecoveryLocalRef(f.run.ID), f.preserved)
+		}},
+		{"unauthorized target", func(f *recoverFixture, _ string) {
+			f.repo.UpstreamURL = filepath.Join(filepath.Dir(f.remote), "other.git")
+		}},
+		{"multiple archive records", func(f *recoverFixture, ref string) {
+			records, err := f.db.GetRecoveryArchivesByRun(f.run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			second := *records[0]
+			second.ID = ""
+			second.ArchiveRef = ref + "-second"
+			mustRun(t, f.local, "update-ref", second.ArchiveRef, f.preserved)
+			if _, err := f.db.RecordRecoveryArchive(second); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			f, ref := newPublishedArchiveRecoverFixture(t)
+			test.mutate(f, ref)
+			snapshot := func() string {
+				return strings.Join([]string{
+					mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"),
+					mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"),
+					mustRun(t, f.remote, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"),
+					mustRun(t, f.local, "status", "--porcelain=v1", "--untracked-files=all"),
+				}, "\n---\n")
+			}
+			before := snapshot()
+			state := f.service.InspectCached(f.ctx)
+			if state.NextAction != nil && state.NextAction.Code == "recover_custody" {
+				t.Fatalf("unsafe recovery offered: %#v", state)
+			}
+			result := f.service.Recover(f.ctx, true)
+			if result.Recovered || result.Changed || f.custodyReturned() {
+				t.Fatalf("unsafe recovery returned custody: %#v", result)
+			}
+			if bound := f.service.BindRecoveryArchive(f.ctx, ref); bound.NextAction != nil && bound.NextAction.Code == "recover_custody" {
+				t.Fatalf("unsafe binding offered recovery: %#v", bound)
+			}
+			if got := snapshot(); got != before {
+				t.Fatal("unsafe evidence refusal mutated Git state")
+			}
+		})
+	}
+}
+
+func TestPublishedArchiveMovedAtRecoveryBoundaryRefuses(t *testing.T) {
+	t.Parallel()
+	f, ref := newPublishedArchiveRecoverFixture(t)
+	gateRefs := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	f.service.beforeGateReset = func() { mustRun(t, f.local, "update-ref", ref, f.submitted) }
+	result := f.service.Recover(f.ctx, true)
+	if result.Recovered || result.Changed || f.custodyReturned() || result.Safety != "blocked_recover_archive_moved" {
+		t.Fatalf("boundary refusal = %#v", result)
+	}
+	if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != gateRefs {
+		t.Fatal("boundary refusal moved gate refs")
+	}
+	if _, err := gitpkg.Run(f.ctx, f.local, "show-ref", "--verify", f.anchorRef()); err == nil {
+		t.Fatal("boundary refusal created preserved anchor")
+	}
+}
+
+func TestPublishedArchiveRecoveryRefusesCompetingRunWithoutLeavingAnchors(t *testing.T) {
+	t.Parallel()
+	f, _ := newPublishedArchiveRecoverFixture(t)
+	localRefs := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	gateRefs := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	f.service.beforeGateReset = func() {
+		if _, err := f.db.InsertRun(f.repo.ID, f.run.Branch, f.submitted, f.base); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := f.service.Recover(f.ctx, true)
+	if result.Recovered || result.Changed || f.custodyReturned() || result.Safety != "blocked_recover_run_active" {
+		t.Fatalf("competing-run refusal = %#v", result)
+	}
+	if got := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != localRefs {
+		t.Fatal("competing-run refusal left local recovery anchors")
+	}
+	if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != gateRefs {
+		t.Fatal("competing-run refusal moved gate refs")
+	}
+}
+
+func TestPublishedTerminalDivergenceRequiresExplicitArchiveBinding(t *testing.T) {
+	t.Parallel()
+	f, ref := newPublishedArchiveRecoverFixture(t, false)
+	state := f.service.InspectCached(f.ctx)
+	if state.Safety != "blocked_diverged" || state.NextAction == nil || state.NextAction.Code != "inspect_and_reconcile_manually" {
+		t.Fatalf("unbound published divergence = %#v", state)
+	}
+	if result := f.service.Recover(f.ctx, true); result.Recovered || f.custodyReturned() {
+		t.Fatalf("unbound recovery = %#v", result)
+	}
+	localRefs := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	gateRefs := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	bound := f.service.BindRecoveryArchive(f.ctx, ref)
+	assertKeepLocalRecoveryOffer(t, bound)
+	if got := mustRun(t, f.local, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != localRefs {
+		t.Fatal("binding mutated local refs")
+	}
+	if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != gateRefs {
+		t.Fatal("binding mutated gate refs")
+	}
+	if result := f.service.Recover(f.ctx, true); !result.Recovered || result.State != StateCustodyReturned {
+		t.Fatalf("bound published recovery = %#v", result)
+	}
+	for path, want := range map[string]string{"fix.txt": "review R1 and R2 fixes", "documentation.md": "retained documentation fixes"} {
+		if got := mustRun(t, f.local, "show", ref+":"+path); got != want {
+			t.Fatalf("retained %s = %q", path, got)
+		}
 	}
 }
