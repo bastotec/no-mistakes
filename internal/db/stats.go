@@ -19,7 +19,8 @@ type Stats struct {
 	// CoalescedRuns counts runs a newer push replaced while they were still
 	// waiting out their push quiet window: each one is a mid-pipeline
 	// cancellation and restart the window avoided. SupersededRuns counts the
-	// runs a newer push cancelled after they had started.
+	// other replaced runs: a newer push after a run's window, or a rerun or
+	// explicit launch at any point.
 	CoalescedRuns  int
 	SupersededRuns int
 	StepStats      []StepStats
