@@ -83,6 +83,10 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 - The executor's step-log writers are mutex-guarded because review agents now run concurrently in one step.
 - User-facing semantics are owned by `docs/src/content/docs/reference/pipeline-steps.md` (Review), `repo-config.md` (`review.sizing`), `global-config.md` (`review.routes`). Regressions: `internal/pipeline/steps/review_multiangle_test.go`, `prsummary_review_effort_test.go`, `internal/config/review_sizing_test.go`, `internal/agent/deck_tuning_test.go`.
 
+**Deck Gateway Retry (`internal/agent/deck.go`)**
+
+- Deck goes through the shared `runWithRetry` like every other adapter, with `classifyDeckTransient`: a gateway failure with no status (a dropped upstream stream, e.g. proxai `codex_stream_failed`), a 5xx or a 429 reruns the turn in place, at most `deckMaxRetries` (2) times; any other 4xx is a refused request (bad route, effort, credential or payload) and is never retried. A rerun replays the prompt against the worktree as the failed attempt left it. Regressions: `internal/agent/deck_retry_test.go`.
+
 **Advisory Jev Signal (`internal/jev`, `internal/pipeline/steps/jev.go`)**
 
 - `JevStep` (runs after review) is ADVISORY ONLY and can never gate: every finding is severity `info` with action `no-op`, so the executor neither parks nor spends an auto-fix round, and there is deliberately no code path from a Jev answer to a blocked or failed run.

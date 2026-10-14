@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -113,7 +114,46 @@ func withValueFlag(args []string, value string, names ...string) []string {
 	return append(out, names[0], value)
 }
 
+// deckMaxRetries bounds the in-place reruns after a transient gateway
+// failure. A Deck run is replayed from its prompt against the same worktree,
+// so a rerun after a dropped stream resumes from whatever the first attempt
+// already left on disk rather than from a fresh checkout.
+const deckMaxRetries = 2
+
+// deckGatewayStatusRE reads the HTTP status Deck appends to a gateway failure.
+var deckGatewayStatusRE = regexp.MustCompile(`model gateway request failed \(http (\d{3})\)`)
+
+// classifyDeckTransient retries what the gateway itself reports as passing:
+// a request that failed without a status (a dropped upstream stream, such as
+// proxai's codex_stream_failed), a 5xx, or a 429. Any other 4xx is a request
+// the gateway refused - a bad route, effort, credential or payload - and is
+// never retried, and neither is anything classifyTransient already rejects.
+func classifyDeckTransient(err error) (string, bool) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "model gateway request failed") {
+		m := deckGatewayStatusRE.FindStringSubmatch(msg)
+		switch {
+		case m == nil:
+			return "gateway request failed", true
+		case m[1] == "429" || strings.HasPrefix(m[1], "5"):
+			return "gateway http " + m[1], true
+		default:
+			return "", false
+		}
+	}
+	return classifyTransient(err)
+}
+
 func (a *deckAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
+	return runWithRetry(ctx, "deck", opts, deckMaxRetries, classifyDeckTransient, nil, func() (*Result, error) {
+		return a.runOnce(ctx, opts)
+	})
+}
+
+func (a *deckAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(opts.Tuning)...)
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
