@@ -2265,7 +2265,7 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 			return nil, fmt.Errorf("parse push_quiet_window %q: %w", raw.PushQuietWindow, err)
 		}
 		if d < 0 {
-			d = 0
+			return nil, fmt.Errorf("push_quiet_window %q must not be negative", raw.PushQuietWindow)
 		}
 		cfg.PushQuietWindow = d
 	}

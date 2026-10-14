@@ -126,7 +126,7 @@ func TestPushReceivedRoutesReviewRolesToIndependentProfiles(t *testing.T) {
 		return []pipeline.Step{&reviewRoleProbeStep{}}
 	})
 
-	configYAML := "agent: pi\n" +
+	configYAML := "agent: pi\n" + "push_quiet_window: \"0s\"\n" +
 		"agent_path_override:\n  pi: " + piBin + "\n" +
 		"agent_config:\n  pi: {model: default-model, effort: high}\n" +
 		"review_agents:\n" +
