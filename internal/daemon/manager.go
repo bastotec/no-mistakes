@@ -48,6 +48,7 @@ type RunManager struct {
 	executors    map[string]*pipeline.Executor      // runID → executor
 	cancels      map[string]context.CancelCauseFunc // runID → cancel function with cause
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
+	quieting     map[string]bool                    // runIDs still inside their push quiet window
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
 	db           *db.DB
@@ -75,6 +76,10 @@ type RunManager struct {
 	completedOrder []string                   // insertion order for FIFO eviction
 }
 
+// testPushQuietWindow, when set by a test binary, replaces the configured
+// push quiet window so tests that push do not each wait it out.
+var testPushQuietWindow *time.Duration
+
 // maxSubscribersPerRun bounds the global mailbox footprint: queued bytes can
 // never exceed activeRuns × maxSubscribersPerRun × mailboxMaxBytes. Refusing
 // past the cap is an ordinary error, never unbounded growth.
@@ -94,6 +99,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		executors:     make(map[string]*pipeline.Executor),
 		cancels:       make(map[string]context.CancelCauseFunc),
 		dones:         make(map[string]chan struct{}),
+		quieting:      make(map[string]bool),
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
@@ -1657,12 +1663,26 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 	})
 
+	// A pushed run waits for the branch to go quiet before its first step, so
+	// a quick follow-up push replaces it while it has cost nothing (see
+	// cancelActiveRuns). Explicit launches and reruns start at once.
+	quietWindow := time.Duration(0)
+	if trigger == "push" {
+		quietWindow = globalCfg.PushQuietWindow
+		if testPushQuietWindow != nil {
+			quietWindow = *testPushQuietWindow
+		}
+	}
+
 	// Track executor.
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[run.ID] = executor
 	m.cancels[run.ID] = cancel
 	m.dones[run.ID] = done
+	if quietWindow > 0 {
+		m.quieting[run.ID] = true
+	}
 	m.mu.Unlock()
 
 	// Background goroutine now owns worktree cleanup.
@@ -1720,6 +1740,21 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			m.mu.Unlock()
 		}()
 
+		if quietWindow > 0 {
+			slog.Info("waiting for push quiet window", "run_id", run.ID, "branch", branch, "window", quietWindow)
+			timer := time.NewTimer(quietWindow)
+			select {
+			case <-timer.C:
+			case <-runCtx.Done():
+				timer.Stop()
+			}
+			m.mu.Lock()
+			delete(m.quieting, run.ID)
+			m.mu.Unlock()
+		}
+
+		// A run replaced inside its quiet window still goes through Execute,
+		// which records the cancellation cause and emits the terminal event.
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
@@ -2067,17 +2102,25 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
+		quieting := m.quieting[run.ID]
 		m.mu.Unlock()
 		if !ok {
 			continue
+		}
+		// A run still waiting out its push quiet window has started no step,
+		// so replacing it costs nothing; it is recorded as coalesced rather
+		// than superseded so stats can count the restarts the window avoided.
+		reason := types.RunCancelReasonSuperseded
+		if quieting {
+			reason = types.RunCancelReasonCoalesced
 		}
 
 		if err := m.db.RequestRepairCancellation(run.ID); err != nil {
 			slog.Error("failed to request repair cancellation", "run_id", run.ID, "error", err)
 			continue
 		}
-		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		cancel(errors.New(reason))
+		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch, "reason", reason)
 		if done != nil {
 			toWait = append(toWait, done)
 		}

@@ -41,6 +41,11 @@ const (
 	// DefaultStepQuietWarning is how long a running/fixing step can go without
 	// a new log or lifecycle activity before AXI status marks it quiet.
 	DefaultStepQuietWarning = 10 * time.Minute
+	// DefaultPushQuietWindow is how long a pushed run waits for the branch to
+	// go quiet before its first step starts. A further push to the same branch
+	// inside the window replaces the waiting run before any agent work is
+	// spent on it, instead of cancelling a run mid-review.
+	DefaultPushQuietWindow = 90 * time.Second
 	// DefaultAgentTimeout bounds one pipeline agent invocation that does not
 	// install a more specific deadline, so a stalled agent cannot leave a run
 	// active forever. Review and Test keep their own knobs; this is the
@@ -181,6 +186,7 @@ type GlobalConfig struct {
 	WorktreeRoots           map[string]string `yaml:"worktree_roots"`
 	CITimeout               time.Duration     `yaml:"-"`
 	StepQuietWarning        time.Duration     `yaml:"-"`
+	PushQuietWindow         time.Duration     `yaml:"-"`
 	AgentTimeout            time.Duration     `yaml:"-"`
 	ReviewAgentTimeout      time.Duration     `yaml:"-"`
 	TestAgentTimeout        time.Duration     `yaml:"-"`
@@ -245,6 +251,7 @@ type globalConfigRaw struct {
 	GateReconcileTimeout    string                     `yaml:"gate_reconcile_timeout"`
 	BabysitTimeout          string                     `yaml:"babysit_timeout"`
 	StepQuietWarning        string                     `yaml:"step_quiet_warning"`
+	PushQuietWindow         string                     `yaml:"push_quiet_window"`
 	AgentTimeout            string                     `yaml:"agent_timeout"`
 	ReviewAgentTimeout      string                     `yaml:"review_agent_timeout"`
 	TestAgentTimeout        string                     `yaml:"test_agent_timeout"`
@@ -1139,6 +1146,12 @@ ci_timeout: "168h"
 # only; it never cancels work.
 step_quiet_warning: "10m"
 
+# How long a run started by a push waits for the branch to go quiet before its
+# first step. A further push to the same branch inside the window replaces the
+# waiting run before any agent work is spent, so a quick follow-up push does
+# not cancel a run mid-review. "0s" starts every run at once. Global-only.
+push_quiet_window: "90s"
+
 # Maximum wall-clock time for one pipeline agent invocation that does not
 # install a more specific deadline (document, lint, rebase, PR, CI-fix, and
 # auto-fix). A stalled agent fails the run instead of leaving it active.
@@ -2002,6 +2015,7 @@ func DefaultGlobalConfig() *GlobalConfig {
 		ForgejoAXIPath:          "forgejo-axi",
 		CITimeout:               DefaultCITimeout,
 		StepQuietWarning:        DefaultStepQuietWarning,
+		PushQuietWindow:         DefaultPushQuietWindow,
 		AgentTimeout:            DefaultAgentTimeout,
 		ReviewAgentTimeout:      DefaultReviewAgentTimeout,
 		TestAgentTimeout:        DefaultTestAgentTimeout,
@@ -2244,6 +2258,16 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 		if d > 0 {
 			cfg.StepQuietWarning = d
 		}
+	}
+	if raw.PushQuietWindow != "" {
+		d, err := time.ParseDuration(raw.PushQuietWindow)
+		if err != nil {
+			return nil, fmt.Errorf("parse push_quiet_window %q: %w", raw.PushQuietWindow, err)
+		}
+		if d < 0 {
+			d = 0
+		}
+		cfg.PushQuietWindow = d
 	}
 	if raw.AgentTimeout != "" {
 		d, err := parsePositiveDuration("agent_timeout", raw.AgentTimeout)
