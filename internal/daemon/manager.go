@@ -1407,22 +1407,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("associated_pr_base_conflict")
 		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; run `no-mistakes axi run --retire-existing-pr` on the branch to retarget it", branch, target)
 	}
-	// A burst of pushes coalesced inside one quiet window is one push: the
-	// replacement keeps the base the branch had before the burst, so a
-	// force-push followed by a quick follow-up still reads as a history
-	// rewrite to the rebase step. A zero base (the burst opened the branch)
-	// carries no such evidence, so the push's own previous head is kept then:
-	// it is what shows a rewrite inside the burst. The branch lock held here
-	// keeps the waiting run inside its window until it is cancelled below.
-	if trigger == "push" && active != nil && !git.IsZeroSHA(active.BaseSHA) {
-		m.mu.Lock()
-		quieting := m.quieting[active.ID]
-		m.mu.Unlock()
-		if quieting {
-			baseSHA = active.BaseSHA
-		}
-	}
-
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch, trigger)
 
