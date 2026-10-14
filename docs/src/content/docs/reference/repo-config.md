@@ -476,7 +476,7 @@ Sizes the Review step to the change. Every field is optional.
 | `large_min_files` | `int` | `20` | |
 | `risky_paths` | `string[]` | see below | A change touching any of these gets `high` whatever its size |
 
-Lines are added plus deleted lines in the branch diff. Anything between small and large gets `medium`, and a change whose diff size cannot be read gets `medium` too, never a lighter review.
+Lines are added plus deleted lines in the branch diff, before `ignore_patterns` filtering. Risky paths and large limits take precedence over small limits; the numeric limits must be non-negative. Anything between small and large gets `medium`. An unreadable diff size gets `medium` unless a risky path raises it to `high`; `min_effort` still applies.
 A `risky_paths` glob containing `/` matches like `ignore_patterns` (a trailing `/**` is a subtree); one without `/` matches any single path segment, case-insensitively, so `*auth*` matches both `internal/auth/session.go` and `oauth.go`.
 Risky paths are matched against every changed file, including ignored ones. Unset, the defaults are `*auth*`, `*secur*`, `*secret*`, `*credential*`, `*password*`, `*crypto*`, `*permission*` and `*migration*`; an empty list turns path risk off.
 What each level runs is described under [Review](/no-mistakes/reference/pipeline-steps/#review).
@@ -492,7 +492,7 @@ Like the rest of the `review` block it is honored **only from the trusted defaul
 
 ### review.routes
 
-Overrides the global [`review.routes`](/no-mistakes/reference/global-config/#reviewroutes) for this repository, field by field: `finders`, `light` and `verify` each replace the global value only when set here.
+Overrides the global [`review.routes`](/no-mistakes/reference/global-config/#reviewroutes) for this repository, field by field: a nonempty `finders` list and nonblank `light` or `verify` strings replace their global values. Empty values inherit rather than clearing a global route.
 
 ```yaml
 review:

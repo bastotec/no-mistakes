@@ -27,9 +27,10 @@ var (
 
 // reviewPlan is how much review one change gets. Low and medium run one
 // reviewer; high and above run one finder per dimension in parallel and
-// verify each finding before it is reported. Every bound here is a hard cap:
-// at most len(Dimensions) finders plus VerifyCap verifiers per review round,
-// each with its own model-call bound.
+// verify claims up to the level's cap before reporting them. Bounds limit
+// reviewer/finder slots and verifier invocations; each reviewer or finder may
+// make reviewAnalyzerMaxAttempts schema attempts. Each invocation has its own
+// model-call bound where the adapter supports it.
 type reviewPlan struct {
 	Effort string
 	Reason string

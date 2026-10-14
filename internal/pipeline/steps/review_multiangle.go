@@ -52,9 +52,9 @@ type candidateFinding struct {
 }
 
 // runMultiAngleReview runs one finder per plan dimension in parallel, merges
-// their findings, verifies each surviving claim, and folds the finders' risk
-// assessments into one. A finder that cannot produce a valid review fails the
-// step: an unrun angle must not read as a clean one.
+// their findings, verifies surviving claims up to the level's cap, and rates
+// risk from the retained findings. A finder that cannot produce a valid review
+// fails the step: an unrun angle must not read as a clean one.
 func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.RunOpts, plan reviewPlan, verifyContext string) (Findings, error) {
 	log := lockedLog(sctx.Log)
 	routes := sctx.Config.Review.Routes
@@ -171,8 +171,8 @@ func dimensionNames(dims []reviewDimension) string {
 }
 
 // dedupeFindings merges claims several finders raised about the same thing:
-// the same file, lines within a few of each other, and overlapping wording.
-// The most severe copy survives and remembers every dimension that found it.
+// the same file, nearby lines, and identical trimmed descriptions. The most
+// severe copy survives and remembers every dimension that found it.
 func dedupeFindings(results []Findings, dimensions []string) []candidateFinding {
 	var out []candidateFinding
 	for i, r := range results {
@@ -279,7 +279,7 @@ func severityRank(severity string) int {
 }
 
 // rankCandidates orders claims most-severe first, then by how many finders
-// raised them, so a verify cap drops the least important ones.
+// raised them, so a verify cap defers the least important ones to a human.
 func rankCandidates(c []candidateFinding) {
 	sort.SliceStable(c, func(i, j int) bool {
 		if ri, rj := severityRank(c[i].Severity), severityRank(c[j].Severity); ri != rj {

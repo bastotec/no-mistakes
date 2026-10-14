@@ -999,7 +999,7 @@ type Review struct {
 	MaxRounds int
 	// Sizing is the trusted repository review.sizing with defaults applied.
 	Sizing ReviewSizing
-	// Routes is the global-only review.routes.
+	// Routes is global review.routes with trusted repository overrides.
 	Routes ReviewRoutesRaw
 }
 
