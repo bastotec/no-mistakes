@@ -120,7 +120,7 @@ func multiAngleFake(t *testing.T) *concurrentAgent {
 	finder := map[string]string{
 		"correctness":    `{"findings":[{"severity":"error","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops when the queue is closed","review_scope":"source"},{"severity":"warning","action":"auto-fix","file":"a.txt","line":20,"description":"timeout value is parsed as seconds but documented as milliseconds","review_scope":"source"}],"risk_level":"medium","risk_rationale":"one loop defect","risk_scope":"source-or-external"}`,
 		"security":       `{"findings":[],"risk_level":"low","risk_rationale":"no boundary touched","risk_scope":"source-or-external"}`,
-		"regressions":    `{"findings":[{"severity":"warning","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops after the queue is closed","review_scope":"source"}],"risk_level":"medium","risk_rationale":"callers can hang","risk_scope":"source-or-external"}`,
+		"regressions":    `{"findings":[{"severity":"warning","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops when the queue is closed, hanging callers","review_scope":"source"}],"risk_level":"medium","risk_rationale":"callers can hang","risk_scope":"source-or-external"}`,
 		"simplification": `{"findings":[{"severity":"info","action":"no-op","file":"b.txt","line":1,"description":"helper duplicates strings.Cut","review_scope":"source"}],"risk_level":"high","risk_rationale":"outlier","risk_scope":"source-or-external"}`,
 	}
 	return &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
@@ -294,6 +294,16 @@ func TestReviewStep_MultiAngleClaimsPastTheVerifyCapStayPlausible(t *testing.T) 
 	if len(findings.Items) != 13 || plausible != 1 {
 		t.Fatalf("findings = %d (%d plausible), want all 13 with the one past the cap plausible", len(findings.Items), plausible)
 	}
+	for _, item := range findings.Items {
+		if strings.HasPrefix(item.Description, "[PLAUSIBLE]") && item.Action != "ask-user" {
+			t.Fatalf("an unverified claim must park for a human, got action %q", item.Action)
+		}
+	}
+	for _, c := range ag.calls {
+		if !c.Parallel {
+			t.Fatal("finder and verifier invocations must be marked parallel so repair replay never keys them by arrival order")
+		}
+	}
 }
 
 // A verifier that crashes did not disprove its claim, so the claim stays as
@@ -357,6 +367,13 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	if len(timeouts) != 2 {
 		t.Fatalf("timeout claims merged: %+v", timeouts)
 	}
+	readWrite := dedupeFindings([]Findings{{Items: []Finding{
+		{Severity: "warning", File: "conn.go", Line: 7, Description: "read timeout is not enforced after reconnect"},
+		{Severity: "warning", File: "conn.go", Line: 7, Description: "write timeout is not enforced after reconnect"},
+	}}}, []string{"correctness"})
+	if len(readWrite) != 2 {
+		t.Fatalf("read and write timeout claims merged: %+v", readWrite)
+	}
 	sameLine := dedupeFindings([]Findings{{Items: []Finding{
 		{Severity: "warning", File: "srv.go", Line: 10, Description: "ReadTimeout multiplies by seconds instead of milliseconds"},
 		{Severity: "warning", File: "srv.go", Line: 10, Description: "WriteTimeout multiplies by milliseconds instead of seconds"},
@@ -367,7 +384,7 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	// A merged claim keeps the most cautious action any finder asked for.
 	cautious := dedupeFindings([]Findings{
 		{Items: []Finding{{Severity: "error", Action: "auto-fix", File: "a.go", Line: 5, Description: "retry budget is never reset after success"}}},
-		{Items: []Finding{{Severity: "warning", Action: "ask-user", File: "a.go", Line: 5, Description: "retry budget is never reset after a success"}}},
+		{Items: []Finding{{Severity: "warning", Action: "ask-user", File: "a.go", Line: 5, Description: "retry budget is never reset after success"}}},
 	}, []string{"correctness", "regressions"})
 	if len(cautious) != 1 || cautious[0].Severity != "error" || cautious[0].Action != "ask-user" {
 		t.Fatalf("merged = %+v, want the error copy carrying ask-user", cautious)

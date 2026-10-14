@@ -73,6 +73,12 @@ type RunOpts struct {
 	// pi and claude the model and effort. Every other adapter runs at its configured
 	// profile.
 	Tuning *InvocationTuning
+	// Parallel marks an invocation that runs beside others of the same step
+	// (the multi-angle review's finders and verifiers). Arrival order among
+	// them is not stable across a daemon restart, so they must never be
+	// identified by it: the repair-invocation layer runs them directly
+	// instead of replaying a cached result by ordinal.
+	Parallel bool
 }
 
 // InvocationTuning is a per-invocation override of an agent's configured

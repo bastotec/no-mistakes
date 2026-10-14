@@ -69,6 +69,7 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 			defer wg.Done()
 			finderOpts := opts
 			finderOpts.OnChunk = nil
+			finderOpts.Parallel = true
 			finderOpts.Prompt = opts.Prompt + finderFocusSection(dim, plan.Dimensions)
 			tuning := plan.FinderTuning
 			tuning.Model = finderRoute(routes, i)
@@ -109,10 +110,13 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 		return Findings{}, err
 	}
 	for _, c := range overflow {
-		verified = append(verified, verifiedFinding{
-			finding: markVerified(c, findingVerdict{Verdict: verdictPlausible, Evidence: "not verified: past this review level's verify cap"}),
-			verdict: verdictPlausible,
-		})
+		// An unverified claim never reaches an unattended fix: it parks for
+		// a human decision instead.
+		f := markVerified(c, findingVerdict{Verdict: verdictPlausible, Evidence: "not verified: past this review level's verify cap, so it needs a human decision"})
+		if f.ActionOrDefault() == types.ActionAutoFix {
+			f.Action = types.ActionAskUser
+		}
+		verified = append(verified, verifiedFinding{finding: f, verdict: verdictPlausible})
 	}
 
 	var merged Findings
@@ -209,25 +213,21 @@ func sameClaim(a, b Finding) bool {
 	if fileA != fileB {
 		return false
 	}
-	// Only a clear match merges: two findings on neighboring lines can share
-	// most of their vocabulary and still be different defects, and merging
-	// them would leave one unverified and unfixed. The same line with similar
-	// wording is one claim; nearby lines need near-identical wording.
 	// Findings naming different code identifiers (ReadTimeout and
 	// WriteTimeout on one line) are about different things however much
 	// other wording they share.
 	if idsA, idsB := codeIdentifiers(a.Description), codeIdentifiers(b.Description); len(idsA) > 0 && len(idsB) > 0 && !maps.Equal(idsA, idsB) {
 		return false
 	}
-	overlap := wordOverlap(a.Description, b.Description)
-	switch {
-	case fileA == "" || a.Line == b.Line:
-		return overlap >= 0.6
-	case a.Line != 0 && b.Line != 0 && absInt(a.Line-b.Line) <= 3:
-		return overlap >= 0.85
-	default:
+	if fileA != "" && a.Line != b.Line && (a.Line == 0 || b.Line == 0 || absInt(a.Line-b.Line) > 3) {
 		return false
 	}
+	// Only a clear match merges: two findings can share most of their
+	// vocabulary and still be different defects ("read timeout" and "write
+	// timeout"), and merging them would leave one unverified and unfixed.
+	// Not merging only costs one more verifier, so the bar is near-identical
+	// wording, or one description adding words to the other.
+	return wordOverlap(a.Description, b.Description) >= 0.85 || wordSubset(a.Description, b.Description)
 }
 
 // codeIdentifiers returns the words in a description that look like code
@@ -271,6 +271,24 @@ func wordOverlap(a, b string) float64 {
 		}
 	}
 	return float64(shared) / float64(len(wa)+len(wb)-shared)
+}
+
+// wordSubset reports whether one description's content words all appear in
+// the other's.
+func wordSubset(a, b string) bool {
+	wa, wb := contentWords(a), contentWords(b)
+	if len(wa) == 0 || len(wb) == 0 {
+		return false
+	}
+	if len(wa) > len(wb) {
+		wa, wb = wb, wa
+	}
+	for w := range wa {
+		if !wb[w] {
+			return false
+		}
+	}
+	return true
 }
 
 func contentWords(s string) map[string]bool {
@@ -340,6 +358,7 @@ func (s *ReviewStep) verifyCandidates(sctx *pipeline.StepContext, opts agent.Run
 				JSONSchema: verifyFindingSchema,
 				Purpose:    opts.Purpose,
 				Workload:   opts.Workload,
+				Parallel:   true,
 			}
 			tuning := plan.VerifyTuning
 			verifyOpts.Tuning = &tuning

@@ -1880,7 +1880,7 @@ func (a *repairInvocationAgent) NeutralizesGateInstructions() bool {
 }
 func (a *repairInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	roundID := a.roundID()
-	if roundID == "" {
+	if roundID == "" || opts.Parallel {
 		return a.inner.Run(ctx, opts)
 	}
 	a.mu.Lock()

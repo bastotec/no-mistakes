@@ -689,3 +689,41 @@ func TestExecutor_TracksAutoFixTelemetry(t *testing.T) {
 		t.Fatalf("fix attempt = %v, want 1", got)
 	}
 }
+
+// A parallel review invocation is never identified by arrival order: even
+// with a terminal result recorded at ordinal 0 it runs fresh, and it takes no
+// ordinal from the sequential invocations around it.
+func TestRepairInvocationAgent_ParallelInvocationNeverReplaysByOrdinal(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	stepResult, _ := database.InsertStepResult(run.ID, types.StepReview)
+	if err := database.StartStepWithAutoFixLimit(stepResult.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	findings := `{"findings":[{"id":"review-1","severity":"warning","description":"needs a fix","action":"ask-user"}]}`
+	round, _ := database.InsertStepRound(stepResult.ID, 1, "initial", &findings, nil, 1)
+	ids := `["review-1"]`
+	if decision, err := database.AuthorizeStepRepair(stepResult.ID, round.ID, 1, &ids, nil); err != nil || !decision.Granted {
+		t.Fatalf("AuthorizeStepRepair() = %+v, %v", decision, err)
+	}
+	if err := database.ClaimStepRepair(stepResult.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := database.RegisterRepairInvocation(stepResult.ID, round.ID, 0, t.TempDir(), "repair-result", "review", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.FinishRepairInvocation(invocation.ID, []byte(`{"text":"another claim's verdict"}`), true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	inner := &repairResultAgent{}
+	wrapped := &repairInvocationAgent{inner: inner, db: database, stepID: stepResult.ID, worktree: t.TempDir(), roundID: func() string { return round.ID }}
+	if _, err := wrapped.Run(context.Background(), agent.RunOpts{Purpose: "review", Parallel: true}); err != nil {
+		t.Fatal(err)
+	}
+	if inner.calls != 1 {
+		t.Fatalf("parallel invocation ran %d times, want 1 fresh run instead of a replayed result", inner.calls)
+	}
+	if len(wrapped.ordinals) != 0 {
+		t.Fatalf("parallel invocation consumed an ordinal: %v", wrapped.ordinals)
+	}
+}
