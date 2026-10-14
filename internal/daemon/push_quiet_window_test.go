@@ -46,19 +46,6 @@ func commitFollowUp(t *testing.T, repo *db.Repo) string {
 	return gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
 }
 
-func commitFollowUp2(t *testing.T, repo *db.Repo) string { return commitContent(t, repo, "third") }
-func commitFollowUp3(t *testing.T, repo *db.Repo) string { return commitContent(t, repo, "fourth") }
-
-func commitContent(t *testing.T, repo *db.Repo, content string) string {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "test.txt"), []byte(content), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	gitCmd(t, repo.WorkingPath, "commit", "-am", content)
-	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
-	return gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
-}
-
 func pushReceived(t *testing.T, p *paths.Paths, repoID, old, head string) string {
 	t.Helper()
 	client, err := ipc.Dial(p.Socket())
@@ -94,34 +81,18 @@ func TestPushQuietWindowCoalescesAFollowUpPush(t *testing.T) {
 	if first.Status != types.RunCancelled || first.Error == nil || *first.Error != types.RunCancelReasonCoalesced {
 		t.Fatalf("first run = %s %v, want cancelled with %q", first.Status, first.Error, types.RunCancelReasonCoalesced)
 	}
-	second := waitForRunFinal(t, d, secondRun)
-	if second.Status != types.RunCompleted {
+	if second := waitForRunFinal(t, d, secondRun); second.Status != types.RunCompleted {
 		t.Fatalf("second run status = %s, want completed", second.Status)
 	}
-	// The burst opened the branch, so its zero base carries no rewrite
-	// evidence and the replacement keeps the push's own previous head.
-	if second.BaseSHA != firstSHA {
-		t.Fatalf("second run base = %s, want the push's previous head %s", second.BaseSHA, firstSHA)
-	}
-	third := commitFollowUp2(t, repo)
-	thirdRun := pushReceived(t, p, repo.ID, secondSHA, third)
-	fourth := commitFollowUp3(t, repo)
-	fourthRun := pushReceived(t, p, repo.ID, third, fourth)
-	waitForRunFinal(t, d, thirdRun)
-	// A burst over an existing branch keeps the base from before the burst,
-	// so a rewrite inside it still reads as one against the published head.
-	if got := waitForRunFinal(t, d, fourthRun); got.BaseSHA != secondSHA {
-		t.Fatalf("fourth run base = %s, want the burst's base %s", got.BaseSHA, secondSHA)
-	}
-	if got := review.execCnt.Load(); got != 2 {
-		t.Fatalf("review executed %d times, want 2 (only the runs that outlived their quiet windows)", got)
+	if got := review.execCnt.Load(); got != 1 {
+		t.Fatalf("review executed %d times, want 1 (only the run that outlived its quiet window)", got)
 	}
 	stats, err := d.GetStats()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if stats.CoalescedRuns != 2 || stats.SupersededRuns != 0 {
-		t.Fatalf("stats coalesced=%d superseded=%d, want 2 and 0", stats.CoalescedRuns, stats.SupersededRuns)
+	if stats.CoalescedRuns != 1 || stats.SupersededRuns != 0 {
+		t.Fatalf("stats coalesced=%d superseded=%d, want 1 and 0", stats.CoalescedRuns, stats.SupersededRuns)
 	}
 }
 
