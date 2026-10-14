@@ -222,12 +222,11 @@ func sameClaim(a, b Finding) bool {
 	if fileA != "" && a.Line != b.Line && (a.Line == 0 || b.Line == 0 || absInt(a.Line-b.Line) > 3) {
 		return false
 	}
-	// Only a clear match merges: two findings can share most of their
-	// vocabulary and still be different defects ("read timeout" and "write
-	// timeout"), and merging them would leave one unverified and unfixed.
-	// Not merging only costs one more verifier, so the bar is near-identical
-	// wording, or one description adding words to the other.
-	return wordOverlap(a.Description, b.Description) >= 0.85 || wordSubset(a.Description, b.Description)
+	// Only the same claim merges: two findings can share all but one word
+	// and still be different defects ("read timeout" and "write timeout"),
+	// and merging them would leave one unverified and unfixed. Not merging
+	// only costs one more verifier, so the bar is identical content words.
+	return maps.Equal(contentWords(a.Description), contentWords(b.Description))
 }
 
 // codeIdentifiers returns the words in a description that look like code
@@ -256,39 +255,6 @@ func mostCautiousAction(a, b string) string {
 		return b
 	}
 	return a
-}
-
-// wordOverlap is the Jaccard similarity of two descriptions' content words.
-func wordOverlap(a, b string) float64 {
-	wa, wb := contentWords(a), contentWords(b)
-	if len(wa) == 0 || len(wb) == 0 {
-		return 0
-	}
-	shared := 0
-	for w := range wa {
-		if wb[w] {
-			shared++
-		}
-	}
-	return float64(shared) / float64(len(wa)+len(wb)-shared)
-}
-
-// wordSubset reports whether one description's content words all appear in
-// the other's.
-func wordSubset(a, b string) bool {
-	wa, wb := contentWords(a), contentWords(b)
-	if len(wa) == 0 || len(wb) == 0 {
-		return false
-	}
-	if len(wa) > len(wb) {
-		wa, wb = wb, wa
-	}
-	for w := range wa {
-		if !wb[w] {
-			return false
-		}
-	}
-	return true
 }
 
 func contentWords(s string) map[string]bool {
