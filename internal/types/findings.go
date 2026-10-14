@@ -290,24 +290,31 @@ type Findings struct {
 	UnresolvedNotes []Finding `json:"unresolved_notes,omitempty"`
 	ResolvedByFix   []Finding `json:"resolved_by_fix,omitempty"`
 	RoundCap        int       `json:"round_cap,omitempty"`
+	// ReviewEffort and ReviewEffortReason record the review level the review
+	// step chose for the change (low through max) and why. Written only by
+	// the review step; the PR attestation publishes them.
+	ReviewEffort       string `json:"review_effort,omitempty"`
+	ReviewEffortReason string `json:"review_effort_reason,omitempty"`
 }
 
 type findingsWire struct {
-	Items           []Finding      `json:"findings"`
-	Legacy          []Finding      `json:"items"`
-	Summary         string         `json:"summary"`
-	Tested          []string       `json:"tested"`
-	TestingSummary  string         `json:"testing_summary"`
-	Artifacts       []TestArtifact `json:"artifacts"`
-	Scenarios       []TestScenario `json:"scenarios"`
-	Verdict         string         `json:"verdict"`
-	TestedHeadSHA   string         `json:"tested_head_sha"`
-	RiskLevel       string         `json:"risk_level"`
-	RiskRationale   string         `json:"risk_rationale"`
-	RiskScope       string         `json:"risk_scope"`
-	UnresolvedNotes []Finding      `json:"unresolved_notes"`
-	ResolvedByFix   []Finding      `json:"resolved_by_fix"`
-	RoundCap        int            `json:"round_cap"`
+	Items              []Finding      `json:"findings"`
+	Legacy             []Finding      `json:"items"`
+	Summary            string         `json:"summary"`
+	Tested             []string       `json:"tested"`
+	TestingSummary     string         `json:"testing_summary"`
+	Artifacts          []TestArtifact `json:"artifacts"`
+	Scenarios          []TestScenario `json:"scenarios"`
+	Verdict            string         `json:"verdict"`
+	TestedHeadSHA      string         `json:"tested_head_sha"`
+	RiskLevel          string         `json:"risk_level"`
+	RiskRationale      string         `json:"risk_rationale"`
+	RiskScope          string         `json:"risk_scope"`
+	UnresolvedNotes    []Finding      `json:"unresolved_notes"`
+	ResolvedByFix      []Finding      `json:"resolved_by_fix"`
+	RoundCap           int            `json:"round_cap"`
+	ReviewEffort       string         `json:"review_effort"`
+	ReviewEffortReason string         `json:"review_effort_reason"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -322,20 +329,22 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		items = wire.Legacy
 	}
 	return Findings{
-		Items:           items,
-		Summary:         wire.Summary,
-		Tested:          wire.Tested,
-		TestingSummary:  wire.TestingSummary,
-		Artifacts:       wire.Artifacts,
-		Scenarios:       wire.Scenarios,
-		Verdict:         wire.Verdict,
-		TestedHeadSHA:   wire.TestedHeadSHA,
-		RiskLevel:       wire.RiskLevel,
-		RiskRationale:   wire.RiskRationale,
-		RiskScope:       wire.RiskScope,
-		UnresolvedNotes: wire.UnresolvedNotes,
-		ResolvedByFix:   wire.ResolvedByFix,
-		RoundCap:        wire.RoundCap,
+		Items:              items,
+		Summary:            wire.Summary,
+		Tested:             wire.Tested,
+		TestingSummary:     wire.TestingSummary,
+		Artifacts:          wire.Artifacts,
+		Scenarios:          wire.Scenarios,
+		Verdict:            wire.Verdict,
+		TestedHeadSHA:      wire.TestedHeadSHA,
+		RiskLevel:          wire.RiskLevel,
+		RiskRationale:      wire.RiskRationale,
+		RiskScope:          wire.RiskScope,
+		UnresolvedNotes:    wire.UnresolvedNotes,
+		ResolvedByFix:      wire.ResolvedByFix,
+		RoundCap:           wire.RoundCap,
+		ReviewEffort:       wire.ReviewEffort,
+		ReviewEffortReason: wire.ReviewEffortReason,
 	}, nil
 }
 

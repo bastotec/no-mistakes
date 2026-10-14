@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -61,18 +62,59 @@ func (a *deckAgent) NeutralizesGateInstructions() bool {
 // buildArgs returns the Deck argv for one ephemeral run. Under the opt-out the
 // suppression flag follows the verb, before user extras, unless the operator
 // already pinned it (clap rejects a repeated flag).
-func (a *deckAgent) buildArgs() []string {
-	args := make([]string, 0, len(a.extraArgs)+4)
+func (a *deckAgent) buildArgs(tuning *InvocationTuning) []string {
+	extra := a.extraArgs
+	if tuning != nil {
+		extra = withValueFlag(extra, tuning.Model, "--model", "-m")
+		extra = withValueFlag(extra, tuning.Effort, "--effort")
+		if tuning.MaxTurns > 0 {
+			extra = withValueFlag(extra, strconv.Itoa(tuning.MaxTurns), "--max-turns")
+		}
+		if tuning.DeadlineSecs > 0 {
+			extra = withValueFlag(extra, strconv.Itoa(tuning.DeadlineSecs), "--deadline-secs")
+		}
+	}
+	args := make([]string, 0, len(extra)+4)
 	args = append(args, "run")
-	if a.disableProjectSettings && !deckArgsContain(a.extraArgs, deckNoProjectContextFlag) {
+	if a.disableProjectSettings && !deckArgsContain(extra, deckNoProjectContextFlag) {
 		args = append(args, deckNoProjectContextFlag)
 	}
-	args = append(args, a.extraArgs...)
+	args = append(args, extra...)
 	return append(args, "--ephemeral", "-")
 }
 
+// withValueFlag returns args with every spelling of one value flag (`--flag v`
+// or `--flag=v`) replaced by a single `names[0] value`. Deck (clap) rejects a
+// repeated flag, and other CLIs take the first or the last, so an override must
+// replace the operator's value rather than sit beside it. An empty value
+// leaves args untouched.
+func withValueFlag(args []string, value string, names ...string) []string {
+	if value == "" {
+		return args
+	}
+	out := make([]string, 0, len(args)+2)
+	for i := 0; i < len(args); i++ {
+		matched := false
+		for _, name := range names {
+			if args[i] == name {
+				matched = true
+				i++ // skip the value
+				break
+			}
+			if strings.HasPrefix(args[i], name+"=") {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			out = append(out, args[i])
+		}
+	}
+	return append(out, names[0], value)
+}
+
 func (a *deckAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs()...)
+	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(opts.Tuning)...)
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	prompt := opts.Prompt

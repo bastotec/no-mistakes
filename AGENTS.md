@@ -75,6 +75,14 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 - Eval replay (`internal/eval/replay.go` `observedAgent`) sums token usage across every review attempt and reports none when any attempt lacks reported usage, matching the captured baseline, so a candidate that needed reruns never reads as cheaper.
 - Regressions: `internal/pipeline/steps/review_schema_retry_test.go`, `TestReviewStep_UnrunAnalyzerDoesNotApprove`, `TestReplayTokensCoverEveryReviewAttempt`, e2e `TestAnalyzerEvidenceFailuresFailPipelineJourney`.
 
+**Sized, Multi-Angle Review (`internal/pipeline/steps/review_sizing.go`, `review_multiangle.go`)**
+
+- `planReview` sizes each review round from the diff stat and trusted `review.sizing` (risky paths matched against the COMPLETE changed set): `low`/`medium` run one reviewer, `high`/`xhigh`/`max` run one finder per dimension in parallel, de-duplicate, then one verify agent per claim up to the level's cap. The per-level agent counts, `MaxTurns` and deadlines in `planReview` are the token bound; raising them is a cost decision.
+- Fail-closed rules: a finder that cannot produce a valid review fails the step (one retry on the configured model when a route was set); an unreadable diff stat sizes as `medium`, never lighter; a verifier that FAILS keeps its claim `[PLAUSIBLE]` - only an explicit `refuted` verdict drops a claim.
+- Per-invocation routes/effort/turns ride `agent.RunOpts.Tuning`; Deck applies all of it and Pi the model and `--thinking` (`withValueFlag` replaces the operator's flag rather than repeating it). `review.routes` is global-only (operator quota). The chosen level is stamped on `Findings.ReviewEffort` after parsing, so agent JSON cannot claim one, and published as attestation `review: {effort, reason}`; a CI-repair restamp carries it, a rebind with this run's own steps does not.
+- The executor's step-log writers are mutex-guarded because review agents now run concurrently in one step.
+- User-facing semantics are owned by `docs/src/content/docs/reference/pipeline-steps.md` (Review), `repo-config.md` (`review.sizing`), `global-config.md` (`review.routes`). Regressions: `internal/pipeline/steps/review_multiangle_test.go`, `prsummary_review_effort_test.go`, `internal/config/review_sizing_test.go`, `internal/agent/deck_tuning_test.go`.
+
 **Advisory Jev Signal (`internal/jev`, `internal/pipeline/steps/jev.go`)**
 
 - `JevStep` (runs after review) is ADVISORY ONLY and can never gate: every finding is severity `info` with action `no-op`, so the executor neither parks nor spends an auto-fix round, and there is deliberately no code path from a Jev answer to a blocked or failed run.

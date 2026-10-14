@@ -1026,7 +1026,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 	}
+	// The review step runs several agents at once, so the log writers and the
+	// lifecycle hook that calls them serialize on one lock.
+	var logMu sync.Mutex
 	writeLog := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if text != "" {
 			prefix := ""
 			if !lastChunkNewline {
@@ -1040,6 +1045,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		touchLogActivity(text, true)
 	}
 	writeLogChunk := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if text != "" {
 			lastChunkNewline = strings.HasSuffix(text, "\n")
 		}

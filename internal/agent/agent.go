@@ -66,6 +66,23 @@ type RunOpts struct {
 	// fallback-provider attempts, after it completes. It is instrumentation
 	// only and must not change invocation behavior.
 	OnAttempt func(Attempt)
+	// Tuning, when non-nil, narrows this one invocation's model route,
+	// reasoning effort and run bounds, overriding the operator's configured
+	// values for it alone. The review step sizes its agents with it. Only
+	// adapters that can express it per invocation apply it: deck all of it,
+	// pi the model and effort. Every other adapter runs at its configured
+	// profile.
+	Tuning *InvocationTuning
+}
+
+// InvocationTuning is a per-invocation override of an agent's configured
+// model route, reasoning effort, model-call bound and deadline. Zero fields
+// keep the configured value.
+type InvocationTuning struct {
+	Model        string
+	Effort       string
+	MaxTurns     int
+	DeadlineSecs int
 }
 
 // IsStructuredOutputRejected reports whether an invocation completed but its

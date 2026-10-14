@@ -12,6 +12,7 @@ import (
 	"path"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -384,11 +385,138 @@ type ReviewRaw struct {
 	// the review block it is honored only from the trusted default-branch
 	// copy, so a pushed branch cannot shorten its own review.
 	MaxRounds *int `yaml:"max_rounds"`
+	// Sizing picks how much review a change gets from its size and the paths
+	// it touches. Trusted-only like the rest of the block: a pushed branch
+	// must not lighten its own review.
+	Sizing ReviewSizingRaw `yaml:"sizing"`
+}
+
+// ReviewSizingRaw is review.sizing. Every field is optional; ResolveReviewSizing
+// fills the defaults.
+type ReviewSizingRaw struct {
+	// Effort forces one review level for every change: low, medium, high,
+	// xhigh or max. Empty or "auto" sizes each change.
+	Effort string `yaml:"effort"`
+	// A change at or under both small limits gets the light review.
+	SmallMaxLines *int `yaml:"small_max_lines"`
+	SmallMaxFiles *int `yaml:"small_max_files"`
+	// A change at or over either large limit gets the multi-angle review.
+	LargeMinLines *int `yaml:"large_min_lines"`
+	LargeMinFiles *int `yaml:"large_min_files"`
+	// RiskyPaths are globs; a change touching any of them gets the
+	// multi-angle review whatever its size. Unset uses DefaultReviewRiskyPaths,
+	// an empty list turns path risk off.
+	RiskyPaths *[]string `yaml:"risky_paths"`
+}
+
+// Review effort levels, lightest first. They follow the code-review skill's
+// levels: low and medium run one reviewer, high and above run parallel
+// finders over separate dimensions and verify every finding.
+const (
+	ReviewEffortAuto   = "auto"
+	ReviewEffortLow    = "low"
+	ReviewEffortMedium = "medium"
+	ReviewEffortHigh   = "high"
+	ReviewEffortXHigh  = "xhigh"
+	ReviewEffortMax    = "max"
+)
+
+// ReviewEffortLevels lists the effort levels in increasing order.
+var ReviewEffortLevels = []string{ReviewEffortLow, ReviewEffortMedium, ReviewEffortHigh, ReviewEffortXHigh, ReviewEffortMax}
+
+// Review sizing defaults.
+const (
+	DefaultReviewSmallMaxLines = 80
+	DefaultReviewSmallMaxFiles = 3
+	DefaultReviewLargeMinLines = 800
+	DefaultReviewLargeMinFiles = 20
+)
+
+// DefaultReviewRiskyPaths are the risky-path globs used when a repository sets
+// none. A pattern without "/" matches any path segment, so "*auth*" covers
+// both internal/auth/x.go and oauth.go.
+var DefaultReviewRiskyPaths = []string{"*auth*", "*secur*", "*secret*", "*credential*", "*password*", "*crypto*", "*permission*", "*migration*"}
+
+// ReviewSizing is the resolved review.sizing.
+type ReviewSizing struct {
+	Effort        string
+	SmallMaxLines int
+	SmallMaxFiles int
+	LargeMinLines int
+	LargeMinFiles int
+	RiskyPaths    []string
+}
+
+// ResolveReviewSizing applies the defaults to a review.sizing block.
+func ResolveReviewSizing(raw ReviewSizingRaw) ReviewSizing {
+	pick := func(v *int, def int) int {
+		if v != nil {
+			return *v
+		}
+		return def
+	}
+	sizing := ReviewSizing{
+		Effort:        strings.ToLower(strings.TrimSpace(raw.Effort)),
+		SmallMaxLines: pick(raw.SmallMaxLines, DefaultReviewSmallMaxLines),
+		SmallMaxFiles: pick(raw.SmallMaxFiles, DefaultReviewSmallMaxFiles),
+		LargeMinLines: pick(raw.LargeMinLines, DefaultReviewLargeMinLines),
+		LargeMinFiles: pick(raw.LargeMinFiles, DefaultReviewLargeMinFiles),
+		RiskyPaths:    DefaultReviewRiskyPaths,
+	}
+	if sizing.Effort == "" {
+		sizing.Effort = ReviewEffortAuto
+	}
+	if raw.RiskyPaths != nil {
+		sizing.RiskyPaths = nil
+		for _, pattern := range *raw.RiskyPaths {
+			if pattern = strings.TrimSpace(pattern); pattern != "" {
+				sizing.RiskyPaths = append(sizing.RiskyPaths, pattern)
+			}
+		}
+	}
+	return sizing
+}
+
+func validateReviewSizing(raw ReviewSizingRaw) error {
+	effort := strings.ToLower(strings.TrimSpace(raw.Effort))
+	if effort != "" && effort != ReviewEffortAuto && !slices.Contains(ReviewEffortLevels, effort) {
+		return fmt.Errorf("review.sizing.effort must be auto or one of %s, got %q", strings.Join(ReviewEffortLevels, ", "), raw.Effort)
+	}
+	for name, v := range map[string]*int{"small_max_lines": raw.SmallMaxLines, "small_max_files": raw.SmallMaxFiles, "large_min_lines": raw.LargeMinLines, "large_min_files": raw.LargeMinFiles} {
+		if v != nil && *v < 0 {
+			return fmt.Errorf("review.sizing.%s must not be negative, got %d", name, *v)
+		}
+	}
+	if raw.RiskyPaths != nil {
+		for i, pattern := range *raw.RiskyPaths {
+			if err := validatePathInstructionGlob(strings.TrimSpace(pattern)); err != nil {
+				return fmt.Errorf("review.sizing.risky_paths[%d] %q is not a valid glob: %w", i, pattern, err)
+			}
+		}
+	}
+	return nil
+}
+
+// ReviewRoutesRaw is the global-only review.routes block: which model routes
+// the review step's agents use. Routes spend the operator's provider quota,
+// so a repository cannot set them.
+type ReviewRoutesRaw struct {
+	// Finders are spread round-robin across the parallel finders of a
+	// multi-angle review, so different models look at the change.
+	Finders []string `yaml:"finders"`
+	// Light is the route for the single light reviewer of a small change.
+	Light string `yaml:"light"`
+	// Verify is the route for the per-finding verify agents.
+	Verify string `yaml:"verify"`
 }
 
 // GlobalReviewRaw is the global-config half of the review settings. Only the
-// round cap is machine-wide; path_instructions describe one repository.
+// round cap and the routes are machine-wide; path_instructions and sizing
+// describe one repository.
 type GlobalReviewRaw struct {
+	// Routes are the model routes review agents run on. Empty keeps the
+	// configured agent model for every review agent.
+	Routes ReviewRoutesRaw `yaml:"routes"`
 	// MaxRounds caps review rounds. 0 or unset keeps the unlimited loop. Once
 	// round N >= MaxRounds still has findings, the executor stops
 	// rereviewing: non-blocking findings (warning/info) are carried on the
@@ -830,6 +958,10 @@ type Review struct {
 	// MaxRounds is the resolved review.max_rounds: the global value, overridden
 	// by the trusted repository value when set. 0 means unlimited.
 	MaxRounds int
+	// Sizing is the trusted repository review.sizing with defaults applied.
+	Sizing ReviewSizing
+	// Routes is the global-only review.routes.
+	Routes ReviewRoutesRaw
 }
 
 // TestRaw is the YAML representation of test-step settings.
@@ -2319,6 +2451,11 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateMaxRounds(raw.Review.MaxRounds); err != nil {
 		return nil, err
 	}
+	for i, route := range raw.Review.Routes.Finders {
+		if strings.TrimSpace(route) == "" {
+			return nil, fmt.Errorf("review.routes.finders[%d] must not be empty", i)
+		}
+	}
 	cfg.Review = raw.Review
 	cfg.Providers = raw.Providers
 	applyEvalOverrides(&cfg.Eval, &raw.Eval)
@@ -2515,6 +2652,9 @@ func validatePRRaw(pr PRRaw) error {
 // repository's pipeline afterwards. Do not scope this to the trusted copy.
 func validateReviewRaw(review ReviewRaw) error {
 	if err := validateMaxRounds(review.MaxRounds); err != nil {
+		return err
+	}
+	if err := validateReviewSizing(review.Sizing); err != nil {
 		return err
 	}
 	if len(review.PathInstructions) > MaxReviewPathInstructions {
@@ -3261,7 +3401,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:         intent,
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
-		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions), MaxRounds: maxRounds},
+		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions), MaxRounds: maxRounds, Sizing: ResolveReviewSizing(repo.Review.Sizing), Routes: global.Review.Routes},
 		PR:             pr,
 		ForgeProfiles:  global.ForgeProfiles,
 		Providers:      providers,

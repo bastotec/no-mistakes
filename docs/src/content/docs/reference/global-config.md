@@ -660,6 +660,28 @@ When round N reaches the cap and still has findings:
 
 The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
 
+### review.routes
+
+Model routes the Review step's agents run on. Every field is optional; an unset route keeps the configured agent model.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `finders` | `string[]` | Spread round-robin across a multi-angle review's parallel finders, so different models look at the change |
+| `light` | `string` | The single light reviewer of a small change |
+| `verify` | `string` | The per-finding verify agents |
+
+```yaml
+review:
+  routes:
+    finders: [chain/review, claude/sonnet-5-5, zai/glm-5.3]
+    light: zai/glm-5.3
+    verify: chain/review
+```
+
+A route is passed as the agent's model for that one invocation, so it must be a model id the review agent accepts. Only adapters that take a model per invocation apply it (Deck and Pi); others ignore it.
+A finder or verifier whose route fails is retried once on the configured model.
+Routes spend the operator's provider quota, so they are global-only: repository config cannot set them. How much review a change gets is the repository's [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing).
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single provider-attributed check before that check reaches an approval gate.
