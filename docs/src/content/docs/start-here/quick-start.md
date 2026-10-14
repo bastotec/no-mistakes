@@ -81,7 +81,7 @@ git checkout -b feature/login-fix
 git push no-mistakes
 ```
 
-The push lands in the local bare repo, the hook notifies the daemon, and the daemon starts the pipeline in a disposable worktree.
+The push lands in the local bare repo, the hook notifies the daemon, and the daemon creates a disposable worktree. Pipeline steps begin after the branch's configured [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window), so quick follow-up pushes can replace waiting work before it spends agent tokens.
 
 ## 5. Watch the pipeline
 
