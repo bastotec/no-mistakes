@@ -577,6 +577,7 @@ no-mistakes stats
 ```
 
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
+The Pushes section reports `Coalesced` (runs replaced by a newer push while still waiting under [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window), each a mid-pipeline restart avoided) and `Superseded` (all other replacements, including reruns and explicit launches).
 
 Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
 Use `--run <id>` to inspect the individual agent invocations for one run - including each invocation's per-round token deltas next to the raw counters (cumulative across a resumed session for codex; per-invocation for pi), tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.

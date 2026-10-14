@@ -83,7 +83,7 @@ As an independent safety layer, the daemon also refuses to bind the Unix socket 
 When a push arrives via the post-receive hook:
 
 1. Creates a detached worktree at `~/.no-mistakes/worktrees/<repoID>/<runID>/`, or at `<root>/<runID>` when [`worktree_roots`](/no-mistakes/reference/global-config/#worktree_roots) names a directory for that repository. The placement is resolved once, at run creation, and recorded on the run, so editing the setting never retargets a run that already exists
-2. Starts the pipeline executor in that worktree
+2. Waits out the configured [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window) before starting pipeline steps in that worktree
 3. Streams events to any connected TUI clients and serves request/response state to AXI clients
 4. Cleans up the worktree when the run finishes (success or failure), subject to the retention rules below
 
@@ -103,11 +103,11 @@ That sweep is scoped by working directory: it never touches a worktree whose run
 
 If you push to the same branch while a run is already active, the daemon:
 
-1. Cancels the in-progress run (reason: "cancelled: superseded by new push")
+1. Cancels the existing run, classified as coalesced or superseded under [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window)
 2. Waits for it to finish
-3. Starts a new run with the latest push
+3. Creates a new run for the latest push, with its own quiet window before pipeline steps begin
 
-Pushes to different branches run concurrently.
+Pushes to different branches run concurrently and do not reset each other's windows.
 
 This is another reason the daemon exists: branch-level coordination is easier to
 reason about in one long-lived process than inside independent hook invocations.

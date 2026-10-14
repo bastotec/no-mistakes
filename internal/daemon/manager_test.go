@@ -1119,7 +1119,7 @@ func TestPushReceivedReturnsBeforeIntentSummarization(t *testing.T) {
 	})
 
 	slowClaude := writeSlowMockClaude(t, t.TempDir())
-	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\nagent_path_override:\n  claude: "+slowClaude+"\n"), 0o644); err != nil {
+	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\npush_quiet_window: \"0s\"\nagent_path_override:\n  claude: "+slowClaude+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -1248,7 +1248,7 @@ func TestPushReceivedDemoModeBypassesAgentResolution(t *testing.T) {
 		return []pipeline.Step{step}
 	})
 
-	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\nagent_path_override:\n  claude: /path/that/does/not/exist\n"), 0o644); err != nil {
+	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\npush_quiet_window: \"0s\"\nagent_path_override:\n  claude: /path/that/does/not/exist\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 

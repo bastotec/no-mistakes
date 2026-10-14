@@ -48,6 +48,7 @@ type RunManager struct {
 	executors    map[string]*pipeline.Executor      // runID → executor
 	cancels      map[string]context.CancelCauseFunc // runID → cancel function with cause
 	dones        map[string]chan struct{}           // runID → closed when goroutine exits
+	quieting     map[string]bool                    // runIDs still inside their push quiet window
 	wg           sync.WaitGroup                     // tracks background run goroutines
 	shuttingDown atomic.Bool                        // prevents new runs during shutdown
 	db           *db.DB
@@ -94,6 +95,7 @@ func NewRunManager(database *db.DB, p *paths.Paths, stepFactory StepFactory) *Ru
 		executors:     make(map[string]*pipeline.Executor),
 		cancels:       make(map[string]context.CancelCauseFunc),
 		dones:         make(map[string]chan struct{}),
+		quieting:      make(map[string]bool),
 		db:            database,
 		paths:         p,
 		steps:         stepFactory,
@@ -1287,12 +1289,59 @@ func (m *RunManager) startRunWithIntentSource(ctx context.Context, repo *db.Repo
 }
 
 func (m *RunManager) withBranchLock(repoID, branch string, action func() (string, error)) (string, error) {
-	lockKey := repoID + "/" + branch
-	lockVal, _ := m.branchLocks.LoadOrStore(lockKey, &sync.Mutex{})
-	branchMu := lockVal.(*sync.Mutex)
+	branchMu := m.branchLock(repoID, branch)
 	branchMu.Lock()
 	defer branchMu.Unlock()
 	return action()
+}
+
+func (m *RunManager) branchLock(repoID, branch string) *sync.Mutex {
+	lockVal, _ := m.branchLocks.LoadOrStore(repoID+"/"+branch, &sync.Mutex{})
+	return lockVal.(*sync.Mutex)
+}
+
+// pushRewroteHistory reports whether a push from base to head discarded
+// commits: base is a real commit that head does not descend from. Unknown
+// ancestry (an object the gate no longer has) is not evidence of a rewrite.
+func pushRewroteHistory(ctx context.Context, gateDir, base, head string) bool {
+	if base == "" || git.IsZeroSHA(base) || base == head {
+		return false
+	}
+	_, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", base, head)
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+}
+
+// endQuietWindow waits out a pushed run's quiet window, then leaves it under
+// the branch lock. Every launch holds that lock from before it reads anything
+// until it has cancelled the branch's active run, so a push that arrived
+// inside the window always replaces this run before it starts a step, however
+// long that launch's own setup takes. It polls with TryLock rather than
+// blocking, because the launch holding the lock waits for this goroutine to
+// finish once it has cancelled it.
+func (m *RunManager) endQuietWindow(ctx context.Context, repoID, branch, runID string, window time.Duration) {
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		return
+	}
+	branchMu := m.branchLock(repoID, branch)
+	for !branchMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	defer branchMu.Unlock()
+	if ctx.Err() != nil {
+		return
+	}
+	m.mu.Lock()
+	delete(m.quieting, runID)
+	m.mu.Unlock()
 }
 
 // startRunWithIntentSourceLocked performs run creation while the caller owns
@@ -1370,8 +1419,29 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("associated_pr_base_conflict")
 		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; run `no-mistakes axi run --retire-existing-pr` on the branch to retarget it", branch, target)
 	}
+	// A push that only appends to a run still waiting out its quiet window,
+	// whose own push rewrote history, keeps that rewrite's evidence: it takes
+	// the replaced run's pre-rewrite base when that is no ancestor of the new
+	// head either, so the rebase step still treats the branch as force-pushed
+	// instead of rebasing the dropped commits back in. A push that rewrites
+	// history itself keeps its own previous head, which already is that
+	// evidence. A run past its window is superseded exactly as before. The
+	// branch lock held here keeps a waiting run in its window until the
+	// cancellation below.
+	m.mu.Lock()
+	replacingQuietRun := active != nil && m.quieting[active.ID]
+	m.mu.Unlock()
+	if trigger == "push" && replacingQuietRun {
+		gateDir := m.paths.RepoDir(repo.ID)
+		if !pushRewroteHistory(ctx, gateDir, baseSHA, headSHA) &&
+			pushRewroteHistory(ctx, gateDir, active.BaseSHA, active.HeadSHA) &&
+			pushRewroteHistory(ctx, gateDir, active.BaseSHA, headSHA) {
+			baseSHA = active.BaseSHA
+		}
+	}
+
 	// Cancel any active run for this repo+branch.
-	m.cancelActiveRuns(repo.ID, branch)
+	m.cancelActiveRuns(repo.ID, branch, trigger)
 
 	storedIntent := intent
 	if source != db.RunIntentSourceRerun && launchNonce == "" {
@@ -1657,12 +1727,23 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}()
 	})
 
+	// A pushed run waits for the branch to go quiet before its first step, so
+	// a quick follow-up push replaces it while it has cost nothing (see
+	// cancelActiveRuns). Explicit launches and reruns start at once.
+	quietWindow := time.Duration(0)
+	if trigger == "push" {
+		quietWindow = globalCfg.PushQuietWindow
+	}
+
 	// Track executor.
 	done := make(chan struct{})
 	m.mu.Lock()
 	m.executors[run.ID] = executor
 	m.cancels[run.ID] = cancel
 	m.dones[run.ID] = done
+	if quietWindow > 0 {
+		m.quieting[run.ID] = true
+	}
 	m.mu.Unlock()
 
 	// Background goroutine now owns worktree cleanup.
@@ -1717,9 +1798,17 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			delete(m.executors, run.ID)
 			delete(m.cancels, run.ID)
 			delete(m.dones, run.ID)
+			delete(m.quieting, run.ID)
 			m.mu.Unlock()
 		}()
 
+		if quietWindow > 0 {
+			slog.Info("waiting for push quiet window", "run_id", run.ID, "branch", branch, "window", quietWindow)
+			m.endQuietWindow(runCtx, repo.ID, branch, run.ID, quietWindow)
+		}
+
+		// A run replaced inside its quiet window still goes through Execute,
+		// which records the cancellation cause and emits the terminal event.
 		if err := executor.Execute(runCtx, run, repo, wtDir); err != nil {
 			fields := telemetry.Fields{
 				"action":      "finished",
@@ -2048,7 +2137,7 @@ func (m *RunManager) HandleCancel(runID string) error {
 // concurrent pushes to upstream.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
-func (m *RunManager) cancelActiveRuns(repoID, branch string) {
+func (m *RunManager) cancelActiveRuns(repoID, branch, trigger string) {
 	runs, err := m.db.GetRunsByRepo(repoID)
 	if err != nil {
 		slog.Error("failed to query active runs for cancellation", "repo", repoID, "branch", branch, "error", err)
@@ -2067,17 +2156,27 @@ func (m *RunManager) cancelActiveRuns(repoID, branch string) {
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
+		quieting := m.quieting[run.ID]
 		m.mu.Unlock()
 		if !ok {
 			continue
+		}
+		// A run still waiting out its push quiet window has started no step,
+		// so a newer push replacing it costs nothing; it is recorded as
+		// coalesced rather than superseded so stats can count the restarts the
+		// window avoided. A rerun or explicit launch is not a push and keeps
+		// the superseded reason.
+		reason := types.RunCancelReasonSuperseded
+		if quieting && trigger == "push" {
+			reason = types.RunCancelReasonCoalesced
 		}
 
 		if err := m.db.RequestRepairCancellation(run.ID); err != nil {
 			slog.Error("failed to request repair cancellation", "run_id", run.ID, "error", err)
 			continue
 		}
-		cancel(fmt.Errorf(types.RunCancelReasonSuperseded))
-		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch)
+		cancel(errors.New(reason))
+		slog.Info("cancelled active run", "run_id", run.ID, "repo_id", repoID, "branch", branch, "reason", reason)
 		if done != nil {
 			toWait = append(toWait, done)
 		}
