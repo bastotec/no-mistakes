@@ -67,3 +67,26 @@ func TestLoadGlobal_ReviewRoutes(t *testing.T) {
 		t.Fatalf("merged review = %+v", merged.Review)
 	}
 }
+
+// A trusted repository review.routes overrides the operator's routes field by
+// field, and rides the trusted-only review block.
+func TestReviewRoutes_RepoOverridesGlobalFieldByField(t *testing.T) {
+	global, err := LoadGlobalFromBytes([]byte("review:\n  routes:\n    finders: [chain/review, zai/glm-5.3]\n    light: zai/glm-5.3\n    verify: chain/review\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo, err := LoadRepoFromBytes([]byte("review:\n  routes:\n    finders: [chain/review, zai/glm-5.3, claude/sonnet-5-5]\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	merged := Merge(global, EffectiveRepoConfig(&RepoConfig{}, repo, false))
+	if !slices.Equal(merged.Review.Routes.Finders, []string{"chain/review", "zai/glm-5.3", "claude/sonnet-5-5"}) || merged.Review.Routes.Light != "zai/glm-5.3" || merged.Review.Routes.Verify != "chain/review" {
+		t.Fatalf("routes = %+v, want the repo finders over the global light and verify", merged.Review.Routes)
+	}
+	if pushedOnly := Merge(global, EffectiveRepoConfig(repo, nil, false)); len(pushedOnly.Review.Routes.Finders) != 2 {
+		t.Fatalf("a pushed-only review.routes must be ignored, got %+v", pushedOnly.Review.Routes)
+	}
+	if _, err := LoadRepoFromBytes([]byte("review:\n  routes:\n    finders: [\"\"]\n")); err == nil {
+		t.Fatal("an empty repo finder route must fail the config")
+	}
+}

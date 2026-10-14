@@ -490,6 +490,18 @@ review:
 
 Like the rest of the `review` block it is honored **only from the trusted default-branch copy**, so a pushed branch cannot lighten its own review.
 
+### review.routes
+
+Overrides the global [`review.routes`](/no-mistakes/reference/global-config/#reviewroutes) for this repository, field by field: `finders`, `light` and `verify` each replace the global value only when set here.
+
+```yaml
+review:
+  routes:
+    finders: [chain/review, zai/glm-5.3, claude/sonnet-5-5]
+```
+
+Honored **only from the trusted default-branch copy**, like the rest of the `review` block, so a pushed branch cannot pick the models that review it.
+
 ### gates
 
 Extra repository-declared checks that run inside the pipeline, in addition to the core steps.

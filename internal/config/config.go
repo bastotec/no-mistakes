@@ -389,6 +389,10 @@ type ReviewRaw struct {
 	// it touches. Trusted-only like the rest of the block: a pushed branch
 	// must not lighten its own review.
 	Sizing ReviewSizingRaw `yaml:"sizing"`
+	// Routes overrides the operator's global review.routes, field by field,
+	// for this repository. Trusted-only like the rest of the block, so only
+	// the default branch's maintainer can point review agents at a route.
+	Routes ReviewRoutesRaw `yaml:"routes"`
 }
 
 // ReviewSizingRaw is review.sizing. Every field is optional; ResolveReviewSizing
@@ -486,6 +490,31 @@ func ResolveReviewSizing(raw ReviewSizingRaw) ReviewSizing {
 	return sizing
 }
 
+func validateReviewRoutes(routes ReviewRoutesRaw) error {
+	for i, route := range routes.Finders {
+		if strings.TrimSpace(route) == "" {
+			return fmt.Errorf("review.routes.finders[%d] must not be empty", i)
+		}
+	}
+	return nil
+}
+
+// mergeReviewRoutes lays a trusted repository's review.routes over the
+// operator's: each field the repository sets wins.
+func mergeReviewRoutes(global, repo ReviewRoutesRaw) ReviewRoutesRaw {
+	merged := global
+	if len(repo.Finders) > 0 {
+		merged.Finders = repo.Finders
+	}
+	if strings.TrimSpace(repo.Light) != "" {
+		merged.Light = repo.Light
+	}
+	if strings.TrimSpace(repo.Verify) != "" {
+		merged.Verify = repo.Verify
+	}
+	return merged
+}
+
 func validateReviewSizing(raw ReviewSizingRaw) error {
 	effort := strings.ToLower(strings.TrimSpace(raw.MinEffort))
 	if effort != "" && !slices.Contains(ReviewEffortLevels, effort) {
@@ -506,9 +535,9 @@ func validateReviewSizing(raw ReviewSizingRaw) error {
 	return nil
 }
 
-// ReviewRoutesRaw is the global-only review.routes block: which model routes
-// the review step's agents use. Routes spend the operator's provider quota,
-// so a repository cannot set them.
+// ReviewRoutesRaw is review.routes: which model routes the review step's
+// agents use. The operator's global value is the default; a trusted
+// repository value overrides it field by field.
 type ReviewRoutesRaw struct {
 	// Finders are spread round-robin across the parallel finders of a
 	// multi-angle review, so different models look at the change.
@@ -524,7 +553,8 @@ type ReviewRoutesRaw struct {
 // describe one repository.
 type GlobalReviewRaw struct {
 	// Routes are the model routes review agents run on. Empty keeps the
-	// configured agent model for every review agent.
+	// configured agent model for every review agent. A trusted repository
+	// review.routes overrides them field by field.
 	Routes ReviewRoutesRaw `yaml:"routes"`
 	// MaxRounds caps review rounds. 0 or unset keeps the unlimited loop. Once
 	// round N >= MaxRounds still has findings, the executor stops
@@ -2460,10 +2490,8 @@ func LoadGlobalFromBytes(data []byte) (*GlobalConfig, error) {
 	if err := validateMaxRounds(raw.Review.MaxRounds); err != nil {
 		return nil, err
 	}
-	for i, route := range raw.Review.Routes.Finders {
-		if strings.TrimSpace(route) == "" {
-			return nil, fmt.Errorf("review.routes.finders[%d] must not be empty", i)
-		}
+	if err := validateReviewRoutes(raw.Review.Routes); err != nil {
+		return nil, err
 	}
 	cfg.Review = raw.Review
 	cfg.Providers = raw.Providers
@@ -2664,6 +2692,9 @@ func validateReviewRaw(review ReviewRaw) error {
 		return err
 	}
 	if err := validateReviewSizing(review.Sizing); err != nil {
+		return err
+	}
+	if err := validateReviewRoutes(review.Routes); err != nil {
 		return err
 	}
 	if len(review.PathInstructions) > MaxReviewPathInstructions {
@@ -3410,7 +3441,7 @@ func Merge(global *GlobalConfig, repo *RepoConfig) *Config {
 		Intent:         intent,
 		Test:           test,
 		Document:       Document{Instructions: strings.TrimSpace(repo.Document.Instructions)},
-		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions), MaxRounds: maxRounds, Sizing: ResolveReviewSizing(repo.Review.Sizing), Routes: global.Review.Routes},
+		Review:         Review{PathInstructions: resolvePathInstructions(repo.Review.PathInstructions), MaxRounds: maxRounds, Sizing: ResolveReviewSizing(repo.Review.Sizing), Routes: mergeReviewRoutes(global.Review.Routes, repo.Review.Routes)},
 		PR:             pr,
 		ForgeProfiles:  global.ForgeProfiles,
 		Providers:      providers,
