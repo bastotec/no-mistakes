@@ -1,0 +1,28 @@
+# Install only AFTER the publisher action has been published. Replace
+# <published-commit-sha> with its immutable 40-character SHA in this repository.
+name: Require no-mistakes
+on:
+  pull_request_target:
+    types: [opened, edited, synchronize, reopened]
+    branches: [main]
+permissions:
+  contents: read
+  pull-requests: read
+  actions: read
+  checks: write
+jobs:
+  publish:
+    # This runner-owned check certifies execution, NOT PR compliance.
+    # Only the action-created check has the required-check name.
+    name: Record event and publish current attestation
+    runs-on: ubuntu-latest
+    concurrency:
+      group: no-mistakes-current-${{ github.repository }}-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+    steps:
+      # No checkout, PR code, artifacts, caches, or body-transforming scripts.
+      - uses: bastotec/no-mistakes/.github/actions/require-no-mistakes-publish@<published-commit-sha>
+        with:
+          exempt-authors: |
+            github-actions[bot]
+            dependabot[bot]
