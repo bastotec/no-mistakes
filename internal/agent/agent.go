@@ -200,8 +200,8 @@ func NeutralizesGateInstructions(a Agent) bool {
 // the target checkout does not neutralize that checkout's project
 // agent-instruction files. Callers must invoke it before launching any gate
 // agent so an unverified harness is refused with a clear error rather than run
-// unneutralized in the target checkout. Only codex, claude, and pi have a verified
-// neutralization knob today.
+// unneutralized in the target checkout. Only codex, claude, pi, and a Deck build
+// with --no-project-context have a verified neutralization knob today.
 func EnsureGateNeutralized(a Agent) error {
 	if a == nil {
 		return fmt.Errorf("no gate agent configured")
@@ -211,8 +211,9 @@ func EnsureGateNeutralized(a Agent) error {
 	}
 	return fmt.Errorf("gate agent %q does not neutralize the target repository's project "+
 		"agent-instruction files (AGENTS.md/CLAUDE.md); refusing to launch it in the target "+
-		"checkout. Only codex, claude, and pi have a verified neutralization knob (and only when it "+
-		"is not overridden by agent_args_override); set 'agent' to codex, claude, or pi in "+
+		"checkout. Only codex, claude, pi, and deck (a build whose `deck run --help` lists "+
+		"--no-project-context) have a verified neutralization knob (and only when it is not "+
+		"overridden by agent_args_override); set 'agent' to codex, claude, pi, or deck in "+
 		"~/.no-mistakes/config.yaml", a.Name())
 }
 
@@ -298,7 +299,7 @@ type Options struct {
 	ACPRegistryOverrides map[string]string
 	Environment          runenv.Overlay
 	// DisableProjectSettings, when true, asks a supported adapter (codex,
-	// claude, pi) to launch with the target repo's project-level agent
+	// claude, pi, deck) to launch with the target repo's project-level agent
 	// settings/instructions suppressed. It is the resolved, trusted-only opt-out
 	// from config.Config; adapters without a verified suppression knob ignore it
 	// and are refused separately by EnsureGateNeutralized when the opt-out is on.
@@ -1332,7 +1333,7 @@ func NewWithOptions(name types.AgentName, bin string, extraArgs []string, opts O
 	case types.AgentOpenCode:
 		return &opencodeAgent{bin: bin, extraArgs: extraArgs, profile: opts.Profile, subprocessContext: newSubprocessContext(opts.Environment)}, nil
 	case types.AgentDeck:
-		return &deckAgent{bin: bin, extraArgs: extraArgs, subprocessContext: newSubprocessContext(opts.Environment)}, nil
+		return newDeckAgent(bin, extraArgs, opts.DisableProjectSettings, newSubprocessContext(opts.Environment)), nil
 	case types.AgentPi:
 		return &piAgent{
 			bin:                    bin,

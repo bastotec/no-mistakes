@@ -7,8 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/shellenv"
 )
@@ -16,20 +19,60 @@ import (
 // Deck emits JSONL on stdout, including a terminal run_finished or run_failed
 // event. Only run_finished.output is a verdict; text_delta is progress, not a
 // fallback answer. Runs are ephemeral: review must never inherit fixer state.
-// Deck currently has no verified project-settings suppression or effort flag.
 type deckAgent struct {
 	subprocessContext
 	bin       string
 	extraArgs []string
+	// disableProjectSettings is the resolved, trusted-only opt-out. When true,
+	// Run passes --no-project-context so Deck ignores the target repo's own
+	// AGENTS.md chain, .agents/skills and .agents/deck.hooks.json.
+	disableProjectSettings bool
+	// supportsNoProjectContext records whether this Deck binary's
+	// `run --help` lists --no-project-context; probed only under the opt-out.
+	supportsNoProjectContext bool
+}
+
+func newDeckAgent(bin string, extraArgs []string, disableProjectSettings bool, sub subprocessContext) *deckAgent {
+	a := &deckAgent{bin: bin, extraArgs: extraArgs, disableProjectSettings: disableProjectSettings, subprocessContext: sub}
+	if disableProjectSettings {
+		a.supportsNoProjectContext = deckSupportsNoProjectContext(bin)
+	}
+	return a
 }
 
 func (*deckAgent) Name() string { return "deck" }
 func (*deckAgent) Close() error { return nil }
 
+// NeutralizesGateInstructions reports whether Deck is launched with the target
+// repo's project context ignored. It is meaningful only under the opt-out
+// (disableProjectSettings): the gate only consults it when the repo opted out.
+// `deck run --no-project-context` drops the project's AGENTS.md chain,
+// <repo>/.agents/skills, <repo>/.agents/deck.hooks.json and its chat launcher,
+// while keeping the operator's ~/.agents files - the claude
+// `--setting-sources user` and codex `project_doc_max_bytes=0` shape. Deck has
+// no flag that re-enables the project context, so an operator-pinned
+// --no-project-context only preserves it. The knob is admitted only when the
+// installed binary's `run --help` lists it: an older Deck would reject the
+// flag, and the gate refuses it up front rather than failing every step.
+func (a *deckAgent) NeutralizesGateInstructions() bool {
+	return a.disableProjectSettings && a.supportsNoProjectContext
+}
+
+// buildArgs returns the Deck argv for one ephemeral run. Under the opt-out the
+// suppression flag follows the verb, before user extras, unless the operator
+// already pinned it (clap rejects a repeated flag).
+func (a *deckAgent) buildArgs() []string {
+	args := make([]string, 0, len(a.extraArgs)+4)
+	args = append(args, "run")
+	if a.disableProjectSettings && !deckArgsContain(a.extraArgs, deckNoProjectContextFlag) {
+		args = append(args, deckNoProjectContextFlag)
+	}
+	args = append(args, a.extraArgs...)
+	return append(args, "--ephemeral", "-")
+}
+
 func (a *deckAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
-	args := append([]string{"run"}, a.extraArgs...)
-	args = append(args, "--ephemeral", "-")
-	cmd := exec.CommandContext(ctx, a.bin, args...)
+	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs()...)
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
 	prompt := opts.Prompt
@@ -156,4 +199,53 @@ func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
 		result.Model, result.Provider = model, "deck"
 	}
 	return result, err
+}
+
+const deckNoProjectContextFlag = "--no-project-context"
+
+func deckArgsContain(args []string, flag string) bool {
+	for _, arg := range args {
+		if arg == flag {
+			return true
+		}
+	}
+	return false
+}
+
+// deckProbeTimeout bounds the `deck run --help` feature probe.
+const deckProbeTimeout = 10 * time.Second
+
+type deckProbeKey struct {
+	path    string
+	size    int64
+	modTime time.Time
+}
+
+// deckProbes caches feature probes per binary identity, so a redeployed Deck
+// (new size or mtime at the same path) is probed again.
+var deckProbes sync.Map
+
+// deckSupportsNoProjectContext reports whether the Deck binary lists
+// --no-project-context in `deck run --help`. Deck's crate version does not
+// track features, so the help text is the feature check. Any failure (missing
+// binary, timeout, non-zero exit) reports false, which fails the gate closed.
+func deckSupportsNoProjectContext(bin string) bool {
+	path, err := exec.LookPath(bin)
+	if err != nil {
+		return false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return false
+	}
+	key := deckProbeKey{path: path, size: info.Size(), modTime: info.ModTime()}
+	if cached, ok := deckProbes.Load(key); ok {
+		return cached.(bool)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), deckProbeTimeout)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, path, "run", "--help").Output()
+	supported := err == nil && strings.Contains(string(out), deckNoProjectContextFlag)
+	deckProbes.Store(key, supported)
+	return supported
 }
