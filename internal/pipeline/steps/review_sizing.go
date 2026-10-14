@@ -58,7 +58,9 @@ func planReview(sizing config.ReviewSizing, routes config.ReviewRoutesRaw, workl
 	case config.ReviewEffortLow:
 		plan.Tuning = &agent.InvocationTuning{Model: strings.TrimSpace(routes.Light), Effort: "low", MaxTurns: 80, DeadlineSecs: 900}
 	case config.ReviewEffortMedium:
-		// Today's single reviewer at the operator's configured profile.
+		// Today's single reviewer at the operator's configured model and
+		// effort, with the level's own run bounds.
+		plan.Tuning = &agent.InvocationTuning{MaxTurns: 400, DeadlineSecs: 1800}
 	case config.ReviewEffortHigh:
 		plan.Dimensions = []reviewDimension{dimensionCorrectness, dimensionSecurity, dimensionRegressions, dimensionSimplify}
 		plan.FinderTuning = agent.InvocationTuning{Effort: "medium", MaxTurns: 150, DeadlineSecs: 1500}

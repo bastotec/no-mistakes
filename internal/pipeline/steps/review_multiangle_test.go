@@ -74,8 +74,8 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 	if low.Tuning == nil || low.Tuning.Model != "light/route" || low.Tuning.Effort != "low" || low.Tuning.MaxTurns == 0 {
 		t.Fatalf("low review tuning = %+v, want the light route at low effort with a turn bound", low.Tuning)
 	}
-	if medium := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "medium"}), routes, nil, nil); medium.Tuning != nil {
-		t.Fatalf("medium review must keep today's reviewer untouched, got tuning %+v", medium.Tuning)
+	if medium := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "medium"}), routes, nil, nil); medium.Tuning == nil || medium.Tuning.Model != "" || medium.Tuning.Effort != "" || medium.Tuning.MaxTurns == 0 {
+		t.Fatalf("medium review must keep the configured model and effort under its own turn bound, got tuning %+v", medium.Tuning)
 	}
 	if finderRoute(routes, 0) != "a/route" || finderRoute(routes, 1) != "b/route" || finderRoute(routes, 2) != "a/route" {
 		t.Fatal("finder routes must round-robin")
@@ -120,7 +120,7 @@ func multiAngleFake(t *testing.T) *concurrentAgent {
 	finder := map[string]string{
 		"correctness":    `{"findings":[{"severity":"error","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops when the queue is closed","review_scope":"source"},{"severity":"warning","action":"auto-fix","file":"a.txt","line":20,"description":"timeout value is parsed as seconds but documented as milliseconds","review_scope":"source"}],"risk_level":"medium","risk_rationale":"one loop defect","risk_scope":"source-or-external"}`,
 		"security":       `{"findings":[],"risk_level":"low","risk_rationale":"no boundary touched","risk_scope":"source-or-external"}`,
-		"regressions":    `{"findings":[{"severity":"warning","action":"auto-fix","file":"a.txt","line":3,"description":"Retry loop never stops when the queue is closed.","review_scope":"source"}],"risk_level":"medium","risk_rationale":"callers can hang","risk_scope":"source-or-external"}`,
+		"regressions":    `{"findings":[{"severity":"warning","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops when the queue is closed","review_scope":"source"}],"risk_level":"medium","risk_rationale":"callers can hang","risk_scope":"source-or-external"}`,
 		"simplification": `{"findings":[{"severity":"info","action":"no-op","file":"b.txt","line":1,"description":"helper duplicates strings.Cut","review_scope":"source"}],"risk_level":"high","risk_rationale":"outlier","risk_scope":"source-or-external"}`,
 	}
 	return &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
@@ -381,6 +381,13 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	if len(params) != 2 {
 		t.Fatalf("id and url parameter claims merged: %+v", params)
 	}
+	operators := dedupeFindings([]Findings{{Items: []Finding{
+		{Severity: "warning", File: "m.go", Line: 9, Description: "The expression `value + offset` can overflow"},
+		{Severity: "warning", File: "m.go", Line: 9, Description: "The expression `value - offset` can overflow"},
+	}}}, []string{"correctness"})
+	if len(operators) != 2 {
+		t.Fatalf("claims differing only in an operator merged: %+v", operators)
+	}
 	sameLine := dedupeFindings([]Findings{{Items: []Finding{
 		{Severity: "warning", File: "srv.go", Line: 10, Description: "ReadTimeout multiplies by seconds instead of milliseconds"},
 		{Severity: "warning", File: "srv.go", Line: 10, Description: "WriteTimeout multiplies by milliseconds instead of seconds"},
@@ -391,7 +398,7 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	// A merged claim keeps the most cautious action any finder asked for.
 	cautious := dedupeFindings([]Findings{
 		{Items: []Finding{{Severity: "error", Action: "auto-fix", File: "a.go", Line: 5, Description: "retry budget is never reset after success"}}},
-		{Items: []Finding{{Severity: "warning", Action: "ask-user", File: "a.go", Line: 5, Description: "Retry budget is never reset after success."}}},
+		{Items: []Finding{{Severity: "warning", Action: "ask-user", File: "a.go", Line: 5, Description: "retry budget is never reset after success"}}},
 	}, []string{"correctness", "regressions"})
 	if len(cautious) != 1 || cautious[0].Severity != "error" || cautious[0].Action != "ask-user" {
 		t.Fatalf("merged = %+v, want the error copy carrying ask-user", cautious)
@@ -399,7 +406,7 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	results := []Findings{
 		{Items: []Finding{{Severity: "warning", File: "a.go", Line: 10, Description: "missing nil check on config loader result"}}},
 		{Items: []Finding{
-			{Severity: "error", File: "a.go", Line: 12, Description: "Missing nil check on config loader result."},
+			{Severity: "error", File: "a.go", Line: 12, Description: "missing nil check on config loader result"},
 			{Severity: "warning", File: "a.go", Line: 11, Description: "metric name typo in exporter label"},
 			{Severity: "warning", File: "b.go", Line: 10, Description: "missing nil check on config loader result"},
 		}},

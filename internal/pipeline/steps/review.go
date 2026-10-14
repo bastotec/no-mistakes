@@ -372,7 +372,7 @@ Risk assessment (after listing all findings):
 	var findings Findings
 	if plan.multiAngle() {
 		verifyContext := fmt.Sprintf("Context:\n- branch: %s\n- base commit: %s\n- target commit: %s\n- review scope: %s\n- default branch: %s",
-			branch, baseSHA, sctx.Run.HeadSHA, reviewScope, integrationBranchPromptLabel(sctx)) + userIntentPromptSection(sctx)
+			branch, baseSHA, sctx.Run.HeadSHA, reviewScope, integrationBranchPromptLabel(sctx)) + userIntentPromptSection(sctx) + pathInstructions
 		findings, err = s.runMultiAngleReview(sctx, opts, plan, verifyContext)
 	} else {
 		opts.Tuning = plan.Tuning

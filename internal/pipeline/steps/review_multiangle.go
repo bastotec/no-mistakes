@@ -226,8 +226,10 @@ func sameClaim(a, b Finding) bool {
 	// and still be different defects ("read timeout" and "write timeout",
 	// "the id parameter" and "the url parameter"), and merging them would
 	// leave one unverified and unfixed. Not merging only costs one more
-	// verifier, so the bar is the same text once case and punctuation go.
-	return normalizedText(a.Description) == normalizedText(b.Description)
+	// verifier, so the bar is the same description, character for character
+	// apart from surrounding whitespace ("value + offset" and "value - offset"
+	// differ only in punctuation).
+	return strings.TrimSpace(a.Description) == strings.TrimSpace(b.Description)
 }
 
 // codeIdentifiers returns the words in a description that look like code
@@ -256,13 +258,6 @@ func mostCautiousAction(a, b string) string {
 		return b
 	}
 	return a
-}
-
-// normalizedText lowercases a description and keeps only its words.
-func normalizedText(s string) string {
-	return strings.Join(strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_')
-	}), " ")
 }
 
 func absInt(v int) int {
