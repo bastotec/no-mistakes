@@ -223,10 +223,11 @@ func sameClaim(a, b Finding) bool {
 		return false
 	}
 	// Only the same claim merges: two findings can share all but one word
-	// and still be different defects ("read timeout" and "write timeout"),
-	// and merging them would leave one unverified and unfixed. Not merging
-	// only costs one more verifier, so the bar is identical content words.
-	return maps.Equal(contentWords(a.Description), contentWords(b.Description))
+	// and still be different defects ("read timeout" and "write timeout",
+	// "the id parameter" and "the url parameter"), and merging them would
+	// leave one unverified and unfixed. Not merging only costs one more
+	// verifier, so the bar is the same text once case and punctuation go.
+	return normalizedText(a.Description) == normalizedText(b.Description)
 }
 
 // codeIdentifiers returns the words in a description that look like code
@@ -257,16 +258,11 @@ func mostCautiousAction(a, b string) string {
 	return a
 }
 
-func contentWords(s string) map[string]bool {
-	words := map[string]bool{}
-	for _, w := range strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
+// normalizedText lowercases a description and keeps only its words.
+func normalizedText(s string) string {
+	return strings.Join(strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '_')
-	}) {
-		if len(w) >= 4 {
-			words[w] = true
-		}
-	}
-	return words
+	}), " ")
 }
 
 func absInt(v int) int {
@@ -359,6 +355,11 @@ func (s *ReviewStep) runVerifier(sctx *pipeline.StepContext, opts agent.RunOpts)
 	case verdictConfirmed, verdictPlausible, verdictRefuted:
 	default:
 		return v, fmt.Errorf("verify verdict %q is not confirmed, plausible or refuted", v.Verdict)
+	}
+	// A verdict without its evidence is not a verdict: a bare "refuted"
+	// would drop a claim on nothing. Adapters do not all enforce the schema.
+	if strings.TrimSpace(v.Evidence) == "" {
+		return v, errors.New("verify verdict has no evidence")
 	}
 	return v, nil
 }

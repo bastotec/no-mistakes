@@ -374,6 +374,13 @@ func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
 	if len(readWrite) != 2 {
 		t.Fatalf("read and write timeout claims merged: %+v", readWrite)
 	}
+	params := dedupeFindings([]Findings{{Items: []Finding{
+		{Severity: "warning", File: "h.go", Line: 3, Description: "the handler ignores the id parameter"},
+		{Severity: "warning", File: "h.go", Line: 3, Description: "the handler ignores the url parameter"},
+	}}}, []string{"correctness"})
+	if len(params) != 2 {
+		t.Fatalf("id and url parameter claims merged: %+v", params)
+	}
 	sameLine := dedupeFindings([]Findings{{Items: []Finding{
 		{Severity: "warning", File: "srv.go", Line: 10, Description: "ReadTimeout multiplies by seconds instead of milliseconds"},
 		{Severity: "warning", File: "srv.go", Line: 10, Description: "WriteTimeout multiplies by milliseconds instead of seconds"},
@@ -413,5 +420,32 @@ func TestVerifiedRiskIgnoresDeferredDeliveryFindings(t *testing.T) {
 	verifiedRisk(&f)
 	if f.RiskLevel != "low" {
 		t.Fatalf("risk = %s (%s), want low", f.RiskLevel, f.RiskRationale)
+	}
+}
+
+// A verdict with no evidence never drops a claim: it counts as a failed
+// verifier, so the claim stays plausible.
+func TestReviewStep_MultiAngleRefutationWithoutEvidenceKeepsTheClaim(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
+		if strings.HasPrefix(opts.Prompt, verifyPromptMarker) {
+			return &agent.Result{Output: json.RawMessage(`{"verdict":"refuted"}`)}, nil
+		}
+		if strings.Contains(opts.Prompt, "You are the correctness finder") {
+			return &agent.Result{Output: json.RawMessage(blockingReviewJSON)}, nil
+		}
+		return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	if len(findings.Items) != 1 || !strings.HasPrefix(findings.Items[0].Description, "[PLAUSIBLE]") {
+		t.Fatalf("findings = %+v, want the claim kept as plausible", findings.Items)
 	}
 }
