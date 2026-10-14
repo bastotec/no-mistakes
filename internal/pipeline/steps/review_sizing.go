@@ -25,9 +25,11 @@ var (
 	dimensionContracts   = reviewDimension{"tests and contracts", "tests whose assertions would still pass with the code wrong, and mismatches between the change and the specs, schemas or documented contracts it claims to satisfy"}
 )
 
-// Plans use only the low and high efforts: they are the levels every model
+// Plans set only the low and high efforts: they are the levels every model
 // route on the gateway accepts. zai/glm-5.3 rejects medium, minimal and xhigh
 // with HTTP 400, and a rejected effort fails the agent and so the review.
+// The medium level sets none and keeps the operator's configured effort,
+// since it is today's reviewer.
 // reviewPlan is how much review one change gets. Low and medium run one
 // reviewer; high and above run one finder per dimension in parallel and
 // verify claims up to the level's cap before reporting them. Bounds limit
@@ -67,14 +69,14 @@ func planReview(sizing config.ReviewSizing, routes config.ReviewRoutesRaw, workl
 		plan.Tuning = &agent.InvocationTuning{MaxTurns: 400, DeadlineSecs: 1800}
 	case config.ReviewEffortHigh:
 		plan.Dimensions = []reviewDimension{dimensionCorrectness, dimensionSecurity, dimensionRegressions, dimensionSimplify}
-		plan.FinderTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 120, DeadlineSecs: 1500}
+		plan.FinderTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 150, DeadlineSecs: 1500}
 		plan.VerifyCap = 12
-		plan.VerifyTuning = agent.InvocationTuning{Effort: "low", MaxTurns: 40, DeadlineSecs: 900}
+		plan.VerifyTuning = agent.InvocationTuning{Effort: "low", MaxTurns: 60, DeadlineSecs: 900}
 	case config.ReviewEffortXHigh:
 		plan.Dimensions = []reviewDimension{dimensionCorrectness, dimensionSecurity, dimensionRegressions, dimensionSimplify, dimensionState}
 		plan.FinderTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 200, DeadlineSecs: 1800}
 		plan.VerifyCap = 20
-		plan.VerifyTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 60, DeadlineSecs: 1200}
+		plan.VerifyTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 80, DeadlineSecs: 1200}
 	default: // max
 		plan.Dimensions = []reviewDimension{dimensionCorrectness, dimensionSecurity, dimensionRegressions, dimensionSimplify, dimensionState, dimensionContracts}
 		plan.FinderTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 300, DeadlineSecs: 1800}
