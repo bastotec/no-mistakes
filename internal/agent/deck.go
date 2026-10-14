@@ -43,6 +43,10 @@ func newDeckAgent(bin string, extraArgs []string, disableProjectSettings bool, s
 }
 
 func (*deckAgent) Name() string { return "deck" }
+
+// ReportsAgentAttempts reports that Run emits OnAttempt for each try itself
+// (through runWithRetry), so wrapping routers must not emit another.
+func (*deckAgent) ReportsAgentAttempts() bool { return true }
 func (*deckAgent) Close() error { return nil }
 
 // NeutralizesGateInstructions reports whether Deck is launched with the target

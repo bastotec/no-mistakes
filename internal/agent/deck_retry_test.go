@@ -64,6 +64,9 @@ func TestDeckRetriesATransientGatewayDrop(t *testing.T) {
 	if got := runCount(t, count); got != "2" {
 		t.Fatalf("deck ran %s times, want 2", got)
 	}
+	if !ReportsAgentAttempts(a) {
+		t.Fatal("deck reports its own attempts, so wrappers must not record the run again")
+	}
 }
 
 // The retry budget is bounded: a gateway that keeps dropping still fails.
