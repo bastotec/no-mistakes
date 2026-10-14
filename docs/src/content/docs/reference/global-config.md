@@ -40,6 +40,8 @@ ci_timeout: "168h"
 
 step_quiet_warning: "10m"
 
+push_quiet_window: "90s"
+
 agent_timeout: "30m"
 
 review_agent_timeout: "30m"
@@ -449,6 +451,24 @@ This is observability only.
 It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
+
+### push_quiet_window
+
+How long a run started by a push to the gate waits for the branch to go quiet before its first step starts.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `90s`                  |
+
+A further push to the same branch inside the window replaces the waiting run before any step, and so any agent work, ran on it.
+The replaced run ends `cancelled: coalesced into a newer push`, and the new run waits out its own window, so each push resets the clock.
+A push that lands after the window has passed keeps the usual semantics: the running run is cancelled as `cancelled: superseded by new push`.
+`no-mistakes stats` counts both.
+
+Only pushes wait. `no-mistakes axi run` against a head the gate already has, reruns, and recovered runs start at once.
+`0s` (or any non-positive value) starts every pushed run immediately.
+It is global-only: repository config cannot override it.
 
 ### agent_timeout
 

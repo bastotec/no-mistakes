@@ -21,6 +21,8 @@ import (
 )
 
 func TestMain(m *testing.M) {
+	noQuietWindow := time.Duration(0)
+	testPushQuietWindow = &noQuietWindow
 	switch os.Getenv("NM_DAEMON_HELPER_PROCESS") {
 	case "1":
 		if capturePath := os.Getenv("NM_CAPTURE_NM_HOME_FILE"); capturePath != "" {

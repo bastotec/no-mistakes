@@ -23,8 +23,11 @@ const (
 )
 
 const (
-	RunCancelReasonAbortedByUser  = "cancelled: aborted by user"
-	RunCancelReasonSuperseded     = "cancelled: superseded by new push"
+	RunCancelReasonAbortedByUser = "cancelled: aborted by user"
+	RunCancelReasonSuperseded    = "cancelled: superseded by new push"
+	// RunCancelReasonCoalesced marks a run replaced by a newer push while it
+	// was still waiting out its push quiet window, before any step started.
+	RunCancelReasonCoalesced      = "cancelled: coalesced into a newer push"
 	RunCIMonitorInterruptedReason = "ci monitor interrupted by daemon restart; PR remains open"
 )
 

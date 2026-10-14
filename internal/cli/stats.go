@@ -270,6 +270,10 @@ func renderStatsDashboard(stats *db.Stats) string {
 		metricStatsLine("Reported", fmt.Sprintf("%d", stats.ReportedFindings), progressBar(ratio(stats.ReportedFindings, stats.ReportedFindings), statsBarWidth)),
 		metricStatsLine("Fixed", percent(fixRate), progressBar(fixRate, statsBarWidth)),
 		"",
+		"  Pushes",
+		metricStatsLine("Coalesced", fmt.Sprintf("%d", stats.CoalescedRuns), "restarts avoided"),
+		metricStatsLine("Superseded", fmt.Sprintf("%d", stats.SupersededRuns), "cancelled mid-run"),
+		"",
 		"  Fixes by step",
 	)
 
