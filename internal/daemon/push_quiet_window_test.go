@@ -81,8 +81,12 @@ func TestPushQuietWindowCoalescesAFollowUpPush(t *testing.T) {
 	if first.Status != types.RunCancelled || first.Error == nil || *first.Error != types.RunCancelReasonCoalesced {
 		t.Fatalf("first run = %s %v, want cancelled with %q", first.Status, first.Error, types.RunCancelReasonCoalesced)
 	}
-	if second := waitForRunFinal(t, d, secondRun); second.Status != types.RunCompleted {
+	second := waitForRunFinal(t, d, secondRun)
+	if second.Status != types.RunCompleted {
 		t.Fatalf("second run status = %s, want completed", second.Status)
+	}
+	if second.BaseSHA != firstSHA {
+		t.Fatalf("second run base = %s, want its own previous head %s (the replaced push only appended)", second.BaseSHA, firstSHA)
 	}
 	if got := review.execCnt.Load(); got != 1 {
 		t.Fatalf("review executed %d times, want 1 (only the run that outlived its quiet window)", got)
@@ -204,4 +208,64 @@ func waitForRunFinal(t *testing.T, d *db.DB, runID string) *db.Run {
 	}
 	t.Fatalf("run %s did not reach a terminal state", runID)
 	return nil
+}
+
+// A push that replaces a run whose own push rewrote history keeps that
+// rewrite's evidence: it takes the replaced run's pre-rewrite base, so the
+// rebase step still sees a force push. A push replacing an append-only run
+// keeps its own previous head (TestPushQuietWindowCoalescesAFollowUpPush).
+func TestPushReplacingARewriteKeepsThePreRewriteBase(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	setPushQuietWindow(t, p, "30s")
+	repo, rootSHA := setupTestGitRepo(t, p, d, "quiet-window-rewrite-repo")
+	dropped := commitFollowUp(t, repo)
+
+	gitCmd(t, repo.WorkingPath, "reset", "--hard", rootSHA)
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "other.txt"), []byte("rewrite"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "add", "other.txt")
+	gitCmd(t, repo.WorkingPath, "commit", "-m", "rewrite")
+	gitCmd(t, repo.WorkingPath, "push", "-f", "gate", "HEAD:refs/heads/main")
+	rewritten := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	rewriteRun := pushReceived(t, p, repo.ID, dropped, rewritten)
+
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "other.txt"), []byte("follow-up"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", "follow-up on the rewrite")
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+	followUp := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+	followUpRun := pushReceived(t, p, repo.ID, rewritten, followUp)
+
+	waitForRunFinal(t, d, rewriteRun)
+	run, err := d.GetRun(followUpRun)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if run.BaseSHA != dropped {
+		t.Fatalf("follow-up base = %s, want the pre-rewrite head %s", run.BaseSHA, dropped)
+	}
+
+	// The evidence keeps propagating for as long as the burst does.
+	appended := commitContent(t, repo, "append")
+	appendRun := pushReceived(t, p, repo.ID, followUp, appended)
+	if run, err = d.GetRun(appendRun); err != nil {
+		t.Fatal(err)
+	}
+	if run.BaseSHA != dropped {
+		t.Fatalf("append base = %s, want the pre-rewrite head %s", run.BaseSHA, dropped)
+	}
+}
+
+func commitContent(t *testing.T, repo *db.Repo, content string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "test.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", content)
+	gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+	return gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
 }

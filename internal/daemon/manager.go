@@ -1300,6 +1300,18 @@ func (m *RunManager) branchLock(repoID, branch string) *sync.Mutex {
 	return lockVal.(*sync.Mutex)
 }
 
+// pushRewroteHistory reports whether a push from base to head discarded
+// commits: base is a real commit that head does not descend from. Unknown
+// ancestry (an object the gate no longer has) is not evidence of a rewrite.
+func pushRewroteHistory(ctx context.Context, gateDir, base, head string) bool {
+	if base == "" || git.IsZeroSHA(base) || base == head {
+		return false
+	}
+	_, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", base, head)
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && exitErr.ExitCode() == 1
+}
+
 // endQuietWindow waits out a pushed run's quiet window, then leaves it under
 // the branch lock. Every launch holds that lock from before it reads anything
 // until it has cancelled the branch's active run, so a push that arrived
@@ -1407,6 +1419,16 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("associated_pr_base_conflict")
 		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; run `no-mistakes axi run --retire-existing-pr` on the branch to retarget it", branch, target)
 	}
+	// A push that replaces an active run whose own push rewrote history
+	// keeps that rewrite's evidence: it takes the replaced run's pre-rewrite
+	// base, which is no ancestor of the new head either, so the rebase step
+	// still treats the branch as force-pushed instead of rebasing the dropped
+	// commits back in. A replaced run whose push only appended leaves the
+	// push's own previous head, which is what shows a rewrite in this push.
+	if trigger == "push" && active != nil && pushRewroteHistory(ctx, m.paths.RepoDir(repo.ID), active.BaseSHA, active.HeadSHA) {
+		baseSHA = active.BaseSHA
+	}
+
 	// Cancel any active run for this repo+branch.
 	m.cancelActiveRuns(repo.ID, branch, trigger)
 
