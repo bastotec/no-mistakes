@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -93,23 +94,110 @@ func TestDeckDoesNotRetryARefusedGatewayRequest(t *testing.T) {
 	}
 }
 
-func TestClassifyDeckTransient(t *testing.T) {
-	for msg, want := range map[string]bool{
-		"deck run failed: model gateway request failed":                              true,
-		"deck run failed: model gateway request failed (HTTP 503)":                   true,
-		"deck run failed: model gateway request failed (HTTP 429)":                   true,
-		"deck run failed: model gateway request failed (HTTP 400)":                   false,
-		"deck run failed: model gateway request failed (HTTP 401)":                   false,
-		"deck run failed: tool budget exhausted":                                     false,
-		"deck run failed: insufficient_quota":                                        false,
-		"deck output: ended its turn with prose instead of the required JSON object": false,
-		"deck run failed: connection reset by peer":                                  false,
+// Diagnostics can quote the gateway signature without being gateway failures.
+// Neither rejected model output nor invalid configuration may spend retries.
+func TestDeckDoesNotRetryGatewayTextInNonGatewayDiagnostics(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	defer withFastBackoff(t)()
+	for _, tc := range []struct {
+		name   string
+		script string
+		schema []byte
+	}{
+		{
+			name: "rejected model output",
+			script: `printf '%s\n' '{"type":"run_finished","output":"{\"value\":\"model gateway request failed\"}"}'
+`,
+			schema: []byte(`{"type":"object","required":["value"],"properties":{"value":{"type":"string","enum":["ok"]}}}`),
+		},
+		{
+			name: "invalid configuration",
+			script: `printf '%s\n' "error: invalid value 'model gateway request failed' for '--effort <LEVEL>'" >&2
+exit 2
+`,
+		},
+		{
+			name: "gateway signature only on stderr",
+			script: `printf '%s\n' 'model gateway request failed (HTTP 503)' >&2
+exit 2
+`,
+		},
+		{
+			name: "gateway signature in hook failure",
+			script: `printf '%s\n' '{"type":"run_failed","error":"hook failed: model gateway request failed (HTTP 503)"}'
+exit 1
+`,
+		},
+		{
+			name: "refused request quoting transient failure",
+			script: `printf '%s\n' '{"type":"run_failed","error":"model gateway request failed (HTTP 400): model gateway request failed (HTTP 503)"}'
+exit 1
+`,
+		},
 	} {
-		if _, got := classifyDeckTransient(errors.New(msg)); got != want {
-			t.Errorf("classifyDeckTransient(%q) = %v, want %v", msg, got, want)
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := filepath.Join(dir, "deck")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\ncat >/dev/null\n"+tc.script), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			a, err := New(types.AgentDeck, bin, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer a.Close()
+			attempts := 0
+			_, err = a.Run(context.Background(), RunOpts{
+				CWD:        dir,
+				Prompt:     "review",
+				JSONSchema: tc.schema,
+				OnAttempt:  func(Attempt) { attempts++ },
+			})
+			if err == nil {
+				t.Fatal("a non-gateway failure must remain an error")
+			}
+			if tc.schema != nil && !IsStructuredOutputRejected(err) {
+				t.Fatalf("expected a structured-output rejection, got %v", err)
+			}
+			if attempts != 1 {
+				t.Fatalf("deck made %d attempts for a non-gateway failure, want 1: %v", attempts, err)
+			}
+		})
+	}
+}
+
+func TestClassifyDeckTransient(t *testing.T) {
+	for _, tc := range []struct {
+		message string
+		want    bool
+	}{
+		{"model gateway request failed", true},
+		{"model gateway request failed: codex_stream_failed", true},
+		{"model gateway request failed (HTTP 503)", true},
+		{"model gateway request failed (HTTP 429)", true},
+		{"model gateway request failed (HTTP 400)", false},
+		{"model gateway request failed (HTTP 401)", false},
+		{"tool budget exhausted", false},
+		{"insufficient_quota", false},
+		{"ended its turn with prose instead of the required JSON object", false},
+		{"connection reset by peer", false},
+	} {
+		wire, err := json.Marshal(map[string]string{"type": "run_failed", "error": tc.message})
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, err = parseDeckEvents(strings.NewReader(string(wire)), RunOpts{})
+		// Process stderr stays diagnostic even when it names a transient failure.
+		err = errors.Join(errors.New("model gateway request failed (HTTP 502)"), err)
+		if _, got := classifyDeckTransient(err); got != tc.want {
+			t.Errorf("classifyDeckTransient(%q) = %v, want %v", tc.message, got, tc.want)
 		}
 	}
-	if _, got := classifyDeckTransient(context.Canceled); got {
-		t.Error("cancellation must never be retried")
+	for _, err := range []error{context.Canceled, errors.New("deck run failed: model gateway request failed")} {
+		if _, got := classifyDeckTransient(err); got {
+			t.Errorf("non-native failure must never be retried: %v", err)
+		}
 	}
 }

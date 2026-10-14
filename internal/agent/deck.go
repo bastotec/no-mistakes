@@ -124,8 +124,16 @@ func withValueFlag(args []string, value string, names ...string) []string {
 // already left on disk rather than from a fresh checkout.
 const deckMaxRetries = 2
 
+// deckRunFailure preserves the native run_failed origin separately from output
+// validation and process diagnostics, which can quote gateway error text.
+type deckRunFailure struct {
+	message string
+}
+
+func (e *deckRunFailure) Error() string { return "deck run failed: " + e.message }
+
 // deckGatewayStatusRE reads the HTTP status Deck appends to a gateway failure.
-var deckGatewayStatusRE = regexp.MustCompile(`model gateway request failed \(http (\d{3})\)`)
+var deckGatewayStatusRE = regexp.MustCompile(`^model gateway request failed \(http (\d{3})\)`)
 
 // classifyDeckTransient retries what the gateway itself reports as passing:
 // a request that failed without a status (a dropped upstream stream, such as
@@ -138,17 +146,16 @@ func classifyDeckTransient(err error) (string, bool) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "", false
 	}
-	msg := strings.ToLower(err.Error())
-	if strings.Contains(msg, "model gateway request failed") {
-		m := deckGatewayStatusRE.FindStringSubmatch(msg)
-		switch {
-		case m == nil:
-			return "gateway request failed", true
-		case m[1] == "429" || strings.HasPrefix(m[1], "5"):
-			return "gateway http " + m[1], true
-		default:
-			return "", false
-		}
+	var failure *deckRunFailure
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+	msg := strings.ToLower(failure.message)
+	if msg == "model gateway request failed" || strings.HasPrefix(msg, "model gateway request failed:") {
+		return "gateway request failed", true
+	}
+	if m := deckGatewayStatusRE.FindStringSubmatch(msg); m != nil && (m[1] == "429" || strings.HasPrefix(m[1], "5")) {
+		return "gateway http " + m[1], true
 	}
 	return "", false
 }
@@ -273,7 +280,7 @@ func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
 				finished = true
 			}
 		case "run_failed":
-			return resultFromUsage(usage), fmt.Errorf("deck run failed: %s", event.Error)
+			return resultFromUsage(usage), &deckRunFailure{message: event.Error}
 		}
 	}
 	if err := scanner.Err(); err != nil {
