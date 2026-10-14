@@ -465,7 +465,7 @@ A further push to the same branch inside the window replaces the waiting run bef
 The replaced run ends `cancelled: coalesced into a newer push`, and the new run waits out its own window, so each push resets the clock.
 A push that lands after the window has passed keeps the usual semantics: the running run is cancelled as `cancelled: superseded by new push`.
 `no-mistakes stats` counts both.
-When the replaced run's own push rewrote history, the replacement keeps that push's pre-rewrite base, so a force push followed by a quick follow-up is still integrated as a force push rather than having the dropped commits rebased back in.
+When a coalesced run's own push rewrote history and the replacing push only appends, the replacement keeps that pre-rewrite base, so a force push followed by a quick follow-up is still integrated as a force push rather than having the dropped commits rebased back in.
 
 Only pushes wait. `no-mistakes axi run` against a head the gate already has, reruns, and recovered runs start at once.
 `0s` starts every pushed run immediately; a negative value fails the config.

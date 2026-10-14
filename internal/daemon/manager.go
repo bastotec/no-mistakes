@@ -1419,13 +1419,19 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("associated_pr_base_conflict")
 		return "", fmt.Errorf("branch %s publishes to %s, whose own base branch this run follows; run `no-mistakes axi run --retire-existing-pr` on the branch to retarget it", branch, target)
 	}
-	// A push that only appends to an active run whose own push rewrote
-	// history keeps that rewrite's evidence: it takes the replaced run's
-	// pre-rewrite base when that is no ancestor of the new head either, so the
-	// rebase step still treats the branch as force-pushed instead of rebasing
-	// the dropped commits back in. A push that rewrites history itself keeps
-	// its own previous head, which already is that evidence.
-	if trigger == "push" && active != nil {
+	// A push that only appends to a run still waiting out its quiet window,
+	// whose own push rewrote history, keeps that rewrite's evidence: it takes
+	// the replaced run's pre-rewrite base when that is no ancestor of the new
+	// head either, so the rebase step still treats the branch as force-pushed
+	// instead of rebasing the dropped commits back in. A push that rewrites
+	// history itself keeps its own previous head, which already is that
+	// evidence. A run past its window is superseded exactly as before. The
+	// branch lock held here keeps a waiting run in its window until the
+	// cancellation below.
+	m.mu.Lock()
+	replacingQuietRun := active != nil && m.quieting[active.ID]
+	m.mu.Unlock()
+	if trigger == "push" && replacingQuietRun {
 		gateDir := m.paths.RepoDir(repo.ID)
 		if !pushRewroteHistory(ctx, gateDir, baseSHA, headSHA) &&
 			pushRewroteHistory(ctx, gateDir, active.BaseSHA, active.HeadSHA) &&
