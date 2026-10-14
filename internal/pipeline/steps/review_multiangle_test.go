@@ -70,6 +70,14 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 			t.Fatalf("%s: finder and verify agents must carry turn bounds and the verify route: %+v", tc.effort, plan)
 		}
 	}
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+		plan := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: effort}), routes, &agent.InvocationWorkload{}, nil)
+		for _, tuning := range []*agent.InvocationTuning{plan.Tuning, &plan.FinderTuning, &plan.VerifyTuning} {
+			if tuning != nil && tuning.Effort != "" && tuning.Effort != "low" && tuning.Effort != "high" {
+				t.Fatalf("%s plan uses effort %q; only low and high are accepted by every gateway route", effort, tuning.Effort)
+			}
+		}
+	}
 	low := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "low"}), routes, &agent.InvocationWorkload{}, nil)
 	if low.Tuning == nil || low.Tuning.Model != "light/route" || low.Tuning.Effort != "low" || low.Tuning.MaxTurns == 0 {
 		t.Fatalf("low review tuning = %+v, want the light route at low effort with a turn bound", low.Tuning)
@@ -79,6 +87,30 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 	}
 	if finderRoute(routes, 0) != "a/route" || finderRoute(routes, 1) != "b/route" || finderRoute(routes, 2) != "a/route" {
 		t.Fatal("finder routes must round-robin")
+	}
+}
+
+func TestPlanReviewExactTuningPerLevel(t *testing.T) {
+	for _, tc := range []struct {
+		level                  string
+		single, finder, verify agent.InvocationTuning
+	}{
+		{"low", agent.InvocationTuning{Effort: "low", MaxTurns: 80, DeadlineSecs: 900}, agent.InvocationTuning{}, agent.InvocationTuning{}},
+		{"medium", agent.InvocationTuning{MaxTurns: 400, DeadlineSecs: 1800}, agent.InvocationTuning{}, agent.InvocationTuning{}},
+		{"high", agent.InvocationTuning{}, agent.InvocationTuning{Effort: "high", MaxTurns: 150, DeadlineSecs: 1500}, agent.InvocationTuning{Effort: "low", MaxTurns: 60, DeadlineSecs: 900}},
+		{"xhigh", agent.InvocationTuning{}, agent.InvocationTuning{Effort: "high", MaxTurns: 200, DeadlineSecs: 1800}, agent.InvocationTuning{Effort: "high", MaxTurns: 80, DeadlineSecs: 1200}},
+		{"max", agent.InvocationTuning{}, agent.InvocationTuning{Effort: "high", MaxTurns: 300, DeadlineSecs: 1800}, agent.InvocationTuning{Effort: "high", MaxTurns: 100, DeadlineSecs: 1200}},
+	} {
+		t.Run(tc.level, func(t *testing.T) {
+			plan := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: tc.level}), config.ReviewRoutesRaw{}, &agent.InvocationWorkload{}, nil)
+			var single agent.InvocationTuning
+			if plan.Tuning != nil {
+				single = *plan.Tuning
+			}
+			if single != tc.single || plan.FinderTuning != tc.finder || plan.VerifyTuning != tc.verify {
+				t.Fatalf("single/finder/verify tuning = %+v / %+v / %+v, want %+v / %+v / %+v", single, plan.FinderTuning, plan.VerifyTuning, tc.single, tc.finder, tc.verify)
+			}
+		})
 	}
 }
 

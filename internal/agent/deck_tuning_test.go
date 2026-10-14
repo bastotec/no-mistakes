@@ -23,6 +23,10 @@ func TestDeckBuildArgsAppliesInvocationTuningOverOperatorFlags(t *testing.T) {
 	if got := (&deckAgent{extraArgs: []string{"-m", "x"}}).buildArgs(&InvocationTuning{Model: "y"}); !reflect.DeepEqual(got, []string{"run", "--model", "y", "--ephemeral", "-"}) {
 		t.Fatalf("short model flag must be replaced: %q", got)
 	}
+	medium := &deckAgent{extraArgs: []string{"--model", "operator/model", "--effort=medium", "--max-turns", "20"}}
+	if got := medium.buildArgs(&InvocationTuning{MaxTurns: 400, DeadlineSecs: 1800}); !reflect.DeepEqual(got, []string{"run", "--model", "operator/model", "--effort=medium", "--max-turns", "400", "--deadline-secs", "1800", "--ephemeral", "-"}) {
+		t.Fatalf("bounds-only medium-level tuning must preserve the operator's model and effort: %q", got)
+	}
 }
 
 func TestPiBuildArgsAppliesModelAndThinkingTuning(t *testing.T) {
