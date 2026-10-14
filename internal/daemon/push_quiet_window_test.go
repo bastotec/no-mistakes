@@ -258,6 +258,28 @@ func TestPushReplacingARewriteKeepsThePreRewriteBase(t *testing.T) {
 	if run.BaseSHA != dropped {
 		t.Fatalf("append base = %s, want the pre-rewrite head %s", run.BaseSHA, dropped)
 	}
+
+	// A push that rewrites history itself keeps its own previous head: that
+	// already is the evidence, and the inherited base could be its ancestor.
+	gitCmd(t, repo.WorkingPath, "reset", "--hard", dropped)
+	again := commitContentForce(t, repo, "rewrite again")
+	againRun := pushReceived(t, p, repo.ID, appended, again)
+	if run, err = d.GetRun(againRun); err != nil {
+		t.Fatal(err)
+	}
+	if run.BaseSHA != appended {
+		t.Fatalf("second rewrite base = %s, want its own previous head %s", run.BaseSHA, appended)
+	}
+}
+
+func commitContentForce(t *testing.T, repo *db.Repo, content string) string {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(repo.WorkingPath, "test.txt"), []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, repo.WorkingPath, "commit", "-am", content)
+	gitCmd(t, repo.WorkingPath, "push", "-f", "gate", "HEAD:refs/heads/main")
+	return gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
 }
 
 func commitContent(t *testing.T, repo *db.Repo, content string) string {
