@@ -314,3 +314,91 @@ func TestDeckWithoutOptOutIsUnchanged(t *testing.T) {
 		t.Fatal("without the opt-out the binary must not be probed")
 	}
 }
+
+func TestDeckOptOutReprobesRedeployedBinary(t *testing.T) {
+	for _, identity := range []string{"size", "mtime"} {
+		t.Run(identity, func(t *testing.T) {
+			bin, dir := fakeDeck(t, `      --no-project-context\n`)
+			checkGate := func(wantAdmitted bool, wantProbes int) {
+				t.Helper()
+				a, err := NewWithOptions(types.AgentDeck, bin, nil, Options{DisableProjectSettings: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer a.Close()
+				if err := EnsureGateNeutralized(a); (err == nil) != wantAdmitted {
+					t.Fatalf("admitted = %v, want %v: %v", err == nil, wantAdmitted, err)
+				}
+				if got := countProbes(t, dir); got != wantProbes {
+					t.Fatalf("probes = %d, want %d", got, wantProbes)
+				}
+			}
+			checkGate(true, 1)
+			checkGate(true, 1)
+			info, err := os.Stat(bin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			script, err := os.ReadFile(bin)
+			if err != nil {
+				t.Fatal(err)
+			}
+			replacement := "--unrelated-option"
+			mtime := info.ModTime()
+			if identity == "mtime" {
+				replacement = strings.Repeat("x", len(deckNoProjectContextFlag))
+				mtime = mtime.Add(2 * time.Second)
+			}
+			changed := strings.ReplaceAll(string(script), deckNoProjectContextFlag, replacement)
+			if err := os.WriteFile(bin, []byte(changed), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chtimes(bin, mtime, mtime); err != nil {
+				t.Fatal(err)
+			}
+			checkGate(false, 2)
+			checkGate(false, 2)
+			if err := os.WriteFile(bin, script, 0700); err != nil {
+				t.Fatal(err)
+			}
+			mtime = mtime.Add(2 * time.Second)
+			if err := os.Chtimes(bin, mtime, mtime); err != nil {
+				t.Fatal(err)
+			}
+			checkGate(true, 3)
+		})
+	}
+}
+
+func TestDeckOptOutProbeFailuresStayClosed(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	for _, tc := range []struct {
+		name, body string
+	}{
+		{"nonzero even with flag", "echo --no-project-context; exit 7"},
+		{"timeout", "exec sleep 30"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := filepath.Join(t.TempDir(), "deck")
+			if err := os.WriteFile(bin, []byte("#!/bin/sh\n"+tc.body+"\n"), 0700); err != nil {
+				t.Fatal(err)
+			}
+			started := time.Now()
+			for range 2 {
+				a, err := NewWithOptions(types.AgentDeck, bin, nil, Options{DisableProjectSettings: true})
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer a.Close()
+				if err := EnsureGateNeutralized(a); err == nil {
+					t.Fatal("a failed help probe must not admit Deck")
+				}
+			}
+			if elapsed := time.Since(started); elapsed >= 2*deckProbeTimeout {
+				t.Fatalf("failed probe was not bounded and cached: %v", elapsed)
+			}
+		})
+	}
+}
