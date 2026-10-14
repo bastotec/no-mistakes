@@ -85,7 +85,7 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 **Deck Gateway Retry (`internal/agent/deck.go`)**
 
-- Deck goes through the shared `runWithRetry` like every other adapter, with `classifyDeckTransient`: a gateway failure with no status (a dropped upstream stream, e.g. proxai `codex_stream_failed`), a 5xx or a 429 reruns the turn in place, at most `deckMaxRetries` (2) times; any other 4xx is a refused request (bad route, effort, credential or payload) and is never retried, and nothing that is not a gateway failure is retried (unlike the shared `classifyTransient`, which also retries prose final turns). A rerun replays the prompt against the worktree as the failed attempt left it. Regressions: `internal/agent/deck_retry_test.go`.
+- Deck's retry classifier accepts only native `run_failed` gateway errors, never gateway text quoted by output validation or process diagnostics. Classification and worktree replay rationale live in `internal/agent/deck.go`; user-facing retry semantics are owned by `docs/src/content/docs/reference/global-config.md` (`agent`). Regressions: `internal/agent/deck_retry_test.go`.
 
 **Advisory Jev Signal (`internal/jev`, `internal/pipeline/steps/jev.go`)**
 

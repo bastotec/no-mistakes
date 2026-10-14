@@ -119,9 +119,9 @@ func withValueFlag(args []string, value string, names ...string) []string {
 }
 
 // deckMaxRetries bounds the in-place reruns after a transient gateway
-// failure. A Deck run is replayed from its prompt against the same worktree,
-// so a rerun after a dropped stream resumes from whatever the first attempt
-// already left on disk rather than from a fresh checkout.
+// failure. A Deck run replays its prompt in a fresh ephemeral session against
+// the same worktree, retaining whatever the previous attempt left on disk
+// rather than rolling it back to a fresh checkout.
 const deckMaxRetries = 2
 
 // deckRunFailure preserves the native run_failed origin separately from output
@@ -135,7 +135,7 @@ func (e *deckRunFailure) Error() string { return "deck run failed: " + e.message
 // deckGatewayStatusRE reads the HTTP status Deck appends to a gateway failure.
 var deckGatewayStatusRE = regexp.MustCompile(`^model gateway request failed \(http (\d{3})\)`)
 
-// classifyDeckTransient retries what the gateway itself reports as passing:
+// classifyDeckTransient retries only native gateway failures deemed transient:
 // a request that failed without a status (a dropped upstream stream, such as
 // proxai's codex_stream_failed), a 5xx, or a 429. Any other 4xx is a request
 // the gateway refused - a bad route, effort, credential or payload - and is
