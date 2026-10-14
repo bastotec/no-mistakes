@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -42,7 +43,11 @@ func newDeckAgent(bin string, extraArgs []string, disableProjectSettings bool, s
 }
 
 func (*deckAgent) Name() string { return "deck" }
-func (*deckAgent) Close() error { return nil }
+
+// ReportsAgentAttempts reports that Run emits OnAttempt for each try itself
+// (through runWithRetry), so wrapping routers must not emit another.
+func (*deckAgent) ReportsAgentAttempts() bool { return true }
+func (*deckAgent) Close() error               { return nil }
 
 // NeutralizesGateInstructions reports whether Deck is launched with the target
 // repo's project context ignored. It is meaningful only under the opt-out
@@ -113,7 +118,55 @@ func withValueFlag(args []string, value string, names ...string) []string {
 	return append(out, names[0], value)
 }
 
+// deckMaxRetries bounds the in-place reruns after a transient gateway
+// failure. A Deck run replays its prompt in a fresh ephemeral session against
+// the same worktree, retaining whatever the previous attempt left on disk
+// rather than rolling it back to a fresh checkout.
+const deckMaxRetries = 2
+
+// deckRunFailure preserves the native run_failed origin separately from output
+// validation and process diagnostics, which can quote gateway error text.
+type deckRunFailure struct {
+	message string
+}
+
+func (e *deckRunFailure) Error() string { return "deck run failed: " + e.message }
+
+// deckGatewayStatusRE reads the HTTP status Deck appends to a gateway failure.
+var deckGatewayStatusRE = regexp.MustCompile(`^model gateway request failed \(http (\d{3})\)`)
+
+// classifyDeckTransient retries only native gateway failures deemed transient:
+// a request that failed without a status (a dropped upstream stream, such as
+// proxai's codex_stream_failed), a 5xx, or a 429. Any other 4xx is a request
+// the gateway refused - a bad route, effort, credential or payload - and is
+// never retried. Nothing that is not a gateway failure is retried either: a
+// model that answered with a refusal or prose would only answer the same way
+// again.
+func classifyDeckTransient(err error) (string, bool) {
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", false
+	}
+	var failure *deckRunFailure
+	if !errors.As(err, &failure) {
+		return "", false
+	}
+	msg := strings.ToLower(failure.message)
+	if msg == "model gateway request failed" || strings.HasPrefix(msg, "model gateway request failed:") {
+		return "gateway request failed", true
+	}
+	if m := deckGatewayStatusRE.FindStringSubmatch(msg); m != nil && (m[1] == "429" || strings.HasPrefix(m[1], "5")) {
+		return "gateway http " + m[1], true
+	}
+	return "", false
+}
+
 func (a *deckAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
+	return runWithRetry(ctx, "deck", opts, deckMaxRetries, classifyDeckTransient, nil, func() (*Result, error) {
+		return a.runOnce(ctx, opts)
+	})
+}
+
+func (a *deckAgent) runOnce(ctx context.Context, opts RunOpts) (*Result, error) {
 	cmd := exec.CommandContext(ctx, a.bin, a.buildArgs(opts.Tuning)...)
 	cmd.Dir = opts.CWD
 	cmd.Env = a.gitSafeEnv(opts.CWD, opts.Env)
@@ -227,7 +280,7 @@ func parseDeckEvents(r io.Reader, opts RunOpts) (*Result, error) {
 				finished = true
 			}
 		case "run_failed":
-			return resultFromUsage(usage), fmt.Errorf("deck run failed: %s", event.Error)
+			return resultFromUsage(usage), &deckRunFailure{message: event.Error}
 		}
 	}
 	if err := scanner.Err(); err != nil {
