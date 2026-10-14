@@ -92,13 +92,15 @@ func TestDeckDoesNotRetryARefusedGatewayRequest(t *testing.T) {
 
 func TestClassifyDeckTransient(t *testing.T) {
 	for msg, want := range map[string]bool{
-		"deck run failed: model gateway request failed":            true,
-		"deck run failed: model gateway request failed (HTTP 503)": true,
-		"deck run failed: model gateway request failed (HTTP 429)": true,
-		"deck run failed: model gateway request failed (HTTP 400)": false,
-		"deck run failed: model gateway request failed (HTTP 401)": false,
-		"deck run failed: tool budget exhausted":                   false,
-		"deck run failed: insufficient_quota":                      false,
+		"deck run failed: model gateway request failed":                              true,
+		"deck run failed: model gateway request failed (HTTP 503)":                   true,
+		"deck run failed: model gateway request failed (HTTP 429)":                   true,
+		"deck run failed: model gateway request failed (HTTP 400)":                   false,
+		"deck run failed: model gateway request failed (HTTP 401)":                   false,
+		"deck run failed: tool budget exhausted":                                     false,
+		"deck run failed: insufficient_quota":                                        false,
+		"deck output: ended its turn with prose instead of the required JSON object": false,
+		"deck run failed: connection reset by peer":                                  false,
 	} {
 		if _, got := classifyDeckTransient(errors.New(msg)); got != want {
 			t.Errorf("classifyDeckTransient(%q) = %v, want %v", msg, got, want)

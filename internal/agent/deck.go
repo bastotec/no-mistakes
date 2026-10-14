@@ -127,7 +127,9 @@ var deckGatewayStatusRE = regexp.MustCompile(`model gateway request failed \(htt
 // a request that failed without a status (a dropped upstream stream, such as
 // proxai's codex_stream_failed), a 5xx, or a 429. Any other 4xx is a request
 // the gateway refused - a bad route, effort, credential or payload - and is
-// never retried, and neither is anything classifyTransient already rejects.
+// never retried. Nothing that is not a gateway failure is retried either: a
+// model that answered with a refusal or prose would only answer the same way
+// again.
 func classifyDeckTransient(err error) (string, bool) {
 	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "", false
@@ -144,7 +146,7 @@ func classifyDeckTransient(err error) (string, bool) {
 			return "", false
 		}
 	}
-	return classifyTransient(err)
+	return "", false
 }
 
 func (a *deckAgent) Run(ctx context.Context, opts RunOpts) (*Result, error) {
