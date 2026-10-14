@@ -361,7 +361,13 @@ Risk assessment (after listing all findings):
 	// gets one light reviewer, a normal one today's single reviewer, and a
 	// large or risky one the multi-angle review (review_multiangle.go). The
 	// chosen level is recorded on the findings for the PR attestation.
-	plan := planReview(reviewSizingOf(sctx.Config), sctx.Config.Review.Routes, workload, changed)
+	// A rereview sizes the head it certifies: the fixer may have grown the
+	// change past a threshold since the workload above was measured.
+	sizedWorkload := workload
+	if sctx.Fixing {
+		sizedWorkload = reviewWorkload(ctx, sctx.WorkDir, baseSHA, sctx.Run.HeadSHA)
+	}
+	plan := planReview(reviewSizingOf(sctx.Config), sctx.Config.Review.Routes, sizedWorkload, changed)
 	sctx.Log(fmt.Sprintf("review level %s: %s", plan.Effort, plan.Reason))
 	var findings Findings
 	if plan.multiAngle() {

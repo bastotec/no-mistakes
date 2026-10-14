@@ -74,15 +74,6 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 			finderOpts.Tuning = &tuning
 			prefix := "finder " + dim.Name
 			findings, err := s.reviewWithSchemaRetry(sctx, prefix, finderOpts, log)
-			if err != nil && tuning.Model != "" && sctx.Ctx.Err() == nil {
-				// A route can be down while the operator's default is not:
-				// one retry on the configured model before failing the angle.
-				log(fmt.Sprintf("%s on route %s failed (%s); retrying on the configured model", prefix, tuning.Model, oneLine(err)))
-				retry := tuning
-				retry.Model = ""
-				finderOpts.Tuning = &retry
-				findings, err = s.reviewWithSchemaRetry(sctx, prefix, finderOpts, log)
-			}
 			results[i], errs[i] = findings, err
 			if err == nil {
 				log(fmt.Sprintf("%s: %d finding(s), risk %s", prefix, len(findings.Items), findings.RiskLevel))
@@ -104,18 +95,26 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 		claims += len(r.Items)
 	}
 	rankCandidates(candidates)
+	// The verify cap bounds agents, not findings: claims past it were not
+	// disproved, so they are kept as plausible rather than dropped.
+	var overflow []candidateFinding
 	if len(candidates) > plan.VerifyCap {
-		log(fmt.Sprintf("verifying the %d most severe of %d claims; %d lower-ranked unverified claim(s) dropped", plan.VerifyCap, len(candidates), len(candidates)-plan.VerifyCap))
-		candidates = candidates[:plan.VerifyCap]
+		log(fmt.Sprintf("verifying the %d most severe of %d claims; %d lower-ranked claim(s) kept unverified as plausible", plan.VerifyCap, len(candidates), len(candidates)-plan.VerifyCap))
+		candidates, overflow = candidates[:plan.VerifyCap], candidates[plan.VerifyCap:]
 	}
 
 	verified, err := s.verifyCandidates(sctx, opts, plan, candidates, verifyContext, log)
 	if err != nil {
 		return Findings{}, err
 	}
+	for _, c := range overflow {
+		verified = append(verified, verifiedFinding{
+			finding: markVerified(c, findingVerdict{Verdict: verdictPlausible, Evidence: "not verified: past this review level's verify cap"}),
+			verdict: verdictPlausible,
+		})
+	}
 
-	merged := mergeFinderRisk(results, plan.Dimensions)
-	merged.Items = nil
+	var merged Findings
 	confirmed, plausible := 0, 0
 	for _, v := range verified {
 		switch v.verdict {
@@ -129,9 +128,9 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 		merged.Items = append(merged.Items, v.finding)
 	}
 	sortVerifiedFindings(merged.Items)
-	applyVerifiedRisk(&merged)
+	verifiedRisk(&merged)
 	merged.Summary = fmt.Sprintf("Multi-angle review (%s): %d finders, %d claims, %d after de-duplication; %d confirmed, %d plausible, %d refuted.",
-		plan.Effort, len(plan.Dimensions), claims, len(candidates), confirmed, plausible, len(candidates)-confirmed-plausible)
+		plan.Effort, len(plan.Dimensions), claims, len(candidates)+len(overflow), confirmed, plausible, len(candidates)+len(overflow)-confirmed-plausible)
 	log(merged.Summary)
 	return merged, nil
 }
@@ -204,13 +203,19 @@ func sameClaim(a, b Finding) bool {
 	if fileA != fileB {
 		return false
 	}
-	if fileA == "" {
-		return wordOverlap(a.Description, b.Description) >= 0.5
-	}
-	if a.Line != 0 && b.Line != 0 && absInt(a.Line-b.Line) > 3 {
+	// Only a clear match merges: two findings on neighboring lines can share
+	// most of their vocabulary and still be different defects, and merging
+	// them would leave one unverified and unfixed. The same line with similar
+	// wording is one claim; nearby lines need near-identical wording.
+	overlap := wordOverlap(a.Description, b.Description)
+	switch {
+	case fileA == "" || a.Line == b.Line:
+		return overlap >= 0.6
+	case a.Line != 0 && b.Line != 0 && absInt(a.Line-b.Line) <= 3:
+		return overlap >= 0.85
+	default:
 		return false
 	}
-	return wordOverlap(a.Description, b.Description) >= 0.3
 }
 
 // wordOverlap is the Jaccard similarity of two descriptions' content words.
@@ -299,12 +304,6 @@ func (s *ReviewStep) verifyCandidates(sctx *pipeline.StepContext, opts agent.Run
 			tuning := plan.VerifyTuning
 			verifyOpts.Tuning = &tuning
 			verdict, err := s.runVerifier(sctx, verifyOpts)
-			if err != nil && tuning.Model != "" && sctx.Ctx.Err() == nil {
-				retry := tuning
-				retry.Model = ""
-				verifyOpts.Tuning = &retry
-				verdict, err = s.runVerifier(sctx, verifyOpts)
-			}
 			if err != nil {
 				log(fmt.Sprintf("verify %q failed (%s); keeping it as plausible", truncateRunes(c.Description, 80), oneLine(err)))
 				verdict = findingVerdict{Verdict: verdictPlausible, Evidence: "the verify agent did not complete, so this claim was not disproved"}
@@ -391,59 +390,36 @@ func sortVerifiedFindings(items []Finding) {
 	})
 }
 
-var riskRank = map[string]int{"low": 0, "medium": 1, "high": 2}
 var riskByRank = []string{"low", "medium", "high"}
 
-// mergeFinderRisk folds the finders' own risk assessments into one: the
-// median finder's level, so one outlier cannot move the rating alone, with
-// that finder's rationale. The scope is source-or-external when any finder
-// assessed source risk.
-func mergeFinderRisk(results []Findings, dims []reviewDimension) Findings {
-	ranks := make([]int, len(results))
-	for i, r := range results {
-		ranks[i] = riskRank[r.RiskLevel]
-	}
-	sorted := append([]int(nil), ranks...)
-	sort.Ints(sorted)
-	median := sorted[(len(sorted)-1)/2]
-	merged := Findings{RiskLevel: riskByRank[median], RiskScope: types.FindingsRiskScopePipelineOwnedDelivery}
-	for i, r := range results {
-		if ranks[i] == median && merged.RiskRationale == "" {
-			merged.RiskRationale = fmt.Sprintf("%s (%s finder)", strings.TrimSpace(r.RiskRationale), dims[i].Name)
-		}
-		if r.RiskScope == types.FindingsRiskScopeSourceOrExternal {
-			merged.RiskScope = types.FindingsRiskScopeSourceOrExternal
-		}
-	}
-	return merged
-}
-
-// applyVerifiedRisk raises the folded rating to what the verified findings
-// alone justify: a verified error is high risk, a verified actionable warning
-// at least medium. Refuted claims never reach here, so they cannot move it.
-func applyVerifiedRisk(f *Findings) {
-	floor := 0
+// verifiedRisk rates the change from the verified findings alone, since
+// refuted claims must not move it: a verified actionable error is high risk,
+// a verified actionable warning medium, anything else low.
+func verifiedRisk(f *Findings) {
+	level := 0
 	var worst Finding
 	for _, item := range f.Items {
 		if item.ActionOrDefault() == types.ActionNoOp {
 			continue
 		}
-		level := 0
+		rank := 0
 		switch types.NormalizeFindingSeverity(item.Severity) {
 		case "error":
-			level = 2
+			rank = 2
 		case "warning":
-			level = 1
+			rank = 1
 		}
-		if level > floor {
-			floor, worst = level, item
+		if rank > level {
+			level, worst = rank, item
 		}
 	}
-	if floor > riskRank[f.RiskLevel] {
-		f.RiskLevel = riskByRank[floor]
-		f.RiskRationale = fmt.Sprintf("a verified %s finding remains: %s", worst.Severity, truncateRunes(firstLine(worst.Description), 160))
-		f.RiskScope = types.FindingsRiskScopeSourceOrExternal
+	f.RiskLevel = riskByRank[level]
+	f.RiskScope = types.FindingsRiskScopeSourceOrExternal
+	if level == 0 {
+		f.RiskRationale = "no actionable finding survived verification"
+		return
 	}
+	f.RiskRationale = fmt.Sprintf("a verified %s finding remains: %s", worst.Severity, truncateRunes(firstLine(worst.Description), 160))
 }
 
 // lockedLog serializes a step logger shared by concurrent agents.
@@ -476,7 +452,7 @@ func truncateRunes(s string, n int) string {
 // reviewSizingOf returns the configured sizing, defaulting a zero value (a
 // config built without the resolver) to the built-in defaults.
 func reviewSizingOf(cfg *config.Config) config.ReviewSizing {
-	if cfg == nil || cfg.Review.Sizing.Effort == "" {
+	if cfg == nil || !cfg.Review.Sizing.Resolved {
 		return config.ResolveReviewSizing(config.ReviewSizingRaw{})
 	}
 	return cfg.Review.Sizing

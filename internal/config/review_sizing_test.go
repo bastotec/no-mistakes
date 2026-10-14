@@ -8,7 +8,7 @@ import (
 
 func TestResolveReviewSizingDefaults(t *testing.T) {
 	got := ResolveReviewSizing(ReviewSizingRaw{})
-	if got.Effort != ReviewEffortAuto || got.SmallMaxLines != DefaultReviewSmallMaxLines || got.LargeMinFiles != DefaultReviewLargeMinFiles || !slices.Equal(got.RiskyPaths, DefaultReviewRiskyPaths) {
+	if !got.Resolved || got.MinEffort != ReviewEffortLow || got.SmallMaxLines != DefaultReviewSmallMaxLines || got.LargeMinFiles != DefaultReviewLargeMinFiles || !slices.Equal(got.RiskyPaths, DefaultReviewRiskyPaths) {
 		t.Fatalf("defaults = %+v", got)
 	}
 	empty := []string{}
@@ -18,16 +18,16 @@ func TestResolveReviewSizingDefaults(t *testing.T) {
 }
 
 func TestLoadRepo_ReviewSizing(t *testing.T) {
-	cfg, err := LoadRepoFromBytes([]byte("review:\n  sizing:\n    effort: High\n    small_max_lines: 40\n    risky_paths: [\"internal/gate/**\", \"*auth*\"]\n"))
+	cfg, err := LoadRepoFromBytes([]byte("review:\n  sizing:\n    min_effort: High\n    small_max_lines: 40\n    risky_paths: [\"internal/gate/**\", \"*auth*\"]\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	sizing := ResolveReviewSizing(cfg.Review.Sizing)
-	if sizing.Effort != ReviewEffortHigh || sizing.SmallMaxLines != 40 || sizing.SmallMaxFiles != DefaultReviewSmallMaxFiles || !slices.Equal(sizing.RiskyPaths, []string{"internal/gate/**", "*auth*"}) {
+	if sizing.MinEffort != ReviewEffortHigh || sizing.SmallMaxLines != 40 || sizing.SmallMaxFiles != DefaultReviewSmallMaxFiles || !slices.Equal(sizing.RiskyPaths, []string{"internal/gate/**", "*auth*"}) {
 		t.Fatalf("sizing = %+v", sizing)
 	}
 	for _, bad := range []string{
-		"review:\n  sizing:\n    effort: ultra\n",
+		"review:\n  sizing:\n    min_effort: ultra\n",
 		"review:\n  sizing:\n    large_min_lines: -1\n",
 		"review:\n  sizing:\n    risky_paths: [\"[\"]\n",
 	} {
@@ -40,14 +40,14 @@ func TestLoadRepo_ReviewSizing(t *testing.T) {
 // review.sizing rides the trusted-only review block: a pushed branch cannot
 // lighten its own review.
 func TestEffectiveRepoConfig_ReviewSizingTrustedOnly(t *testing.T) {
-	low := ReviewSizingRaw{Effort: ReviewEffortLow}
-	high := ReviewSizingRaw{Effort: ReviewEffortHigh}
+	low := ReviewSizingRaw{MinEffort: ReviewEffortLow}
+	high := ReviewSizingRaw{MinEffort: ReviewEffortHigh}
 	pushed := &RepoConfig{Review: ReviewRaw{Sizing: low}}
-	if got := EffectiveRepoConfig(pushed, &RepoConfig{Review: ReviewRaw{Sizing: high}}, true); got.Review.Sizing.Effort != ReviewEffortHigh {
-		t.Fatalf("sizing effort = %q, want the trusted value", got.Review.Sizing.Effort)
+	if got := EffectiveRepoConfig(pushed, &RepoConfig{Review: ReviewRaw{Sizing: high}}, true); got.Review.Sizing.MinEffort != ReviewEffortHigh {
+		t.Fatalf("sizing min_effort = %q, want the trusted value", got.Review.Sizing.MinEffort)
 	}
-	if got := EffectiveRepoConfig(pushed, nil, false); got.Review.Sizing.Effort != "" {
-		t.Fatalf("sizing effort = %q, want none without a trusted copy", got.Review.Sizing.Effort)
+	if got := EffectiveRepoConfig(pushed, nil, false); got.Review.Sizing.MinEffort != "" {
+		t.Fatalf("sizing min_effort = %q, want none without a trusted copy", got.Review.Sizing.MinEffort)
 	}
 }
 
@@ -63,7 +63,7 @@ func TestLoadGlobal_ReviewRoutes(t *testing.T) {
 		t.Fatal("an empty finder route must fail the config")
 	}
 	merged := Merge(cfg, &RepoConfig{})
-	if merged.Review.Routes.Light != "zai/glm-5.3" || merged.Review.Sizing.Effort != ReviewEffortAuto {
+	if merged.Review.Routes.Light != "zai/glm-5.3" || merged.Review.Sizing.MinEffort != ReviewEffortLow {
 		t.Fatalf("merged review = %+v", merged.Review)
 	}
 }

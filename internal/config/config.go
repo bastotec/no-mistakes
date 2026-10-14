@@ -394,9 +394,10 @@ type ReviewRaw struct {
 // ReviewSizingRaw is review.sizing. Every field is optional; ResolveReviewSizing
 // fills the defaults.
 type ReviewSizingRaw struct {
-	// Effort forces one review level for every change: low, medium, high,
-	// xhigh or max. Empty or "auto" sizes each change.
-	Effort string `yaml:"effort"`
+	// MinEffort is the lightest review any change gets: low, medium, high,
+	// xhigh or max. Sizing can raise a change above it, never below. Empty
+	// means low.
+	MinEffort string `yaml:"min_effort"`
 	// A change at or under both small limits gets the light review.
 	SmallMaxLines *int `yaml:"small_max_lines"`
 	SmallMaxFiles *int `yaml:"small_max_files"`
@@ -413,7 +414,6 @@ type ReviewSizingRaw struct {
 // levels: low and medium run one reviewer, high and above run parallel
 // finders over separate dimensions and verify every finding.
 const (
-	ReviewEffortAuto   = "auto"
 	ReviewEffortLow    = "low"
 	ReviewEffortMedium = "medium"
 	ReviewEffortHigh   = "high"
@@ -439,7 +439,15 @@ var DefaultReviewRiskyPaths = []string{"*auth*", "*secur*", "*secret*", "*creden
 
 // ReviewSizing is the resolved review.sizing.
 type ReviewSizing struct {
-	Effort        string
+	// Resolved marks a value ResolveReviewSizing built, so a zero Config
+	// still gets the defaults.
+	Resolved bool
+	// MinEffort is the floor from review.sizing.min_effort.
+	MinEffort string
+	// Fixed, when set, is the exact level for every change, bypassing
+	// sizing. It has no YAML spelling: only eval replay sets it, to keep a
+	// candidate comparison on one reviewer.
+	Fixed         string
 	SmallMaxLines int
 	SmallMaxFiles int
 	LargeMinLines int
@@ -456,15 +464,16 @@ func ResolveReviewSizing(raw ReviewSizingRaw) ReviewSizing {
 		return def
 	}
 	sizing := ReviewSizing{
-		Effort:        strings.ToLower(strings.TrimSpace(raw.Effort)),
+		Resolved:      true,
+		MinEffort:     strings.ToLower(strings.TrimSpace(raw.MinEffort)),
 		SmallMaxLines: pick(raw.SmallMaxLines, DefaultReviewSmallMaxLines),
 		SmallMaxFiles: pick(raw.SmallMaxFiles, DefaultReviewSmallMaxFiles),
 		LargeMinLines: pick(raw.LargeMinLines, DefaultReviewLargeMinLines),
 		LargeMinFiles: pick(raw.LargeMinFiles, DefaultReviewLargeMinFiles),
 		RiskyPaths:    DefaultReviewRiskyPaths,
 	}
-	if sizing.Effort == "" {
-		sizing.Effort = ReviewEffortAuto
+	if sizing.MinEffort == "" {
+		sizing.MinEffort = ReviewEffortLow
 	}
 	if raw.RiskyPaths != nil {
 		sizing.RiskyPaths = nil
@@ -478,9 +487,9 @@ func ResolveReviewSizing(raw ReviewSizingRaw) ReviewSizing {
 }
 
 func validateReviewSizing(raw ReviewSizingRaw) error {
-	effort := strings.ToLower(strings.TrimSpace(raw.Effort))
-	if effort != "" && effort != ReviewEffortAuto && !slices.Contains(ReviewEffortLevels, effort) {
-		return fmt.Errorf("review.sizing.effort must be auto or one of %s, got %q", strings.Join(ReviewEffortLevels, ", "), raw.Effort)
+	effort := strings.ToLower(strings.TrimSpace(raw.MinEffort))
+	if effort != "" && !slices.Contains(ReviewEffortLevels, effort) {
+		return fmt.Errorf("review.sizing.min_effort must be one of %s, got %q", strings.Join(ReviewEffortLevels, ", "), raw.MinEffort)
 	}
 	for name, v := range map[string]*int{"small_max_lines": raw.SmallMaxLines, "small_max_files": raw.SmallMaxFiles, "large_min_lines": raw.LargeMinLines, "large_min_files": raw.LargeMinFiles} {
 		if v != nil && *v < 0 {

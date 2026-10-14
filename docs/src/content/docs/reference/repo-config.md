@@ -469,7 +469,7 @@ Sizes the Review step to the change. Every field is optional.
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `effort` | `string` | `auto` | `auto` sizes each change; `low`, `medium`, `high`, `xhigh` or `max` forces one level |
+| `min_effort` | `string` | `low` | The lightest level any change gets: `low`, `medium`, `high`, `xhigh` or `max`. Sizing can raise a change above it, never below; `xhigh` and `max` are only reachable through it |
 | `small_max_lines` | `int` | `80` | A change at or under both small limits gets `low` |
 | `small_max_files` | `int` | `3` | |
 | `large_min_lines` | `int` | `800` | A change at or over either large limit gets `high` |

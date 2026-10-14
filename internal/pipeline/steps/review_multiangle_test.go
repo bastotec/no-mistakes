@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +16,7 @@ import (
 
 func TestClassifyReview(t *testing.T) {
 	defaults := config.ResolveReviewSizing(config.ReviewSizingRaw{})
-	forced := config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "xhigh"})
+	forced := config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "xhigh"})
 	custom := config.ResolveReviewSizing(config.ReviewSizingRaw{RiskyPaths: &[]string{"internal/gate/**"}})
 	noRisk := config.ResolveReviewSizing(config.ReviewSizingRaw{RiskyPaths: &[]string{}})
 	w := func(files, lines int) *agent.InvocationWorkload {
@@ -38,7 +39,8 @@ func TestClassifyReview(t *testing.T) {
 		{"custom risky subtree", custom, w(1, 3), []string{"internal/gate/reconcile.go"}, "high", "risky path"},
 		{"custom list replaces defaults", custom, w(1, 3), []string{"internal/auth.go"}, "low", "small change"},
 		{"empty list turns path risk off", noRisk, w(1, 3), []string{"internal/auth.go"}, "low", "small change"},
-		{"forced", forced, w(1, 3), []string{"a.go"}, "xhigh", "review.sizing.effort is xhigh"},
+		{"min effort raises a small change", forced, w(1, 3), []string{"a.go"}, "xhigh", "small change: 1 files, 3 changed lines; review.sizing.min_effort raises it to xhigh"},
+		{"min effort never lowers a risky change", config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "medium"}), w(1, 3), []string{"internal/auth/x.go"}, "high", "touches risky path"},
 		{"unknown size is never lighter", defaults, nil, []string{"a.go"}, "medium", "change size unknown"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,7 +61,7 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 	}{
 		{"low", 0, 0}, {"medium", 0, 0}, {"high", 4, 12}, {"xhigh", 5, 20}, {"max", 6, 30},
 	} {
-		sizing := config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: tc.effort})
+		sizing := config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: tc.effort})
 		plan := planReview(sizing, routes, &agent.InvocationWorkload{}, nil)
 		if len(plan.Dimensions) != tc.finders || plan.VerifyCap != tc.verifyCap {
 			t.Fatalf("%s: %d finders, verify cap %d; want %d and %d", tc.effort, len(plan.Dimensions), plan.VerifyCap, tc.finders, tc.verifyCap)
@@ -68,11 +70,11 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 			t.Fatalf("%s: finder and verify agents must carry turn bounds and the verify route: %+v", tc.effort, plan)
 		}
 	}
-	low := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "low"}), routes, nil, nil)
+	low := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "low"}), routes, &agent.InvocationWorkload{}, nil)
 	if low.Tuning == nil || low.Tuning.Model != "light/route" || low.Tuning.Effort != "low" || low.Tuning.MaxTurns == 0 {
 		t.Fatalf("low review tuning = %+v, want the light route at low effort with a turn bound", low.Tuning)
 	}
-	if medium := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "medium"}), routes, nil, nil); medium.Tuning != nil {
+	if medium := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "medium"}), routes, nil, nil); medium.Tuning != nil {
 		t.Fatalf("medium review must keep today's reviewer untouched, got tuning %+v", medium.Tuning)
 	}
 	if finderRoute(routes, 0) != "a/route" || finderRoute(routes, 1) != "b/route" || finderRoute(routes, 2) != "a/route" {
@@ -118,7 +120,7 @@ func multiAngleFake(t *testing.T) *concurrentAgent {
 	finder := map[string]string{
 		"correctness":    `{"findings":[{"severity":"error","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops when the queue is closed","review_scope":"source"},{"severity":"warning","action":"auto-fix","file":"a.txt","line":20,"description":"timeout value is parsed as seconds but documented as milliseconds","review_scope":"source"}],"risk_level":"medium","risk_rationale":"one loop defect","risk_scope":"source-or-external"}`,
 		"security":       `{"findings":[],"risk_level":"low","risk_rationale":"no boundary touched","risk_scope":"source-or-external"}`,
-		"regressions":    `{"findings":[{"severity":"warning","action":"auto-fix","file":"a.txt","line":4,"description":"retry loop never stops after the queue is closed, hanging callers","review_scope":"source"}],"risk_level":"medium","risk_rationale":"callers can hang","risk_scope":"source-or-external"}`,
+		"regressions":    `{"findings":[{"severity":"warning","action":"auto-fix","file":"a.txt","line":3,"description":"retry loop never stops after the queue is closed","review_scope":"source"}],"risk_level":"medium","risk_rationale":"callers can hang","risk_scope":"source-or-external"}`,
 		"simplification": `{"findings":[{"severity":"info","action":"no-op","file":"b.txt","line":1,"description":"helper duplicates strings.Cut","review_scope":"source"}],"risk_level":"high","risk_rationale":"outlier","risk_scope":"source-or-external"}`,
 	}
 	return &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
@@ -146,7 +148,7 @@ func TestReviewStep_MultiAngleReviewVerifiesDeduplicatesAndRanks(t *testing.T) {
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := multiAngleFake(t)
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "high"})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
 	sctx.Config.Review.Routes = config.ReviewRoutesRaw{Finders: []string{"chain/review", "claude/sonnet-5-5"}, Verify: "chain/review"}
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
@@ -195,7 +197,7 @@ func TestReviewStep_MultiAngleReviewVerifiesDeduplicatesAndRanks(t *testing.T) {
 	if findings.RiskLevel != "high" || !strings.Contains(findings.RiskRationale, "verified error") {
 		t.Fatalf("risk = %s (%s), want high from the verified error", findings.RiskLevel, findings.RiskRationale)
 	}
-	if findings.ReviewEffort != "high" || findings.ReviewEffortReason != "review.sizing.effort is high" {
+	if findings.ReviewEffort != "high" || !strings.HasSuffix(findings.ReviewEffortReason, "review.sizing.min_effort raises it to high") {
 		t.Fatalf("review effort = %q (%q), want high recorded for the attestation", findings.ReviewEffort, findings.ReviewEffortReason)
 	}
 	if !outcome.NeedsApproval {
@@ -203,9 +205,9 @@ func TestReviewStep_MultiAngleReviewVerifiesDeduplicatesAndRanks(t *testing.T) {
 	}
 }
 
-// The median finder's rating wins when no verified finding raises it, so a
-// single alarmed finder cannot make a clean change high risk on its own.
-func TestReviewStep_MultiAngleRiskIsTheMedianFinderWhenNothingVerified(t *testing.T) {
+// Only verified findings rate the change, so an alarmed finder with nothing
+// that survives verification cannot make a clean change high risk.
+func TestReviewStep_MultiAngleRiskComesOnlyFromVerifiedFindings(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
@@ -215,7 +217,7 @@ func TestReviewStep_MultiAngleRiskIsTheMedianFinderWhenNothingVerified(t *testin
 		return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "high"})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
 	if err != nil {
@@ -231,9 +233,8 @@ func TestReviewStep_MultiAngleRiskIsTheMedianFinderWhenNothingVerified(t *testin
 }
 
 // A finder that cannot produce a review fails the step: an unrun angle must
-// not read as a clean one. A failing route is retried once on the configured
-// model first.
-func TestReviewStep_MultiAngleFinderFailureFailsClosedAfterOneDefaultRouteRetry(t *testing.T) {
+// not read as a clean one.
+func TestReviewStep_MultiAngleFinderFailureFailsClosed(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
 	ag := &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
@@ -243,15 +244,55 @@ func TestReviewStep_MultiAngleFinderFailureFailsClosedAfterOneDefaultRouteRetry(
 		return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "high"})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
 	sctx.Config.Review.Routes = config.ReviewRoutesRaw{Finders: []string{"r/one"}}
 
 	if _, err := (&ReviewStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), "provider unavailable") {
 		t.Fatalf("err = %v, want the finder failure", err)
 	}
-	regressions := ag.callsMatching("You are the regressions finder")
-	if len(regressions) != 2 || regressions[0].Tuning.Model != "r/one" || regressions[1].Tuning.Model != "" {
-		t.Fatalf("regressions finder calls = %d, want the route then one retry on the configured model", len(regressions))
+	if n := len(ag.callsMatching("You are the regressions finder")); n != 1 {
+		t.Fatalf("regressions finder calls = %d, want 1 (no extra retry layer)", n)
+	}
+}
+
+// The verify cap bounds agents, not findings: a claim past it was never
+// disproved, so it is kept as plausible.
+func TestReviewStep_MultiAngleClaimsPastTheVerifyCapStayPlausible(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	var items []string
+	for i := 0; i < 13; i++ {
+		items = append(items, fmt.Sprintf(`{"severity":"error","action":"auto-fix","file":"f%d.go","line":1,"description":"defect number %d","review_scope":"source"}`, i, i))
+	}
+	correctness := `{"findings":[` + strings.Join(items, ",") + `],"risk_level":"high","risk_rationale":"many","risk_scope":"source-or-external"}`
+	ag := &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
+		if strings.HasPrefix(opts.Prompt, verifyPromptMarker) {
+			return &agent.Result{Output: json.RawMessage(`{"verdict":"confirmed","evidence":"seen"}`)}, nil
+		}
+		if strings.Contains(opts.Prompt, "You are the correctness finder") {
+			return &agent.Result{Output: json.RawMessage(correctness)}, nil
+		}
+		return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	findings, _ := types.ParseFindingsJSON(outcome.Findings)
+	if n := len(ag.callsMatching(verifyPromptMarker)); n != 12 {
+		t.Fatalf("verify calls = %d, want the high-level cap of 12", n)
+	}
+	plausible := 0
+	for _, item := range findings.Items {
+		if strings.HasPrefix(item.Description, "[PLAUSIBLE]") {
+			plausible++
+		}
+	}
+	if len(findings.Items) != 13 || plausible != 1 {
+		t.Fatalf("findings = %d (%d plausible), want all 13 with the one past the cap plausible", len(findings.Items), plausible)
 	}
 }
 
@@ -270,7 +311,7 @@ func TestReviewStep_MultiAngleVerifierFailureKeepsTheClaimPlausible(t *testing.T
 		return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
-	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{Effort: "high"})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
 
 	outcome, err := (&ReviewStep{}).Execute(sctx)
 	if err != nil {
@@ -307,10 +348,19 @@ func TestReviewStep_SmallChangeRunsOneLightReviewer(t *testing.T) {
 }
 
 func TestDedupeFindingsKeepsDistinctClaimsApart(t *testing.T) {
+	// Neighboring timeouts share most of their wording and are still two
+	// defects.
+	timeouts := dedupeFindings([]Findings{{Items: []Finding{
+		{Severity: "warning", File: "srv.go", Line: 10, Description: "ReadTimeout multiplies by seconds instead of milliseconds"},
+		{Severity: "warning", File: "srv.go", Line: 11, Description: "WriteTimeout multiplies by milliseconds instead of seconds"},
+	}}}, []string{"correctness"})
+	if len(timeouts) != 2 {
+		t.Fatalf("timeout claims merged: %+v", timeouts)
+	}
 	results := []Findings{
 		{Items: []Finding{{Severity: "warning", File: "a.go", Line: 10, Description: "missing nil check on config loader result"}}},
 		{Items: []Finding{
-			{Severity: "error", File: "a.go", Line: 12, Description: "config loader result nil check missing, panics"},
+			{Severity: "error", File: "a.go", Line: 10, Description: "missing nil check on config loader result panics"},
 			{Severity: "warning", File: "a.go", Line: 11, Description: "metric name typo in exporter label"},
 			{Severity: "warning", File: "b.go", Line: 10, Description: "missing nil check on config loader result"},
 		}},

@@ -3,6 +3,7 @@ package steps
 import (
 	"fmt"
 	"path"
+	"slices"
 	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -88,9 +89,17 @@ func finderRoute(routes config.ReviewRoutesRaw, i int) string {
 }
 
 func classifyReview(sizing config.ReviewSizing, workload *agent.InvocationWorkload, changed []string) (string, string) {
-	if sizing.Effort != "" && sizing.Effort != config.ReviewEffortAuto {
-		return sizing.Effort, "review.sizing.effort is " + sizing.Effort
+	if sizing.Fixed != "" {
+		return sizing.Fixed, "fixed at " + sizing.Fixed
 	}
+	effort, reason := sizeReview(sizing, workload, changed)
+	if slices.Index(config.ReviewEffortLevels, sizing.MinEffort) > slices.Index(config.ReviewEffortLevels, effort) {
+		return sizing.MinEffort, reason + "; review.sizing.min_effort raises it to " + sizing.MinEffort
+	}
+	return effort, reason
+}
+
+func sizeReview(sizing config.ReviewSizing, workload *agent.InvocationWorkload, changed []string) (string, string) {
 	if risky := firstRiskyPath(changed, sizing.RiskyPaths); risky != "" {
 		return config.ReviewEffortHigh, "touches risky path " + risky
 	}
