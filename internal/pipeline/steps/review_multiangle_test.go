@@ -70,6 +70,14 @@ func TestPlanReviewBoundsAgentsAndTurnsPerLevel(t *testing.T) {
 			t.Fatalf("%s: finder and verify agents must carry turn bounds and the verify route: %+v", tc.effort, plan)
 		}
 	}
+	for _, effort := range []string{"low", "medium", "high", "xhigh", "max"} {
+		plan := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: effort}), routes, &agent.InvocationWorkload{}, nil)
+		for _, tuning := range []*agent.InvocationTuning{plan.Tuning, &plan.FinderTuning, &plan.VerifyTuning} {
+			if tuning != nil && tuning.Effort != "" && tuning.Effort != "low" && tuning.Effort != "high" {
+				t.Fatalf("%s plan uses effort %q; only low and high are accepted by every gateway route", effort, tuning.Effort)
+			}
+		}
+	}
 	low := planReview(config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "low"}), routes, &agent.InvocationWorkload{}, nil)
 	if low.Tuning == nil || low.Tuning.Model != "light/route" || low.Tuning.Effort != "low" || low.Tuning.MaxTurns == 0 {
 		t.Fatalf("low review tuning = %+v, want the light route at low effort with a turn bound", low.Tuning)
