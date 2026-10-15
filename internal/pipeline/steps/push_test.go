@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testgit"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func setupGateMirror(t *testing.T, sctx *pipeline.StepContext) string {
@@ -1588,5 +1589,66 @@ func TestPushStep_DetachedGateWorktreePreservesDescendantAfterEmptyIndex(t *test
 	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil || persisted == nil || persisted.HeadSHA != reviewedHead || persisted.LastPushedSHA == nil || *persisted.LastPushedSHA != reviewedHead {
 		t.Fatalf("publication binding = %+v, err = %v, want reviewed head %s", persisted, err, reviewedHead)
+	}
+}
+
+func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, headSHA)
+
+	deferred := filepath.Join(dir, "deferred.txt")
+	if err := os.WriteFile(deferred, []byte("survived but unselected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI); err != nil {
+		t.Fatal(err)
+	}
+	work, _ := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID, func(w *types.SurvivedWork) error {
+		return sctx.DB.SetRunSurvivedWork(sctx.Run.ID, w)
+	})
+	if work == nil || work.Ref == "" {
+		t.Fatalf("survived work not captured: %+v", work)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("capture left the worktree dirty: %q", got)
+	}
+	// A restart from review resets the step rows; the handoff is the run's.
+	if err := sctx.DB.ResetStepsFrom(sctx.Run.ID, types.StepReview.Order()); err != nil {
+		t.Fatal(err)
+	}
+	survived, err := sctx.DB.GetRunSurvivedWork(sctx.Run.ID)
+	if err != nil || survived == nil || survived.Ref != work.Ref {
+		t.Fatalf("survived-work evidence after restart = %+v, %v", survived, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	pushedHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
+	if !fileAtRef(t, upstream, pushedHead, "selected.txt") {
+		t.Fatal("selected repair was not published")
+	}
+	if fileAtRef(t, upstream, pushedHead, "deferred.txt") {
+		t.Fatal("deferred survived work was published")
+	}
+	if got := gitCmd(t, dir, "show", work.Ref+":deferred.txt"); got != "survived but unselected" {
+		t.Fatalf("deferred survived work was not retained in %s: %q", work.Ref, got)
 	}
 }

@@ -1202,7 +1202,52 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		reviewStartingHeadSHA := run.HeadSHA
 		sctx.ReviewStartingHeadSHA = reviewStartingHeadSHA
 		fixRound := sctx.Fixing
-		outcome, err := step.Execute(sctx)
+		// An authorized fix round first gets back the work an earlier repair
+		// of this run left when it was cut short (see survived_work.go), so it
+		// can continue it; until then that work sits in a run-owned ref where
+		// nothing can commit or publish it.
+		// Survived-work errors fail the step through the same path as a step
+		// error, so the step and its events reach a terminal state.
+		sctx.RestoredSurvivedWork = nil
+		var outcome *StepOutcome
+		var err error
+		// Only steps whose fix round runs a repair agent get the work back:
+		// Rebase's resolver needs a clean worktree, and a Push or PR retry
+		// would publish it with no agent continuing it.
+		if fixRound && restoresSurvivedWork(stepName) {
+			sctx.RestoredSurvivedWork, err = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
+		} else if !fixRound {
+			// Restored work a shutdown left in the worktree goes back into a
+			// ref before a round that is not a repair can see it; work that
+			// cannot be moved out stops the round instead of being run over
+			// (a catch-all commit would publish it).
+			err = e.settleSurvivedWork(run.ID, sctx.WorkDir, false, writeLog)
+			if err == nil {
+				err = e.refuseSurvivedWorkInWorktree(run.ID, sctx.WorkDir)
+			}
+		}
+		if err == nil {
+			outcome, err = step.Execute(sctx)
+			// Only repair steps capture: another step's leftovers are not a
+			// repair to continue, and capturing them would replace a handoff
+			// they never contained.
+			timedOut := fixRound && restoresSurvivedWork(stepName) && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout) || errors.Is(err, ErrTestAgentTimeout))
+			// A timed-out repair's leftovers, and restored work a round did
+			// not commit, go back where nothing can publish them. Not while the
+			// round was cancelled (shutdown or abort) or a repair it dispatched
+			// may still be running: an independent repair wrapper may still be
+			// editing the worktree, the handoff stays restored, and cleanup
+			// keeps the worktree.
+			// Nor on a protected-path refusal, which leaves the index and
+			// files in place for the operator to inspect and resolve; the
+			// handoff stays restored and the next round continues it.
+			refused := ProtectedPathOutcome(err) != nil || (outcome != nil && HasProtectedPathRefusal(outcome.Findings))
+			if (timedOut || sctx.RestoredSurvivedWork != nil) && !refused && e.mayTouchRepairWorktree(sctx, run.ID, err) {
+				if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
+					outcome, err = nil, errors.Join(err, settleErr)
+				}
+			}
+		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
 			outcome, err = refusal, nil
 		}
@@ -1571,6 +1616,128 @@ done:
 	}
 	e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(status), "", "", &durationMS)
 	return skipRemaining, restartFrom, nil
+}
+
+// restoreSurvivedWork puts the run's captured work back before an authorized
+// fix round, recording in_place before touching the worktree and restored
+// only after restoration completes, so a crash cannot certify a partial restore.
+// Work a shutdown left restored is continued as it is. A failed restore keeps
+// the capture and stops the round rather than continuing without its work.
+func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(string)) (*types.SurvivedWork, error) {
+	work, err := e.db.GetRunSurvivedWork(runID)
+	if err != nil {
+		return nil, err
+	}
+	if work == nil || (work.State == types.SurvivedWorkInPlace && work.Ref == "") {
+		return nil, nil
+	}
+	unclean := survivedWorkUnclean(workDir)
+	// Work whose capture could not be removed from the worktree is split:
+	// part in the ref, part still in the worktree. Neither half can be
+	// continued alone without losing the other, so the round stops for a
+	// hand recovery until the worktree is clean again.
+	if work.State == types.SurvivedWorkInPlace && unclean {
+		return nil, fmt.Errorf("interrupted repair work is split between %s and the worktree %s; recover it by hand (git diff %s %s) and clean the worktree before another repair", work.Ref, workDir, work.BaseSHA, work.Ref)
+	}
+	// Restored is recorded only once a restore completed, so a clean
+	// worktree under it means the repair committed the work before the
+	// round was cut off (a resumed round): it is consumed, not restored
+	// again onto the head that already holds it.
+	if work.State == types.SurvivedWorkRestored && !unclean {
+		writeLog("interrupted repair work from " + work.Ref + " was already committed")
+		return nil, ClearSurvivedWork(e.db, runID, workDir)
+	}
+	if work.State == types.SurvivedWorkRestored && unclean {
+		writeLog("continuing interrupted repair work restored from " + work.Ref)
+		return work, nil
+	}
+	// While the restore writes the worktree the work is split between the
+	// ref and a partly restored worktree, so it is recorded in place: a crash
+	// part way through then reads as split, never as a complete restore.
+	restoring := *work
+	restoring.State, restoring.Worktree = types.SurvivedWorkInPlace, workDir
+	if err := e.db.SetRunSurvivedWork(runID, &restoring); err != nil {
+		return nil, err
+	}
+	restored := restoring
+	restored.State = types.SurvivedWorkRestored
+	if err := RestoreSurvivedWork(workDir, work); err != nil {
+		// The round stops rather than running without the work: a capture
+		// it then took would replace this one, which it never contained.
+		captured := *work
+		captured.State = types.SurvivedWorkCaptured
+		if dbErr := e.db.SetRunSurvivedWork(runID, &captured); dbErr != nil {
+			return nil, dbErr
+		}
+		return nil, fmt.Errorf("could not restore interrupted repair work from %s, which stays captured there: %w", work.Ref, err)
+	}
+	if err := e.db.SetRunSurvivedWork(runID, &restored); err != nil {
+		return nil, err
+	}
+	writeLog("restored interrupted repair work from " + work.Ref + " for this repair to continue")
+	return &restored, nil
+}
+
+// settleSurvivedWork ends a round that timed out or started with restored
+// work. Whatever the worktree still holds is captured again and replaces the
+// run's handoff. A clean worktree after restored work means the repair
+// committed it, so the handoff is cleared. When the step already settled the
+// restored work itself (the CI repair captures on its own timeout), the
+// handoff is no longer marked restored and is left alone.
+func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writeLog func(string)) error {
+	current, err := e.db.GetRunSurvivedWork(runID)
+	if err != nil {
+		return err
+	}
+	wasRestored := current != nil && current.State == types.SurvivedWorkRestored
+	if !timedOut && !wasRestored {
+		return nil
+	}
+	work, err := CaptureSurvivedWork(workDir, runID, SurvivedWorkRecorder(e.db, runID, workDir))
+	switch {
+	case work != nil && timedOut:
+		writeLog("interrupted repair left uncommitted work: " + work.Next)
+	case work != nil:
+		writeLog("restored repair work was not committed this round: " + work.Next)
+	case wasRestored:
+		return ClearSurvivedWork(e.db, runID, workDir)
+	}
+	return err
+}
+
+// refuseSurvivedWorkInWorktree stops a round that is not a repair while the
+// run's interrupted repair work is still in the worktree (it could not be
+// captured, or a refusal left it restored), until it is recovered by hand.
+func (e *Executor) refuseSurvivedWorkInWorktree(runID, workDir string) error {
+	work, err := e.db.GetRunSurvivedWork(runID)
+	if err != nil || work == nil || work.State == types.SurvivedWorkCaptured {
+		return err
+	}
+	if !survivedWorkUnclean(workDir) {
+		return nil
+	}
+	return fmt.Errorf("interrupted repair work is still in the worktree %s (%s); only a repair may continue it: %s", workDir, work.State, work.Next)
+}
+
+// restoresSurvivedWork reports whether a step's fix round runs a repair
+// agent that continues captured work.
+func restoresSurvivedWork(step types.StepName) bool {
+	switch step {
+	case types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepCI:
+		return true
+	}
+	return false
+}
+
+// mayTouchRepairWorktree reports whether settlement may snapshot and reset
+// the worktree after a round: not once the round was cancelled, and not
+// while a repair it dispatched may still be running.
+func (e *Executor) mayTouchRepairWorktree(sctx *StepContext, runID string, err error) bool {
+	if errors.Is(err, ErrDaemonShutdown) || errors.Is(err, context.Canceled) || (sctx.Ctx != nil && sctx.Ctx.Err() != nil) {
+		return false
+	}
+	active, dispatchErr := e.db.HasStartedRepairDispatch(runID)
+	return dispatchErr == nil && !active
 }
 
 // applyReviewRoundCap enforces review.max_rounds on one review outcome. Once

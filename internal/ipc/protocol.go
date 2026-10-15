@@ -378,6 +378,9 @@ type RunInfo struct {
 	// Steps rather than a separate DB column, so a run-level consumer such as
 	// axi's outcome wording does not need to inspect every step itself.
 	CIOverrideReason string `json:"ci_override_reason,omitempty"`
+	// SurvivedWork is the run's interrupted-repair handoff, if any (see
+	// pipeline/survived_work.go). Local-only operator evidence.
+	SurvivedWork *types.SurvivedWork `json:"survived_work,omitempty"`
 	// StateRev is the monotonic run-state revision this snapshot is at least
 	// as new as. It is sampled before the database read, so every event at or
 	// below it is already reflected here and every event above it still

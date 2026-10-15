@@ -604,11 +604,16 @@ func TestPushReceivedKeepsConcurrentForgeProfilesIsolated(t *testing.T) {
 	}
 
 	observed := make(map[string]capturedForgeContext, 2)
+	// Reaching the barrier includes spawning Git to capture its environment.
+	// Windows process-spawn load can exceed 3s; concurrency is proved by both
+	// runs arriving before release, not by their startup speed.
+	timeout := time.NewTimer(30 * time.Second)
+	defer timeout.Stop()
 	for range 2 {
 		select {
 		case captured := <-contexts:
 			observed[captured.repoID] = captured
-		case <-time.After(3 * time.Second):
+		case <-timeout.C:
 			t.Fatal("concurrent forge runs did not reach barrier")
 		}
 	}

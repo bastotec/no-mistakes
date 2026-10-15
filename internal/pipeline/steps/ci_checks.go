@@ -398,15 +398,12 @@ func ciHistoryRefusalOutcome(sctx *pipeline.StepContext, err error) *pipeline.St
 // its worktree alive rather than tearing them down, and leaves any further
 // attempt to the operator, who can respond with a fix selection to spend
 // another budget deliberately.
-func ciFixAgentTimeoutOutcome(issueDesc string, dirtyWorktree string, err error) *pipeline.StepOutcome {
+func ciFixAgentTimeoutOutcome(issueDesc string, err error) *pipeline.StepOutcome {
 	description := fmt.Sprintf(
 		"The CI auto-fix agent did not finish within its invocation budget while repairing: %s. "+
 			"Reported: %v. Re-running the same request costs another full budget, so no further attempt is made automatically. "+
 			"Check that the configured agent CLI is authenticated and responsive, then respond with a fix selection to spend another budget, or resolve the CI failure outside the pipeline.",
 		issueDesc, err)
-	if dirtyWorktree != "" {
-		description += fmt.Sprintf(" The timed-out agent left uncommitted changes in the run worktree at %s; they are not committed or pushed.", dirtyWorktree)
-	}
 	findings := Findings{
 		Summary: "CI auto-fix agent exceeded its invocation budget",
 		Items: []Finding{{

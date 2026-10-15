@@ -281,7 +281,7 @@ CI logs:
 	prompt += roundHistoryPromptSection(sctx)
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
-	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt))
+	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt)) + pipeline.SurvivedWorkPrompt(sctx.RestoredSurvivedWork)
 
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
@@ -539,19 +539,19 @@ func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err e
 		return nil
 	}
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
-	return ciFixAgentTimeoutOutcome(issueDesc, dirtyRunWorktree(sctx), err)
-}
-
-// dirtyRunWorktree reports the run worktree path when the timed-out agent left
-// uncommitted work there, so the gate can say where it is instead of letting it
-// disappear with the worktree at cleanup. Best effort: an unreadable status
-// simply omits the detail.
-func dirtyRunWorktree(sctx *pipeline.StepContext) string {
-	status, err := stepGitRun(sctx, "status", "--porcelain")
-	if err != nil || strings.TrimSpace(status) == "" {
-		return ""
+	// The handoff is recorded on the run before the worktree is cleaned.
+	var record func(*types.SurvivedWork) error
+	if sctx.DB != nil {
+		record = pipeline.SurvivedWorkRecorder(sctx.DB, sctx.Run.ID, sctx.WorkDir)
 	}
-	return sctx.WorkDir
+	work, recordErr := pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID, record)
+	if work != nil {
+		sctx.Log("interrupted repair left uncommitted work: " + work.Next)
+	}
+	if recordErr != nil {
+		sctx.Log("could not record the interrupted repair handoff: " + recordErr.Error())
+	}
+	return ciFixAgentTimeoutOutcome(issueDesc, err)
 }
 
 // ciRepairResult reports what a repair did to the run. The monitor needs both

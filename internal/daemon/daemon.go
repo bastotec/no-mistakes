@@ -877,6 +877,10 @@ func removableOrphanWorktree(d *db.DB, wt orphanWorktree) bool {
 		slog.Warn("preserving run worktree: cannot read run", "run_id", wt.runID, "error", err)
 		return false
 	}
+	if reason := survivedWorkCleanupReason(d, run, wt.dir); reason != "" {
+		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
+		return false
+	}
 	if reason := protectedPathCleanupReason(d, run); reason != "" {
 		slog.Info("skipping worktree cleanup", "path", wt.dir, "reason", reason)
 		return false
@@ -937,6 +941,48 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 		}
 	}
 	return false, ""
+}
+
+// survivedWorkCleanupReason has no abort exemption: aborting a run is not
+// authorization to destroy uncommitted repairs. Captured work lives in a
+// run-owned ref, not the worktree, so it never holds the worktree. Work left
+// in place, or restored for a round that never settled, keeps it until the
+// worktree is clean again; then the stale handoff is dropped.
+func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
+	if run == nil {
+		return ""
+	}
+	if pipeline.SurvivedWorkMarked(workDir) {
+		return "interrupted repair left unrecorded uncommitted work; preserving worktree"
+	}
+	work, err := d.GetRunSurvivedWork(run.ID)
+	if err != nil {
+		return "cannot read survived-work evidence"
+	}
+	if work == nil || work.State == types.SurvivedWorkCaptured {
+		return ""
+	}
+	if pipeline.SurvivedWorkHoldsWorktree(work, workDir) {
+		return "interrupted repair has uncommitted or unreadable work; preserving worktree"
+	}
+	// In-place work with a ref and a clean worktree is all in the ref - a
+	// capture whose final write failed, or split work recovered by hand - so
+	// it becomes captured, which a rerun inherits. Without a ref it was all
+	// in the worktree, which is clean now.
+	if work.State == types.SurvivedWorkInPlace && work.Ref != "" {
+		captured := *work
+		captured.State, captured.InspectionError = types.SurvivedWorkCaptured, ""
+		if err := d.SetRunSurvivedWork(run.ID, &captured); err != nil {
+			return "cannot record survived-work evidence"
+		}
+		return ""
+	}
+	if work.State == types.SurvivedWorkInPlace && work.Ref == "" {
+		if err := pipeline.ClearSurvivedWork(d, run.ID, workDir); err != nil {
+			return "cannot clear survived-work evidence"
+		}
+	}
+	return ""
 }
 
 // protectedPathCleanupReason protects only the index and working files. It must
@@ -1478,6 +1524,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 		CreatedAt:              r.CreatedAt,
 		UpdatedAt:              r.UpdatedAt,
+	}
+	if work, err := d.GetRunSurvivedWork(r.ID); err == nil {
+		info.SurvivedWork = work
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))

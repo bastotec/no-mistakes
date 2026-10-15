@@ -32,6 +32,9 @@ type StepContext struct {
 	ReviewStartingHeadSHA string
 	PreviousFindings      string // JSON findings selected for the current fix round
 	DeferredFindings      string // JSON findings left unselected when the current fix round began
+	// RestoredSurvivedWork is the interrupted repair work the executor put
+	// back into the worktree for this fix round to continue, if any.
+	RestoredSurvivedWork *types.SurvivedWork
 	// FixWithoutRereview is set on a review fix accepted at review.max_rounds:
 	// the fix turn runs and commits, and no rereview follows it. The executor
 	// records the outcome from the gate findings instead.

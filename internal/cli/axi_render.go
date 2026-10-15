@@ -131,6 +131,8 @@ type runView struct {
 	// it to keep a deliberate override from reading identically to a
 	// genuinely green run in agent-facing output.
 	CIOverrideReason string
+	// SurvivedWork is the run's interrupted-repair handoff, if any.
+	SurvivedWork *types.SurvivedWork
 }
 
 func runViewFromIPC(r *ipc.RunInfo) runView {
@@ -146,6 +148,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 		CIOverrideReason:       r.CIOverrideReason,
+		SurvivedWork:           r.SurvivedWork,
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -191,6 +194,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		PRBaseBranch:           r.PRBaseBranch,
 		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
 		AwaitingAgentSince:     r.AwaitingAgentSince,
+	}
+	if database != nil {
+		rv.SurvivedWork, _ = database.GetRunSurvivedWork(r.ID)
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -492,6 +498,9 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		fields = append(fields, toon.Field{Key: "pr", Value: rv.PRURL})
 	}
 	fields = append(fields, toon.Field{Key: "findings", Value: rv.findingsTally()})
+	if rv.SurvivedWork != nil {
+		fields = append(fields, survivedWorkField(rv.SurvivedWork))
+	}
 
 	rows := make([]stepRow, 0, len(rv.Steps))
 	sharedRows := make([]sharedWorkRow, 0, 1)
@@ -775,4 +784,23 @@ func emitError(cmd *cobra.Command, code int, msg string, help ...string) error {
 	}
 	emitDoc(cmd, fields...)
 	return &exitError{code: code}
+}
+
+// survivedWorkField renders the run's interrupted-repair handoff.
+func survivedWorkField(work *types.SurvivedWork) toon.Field {
+	fields := []toon.Field{
+		{Key: "state", Value: string(work.State)},
+		{Key: "worktree", Value: work.Worktree},
+	}
+	if len(work.Files) > 0 {
+		fields = append(fields, toon.Field{Key: "files", Value: work.Files})
+	}
+	if work.Ref != "" {
+		fields = append(fields, toon.Field{Key: "ref", Value: work.Ref}, toon.Field{Key: "base_sha", Value: work.BaseSHA})
+	}
+	if work.InspectionError != "" {
+		fields = append(fields, toon.Field{Key: "inspection_error", Value: work.InspectionError})
+	}
+	fields = append(fields, toon.Field{Key: "next", Value: work.Next})
+	return toon.Field{Key: "survived_work", Value: toon.NewObject(fields...)}
 }

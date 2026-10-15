@@ -1502,8 +1502,11 @@ func TestCIStep_FixAgentBudgetExhaustionParksForADecisionInsteadOfRetrying(t *te
 	var invocations int
 	ag := &mockAgent{
 		name: "wedged",
-		runFn: func(ctx context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 			invocations++
+			if err := os.WriteFile(filepath.Join(opts.CWD, "partial-ci-fix.txt"), []byte("survived"), 0o644); err != nil {
+				return nil, err
+			}
 			<-ctx.Done()
 			return nil, errors.New("pi exited: unable to access 'https://operator:secret@example.com/owner/repo.git': denied")
 		},
@@ -1545,6 +1548,14 @@ func TestCIStep_FixAgentBudgetExhaustionParksForADecisionInsteadOfRetrying(t *te
 	var findings Findings
 	if jsonErr := json.Unmarshal([]byte(outcome.Findings), &findings); jsonErr != nil {
 		t.Fatalf("parse findings %q: %v", outcome.Findings, jsonErr)
+	}
+	// This context has no run row, so the handoff cannot be recorded and the
+	// timed-out agent's edit stays in the worktree, said so in the step log.
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "partial-ci-fix.txt") {
+		t.Fatalf("unrecorded repair work left the worktree: %q", got)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "interrupted repair left uncommitted work: Left uncommitted in the run worktree") {
+		t.Fatalf("handoff not logged: %v", logs)
 	}
 	if len(findings.Items) != 3 {
 		t.Fatalf("findings = %#v, want timeout, selected check, and deferred bot findings", findings.Items)

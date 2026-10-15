@@ -21,6 +21,9 @@ var ErrAgentTimeout = errors.New("agent timeout")
 // ErrReviewAgentTimeout is the review turn's distinct absolute deadline cause.
 var ErrReviewAgentTimeout = errors.New("review agent timeout")
 
+// ErrTestAgentTimeout is the Test turn's distinct deadline cause.
+var ErrTestAgentTimeout = errors.New("test agent timeout")
+
 // ErrAgentBudget reports that the native adapter exhausted its turn budget.
 var ErrAgentBudget = errors.New("agent turn budget exhausted")
 

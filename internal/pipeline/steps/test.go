@@ -513,7 +513,7 @@ func testAgentContext(sctx *pipeline.StepContext) (context.Context, context.Canc
 	return ctx, cancel, timeout
 }
 
-var errTestAgentTimeout = errors.New("test agent timeout")
+var errTestAgentTimeout = pipeline.ErrTestAgentTimeout
 
 // testAgentError renders a Test-invocation budget expiry. It keeps the agent's
 // own error rather than replacing it with the bare context cause: for a native

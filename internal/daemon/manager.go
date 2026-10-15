@@ -658,6 +658,10 @@ func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason str
 		slog.Warn("preserving run worktree: cannot read run", "run_id", runID, "error", err)
 		return
 	}
+	if refusal := survivedWorkCleanupReason(m.db, run, wtDir); refusal != "" {
+		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
+		return
+	}
 	if refusal := protectedPathCleanupReason(m.db, run); refusal != "" {
 		slog.Warn("preserving run worktree", "run_id", runID, "path", wtDir, "reason", refusal)
 		return
@@ -1134,7 +1138,31 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	// A rerun is not an operator claiming the pull request's head: the branch's
 	// own association supplies the target, and the head it publishes is proven
 	// against the remote before the push like every other run's.
+	// The rerun takes over the selected run's captured repair work, so its
+	// next authorized repair restores it: a repair timeout that failed its
+	// step ends the run, where no repair can reach the work any more.
+	ctx = withSurvivedWorkFrom(ctx, selectedRun.ID)
 	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), "")
+}
+
+type survivedWorkFromKey struct{}
+
+// withSurvivedWorkFrom asks run creation to take over fromRunID's captured
+// repair work (see carrySurvivedWork).
+func withSurvivedWorkFrom(ctx context.Context, fromRunID string) context.Context {
+	return context.WithValue(ctx, survivedWorkFromKey{}, fromRunID)
+}
+
+// carrySurvivedWork copies the captured repair work of the run named by ctx
+// (withSurvivedWorkFrom) to the run being created, naming its recorded
+// worktree. It runs before the run launches and a failure fails the start;
+// the original stays, so a setup that fails later strands nothing.
+func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree string) error {
+	fromRunID, _ := ctx.Value(survivedWorkFromKey{}).(string)
+	if fromRunID == "" {
+		return nil
+	}
+	return m.db.CopyRunSurvivedWork(fromRunID, toRunID, worktree)
 }
 
 func inheritablePRURL(run *db.Run) string {
@@ -1513,6 +1541,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("record worktree placement: %s", err))
 		trackStartFailure("record_worktree_placement")
 		return "", fmt.Errorf("record worktree placement: %w", err)
+	}
+	if err := m.carrySurvivedWork(ctx, run.ID, wtDir); err != nil {
+		m.db.UpdateRunError(run.ID, fmt.Sprintf("carry interrupted repair work: %s", err))
+		trackStartFailure("carry_survived_work")
+		return "", fmt.Errorf("carry interrupted repair work: %w", err)
 	}
 	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
