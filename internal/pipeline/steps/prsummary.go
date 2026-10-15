@@ -1227,6 +1227,19 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		}
 	}
 
+	// A review that went on without an angle says so on whatever status it
+	// reaches, and never with a clean pass mark.
+	if sr.StepName == types.StepReview && finalFindings != nil && len(finalFindings.ReviewUnreviewed) > 0 {
+		unreviewed := strings.Join(finalFindings.ReviewUnreviewed, ", ")
+		withStatus := buildDetail
+		buildDetail = func(line string) (string, string) {
+			if rest, ok := strings.CutPrefix(line, "✅ "); ok {
+				line = "⚠️ " + rest
+			}
+			return withStatus(line + ", not reviewed: " + unreviewed)
+		}
+	}
+
 	// Parse initial round findings (round 1) for the full story.
 	var initialFindings *types.Findings
 	if len(rounds) > 0 && rounds[0].FindingsJSON != nil {
@@ -1267,11 +1280,6 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	// Unreadable final findings - can't make claims about the outcome.
 	if hasUnreadableFinalFindings {
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
-	}
-
-	// A review that went on without an angle never reads as a clean pass.
-	if sr.StepName == types.StepReview && finalFindings != nil && len(finalFindings.ReviewUnreviewed) > 0 && !hadAnyFindings {
-		return buildDetail(fmt.Sprintf("⚠️ **%s** - passed, not reviewed: %s", name, strings.Join(finalFindings.ReviewUnreviewed, ", ")))
 	}
 
 	if sr.StepName == types.StepReview && (riskLevel == "medium" || riskLevel == "high") && !hadAnyFindings {

@@ -75,3 +75,17 @@ func TestBuildPipelineSummary_NamesUnreviewedAngles(t *testing.T) {
 		t.Fatalf("review with an unreviewed angle reads as a clean pass:\n%s", md)
 	}
 }
+
+// After a fix cycle the status keeps its fix narrative and still names the
+// angle the last review went on without.
+func TestBuildPipelineSummary_NamesUnreviewedAnglesAfterAFix(t *testing.T) {
+	t.Parallel()
+	first := `{"findings":[{"id":"R1","severity":"warning","description":"bug","action":"auto-fix"}],"risk_level":"medium","risk_rationale":"r"}`
+	last := `{"findings":[],"risk_level":"low","risk_rationale":"clean","review_unreviewed":["security"]}`
+	steps := []*db.StepResult{{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &last}}
+	rounds := map[string][]*db.StepRound{"review": {{Round: 1, Trigger: "initial", FindingsJSON: &first}, {Round: 2, Trigger: "auto_fix", FindingsJSON: &last}}}
+	md, _ := buildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderUnknown, pipelineAttestationPolicy{})
+	if !strings.Contains(md, "🔧 **Review** - 1 issue found") || !strings.Contains(md, "✅, not reviewed: security</summary>") {
+		t.Fatalf("fix narrative lost the unreviewed angle:\n%s", md)
+	}
+}
