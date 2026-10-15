@@ -656,3 +656,44 @@ func TestRestoreSurvivedWork_MovedHeadIgnoresNoprefixConfig(t *testing.T) {
 		t.Fatalf("config.json = %q, the edit landed on the wrong file", got)
 	}
 }
+
+// Unstaged-only work merges three-way onto a moved HEAD whose change sits in
+// the patch's context.
+func TestRestoreSurvivedWork_OnAMovedHeadMergesUnstagedWork(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "lines.txt", "1\n2\n3\n4\n5\n6\n7\n")
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-qm", "lines")
+	writeFile(t, dir, "lines.txt", "1\n2\n3\n4\nfive\n6\n7\n")
+	work, _ := CaptureSurvivedWork(dir, "run-15", nil)
+	writeFile(t, dir, "lines.txt", "1\n2\nthree\n4\n5\n6\n7\n")
+	gitRun(t, dir, "commit", "-qam", "head moved")
+	if err := RestoreSurvivedWork(dir, work); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, dir, "lines.txt"); got != "1\n2\nthree\n4\nfive\n6\n7\n" {
+		t.Fatalf("merged = %q", got)
+	}
+	if staged := gitRun(t, dir, "diff", "--cached", "--name-only"); staged != "" {
+		t.Fatalf("unstaged work came back staged: %q", staged)
+	}
+}
+
+// Test's own deadline is a repair timeout too.
+func TestExecutor_TestAgentTimeoutCapturesSurvivedWork(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		writeFile(t, dir, "progress.txt", "survived")
+		return nil, fmt.Errorf("fix: %w", ErrTestAgentTimeout)
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+	_ = exec.Execute(context.Background(), run, repo, dir)
+	work, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || work == nil || work.State != types.SurvivedWorkCaptured {
+		t.Fatalf("Test timeout left no handoff: %+v %v", work, err)
+	}
+}

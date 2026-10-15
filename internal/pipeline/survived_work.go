@@ -314,9 +314,10 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 		}
 		return nil
 	}
-	// Both layers go back: the index commit three-way onto the moved HEAD
-	// and into the index, then the working-tree commit on top of it into
-	// the working tree only, so staged-only work survives too.
+	// Both layers go back, each merged three-way: the index commit onto the
+	// moved HEAD into the index, then the working-tree commit on top of it,
+	// so staged-only work survives too and the index keeps only what was
+	// staged.
 	undo := func() {
 		_, _ = git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD")
 		_, _ = git.Run(ctx, workDir, "clean", "-fdq")
@@ -325,9 +326,20 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 		undo()
 		return fmt.Errorf("captured staged work does not apply to the moved HEAD: %w", err)
 	}
-	if err := applySurvivedLayer(ctx, workDir, work.Ref+"^", work.Ref); err != nil {
+	// The unstaged layer is merged three-way as well, which needs the
+	// index; the index then goes back to the staged layer alone.
+	stagedTree, err := git.Run(ctx, workDir, "write-tree")
+	if err != nil {
+		undo()
+		return fmt.Errorf("record restored staged work: %w", err)
+	}
+	if err := applySurvivedLayer(ctx, workDir, work.Ref+"^", work.Ref, "--3way", "--index"); err != nil {
 		undo()
 		return fmt.Errorf("captured unstaged work does not apply to the moved HEAD: %w", err)
+	}
+	if _, err := git.Run(ctx, workDir, "read-tree", strings.TrimSpace(stagedTree)); err != nil {
+		undo()
+		return fmt.Errorf("restore the staged layer: %w", err)
 	}
 	return nil
 }
