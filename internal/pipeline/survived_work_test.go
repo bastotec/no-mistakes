@@ -697,3 +697,29 @@ func TestExecutor_TestAgentTimeoutCapturesSurvivedWork(t *testing.T) {
 		t.Fatalf("Test timeout left no handoff: %+v %v", work, err)
 	}
 }
+
+// Rebase's fix round never gets captured work back: its resolver needs a
+// clean worktree.
+func TestExecutor_RebaseFixRoundDoesNotRestore(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	_, _ = CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	var sawWork bool
+	step := &adaptiveCallStep{name: types.StepRebase, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"conflict","severity":"error","description":"conflict","action":"auto-fix"}]}`}, nil
+		}
+		_, statErr := os.Stat(filepath.Join(dir, "partial.txt"))
+		sawWork = statErr == nil
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Rebase: 1}}, nil, []Step{step}, nil)
+	_ = exec.Execute(context.Background(), run, repo, dir)
+	if sawWork {
+		t.Fatal("rebase fix round got captured work back")
+	}
+	if left, _ := database.GetRunSurvivedWork(run.ID); left == nil || left.State != types.SurvivedWorkCaptured {
+		t.Fatalf("handoff after rebase fix = %+v", left)
+	}
+}

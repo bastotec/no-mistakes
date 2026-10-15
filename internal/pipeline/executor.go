@@ -1211,9 +1211,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		sctx.RestoredSurvivedWork = nil
 		var outcome *StepOutcome
 		var err error
-		if fixRound {
+		// Rebase's resolver needs a clean worktree, and its abort on timeout
+		// is not a repair whose work is captured, so it never gets it back.
+		if fixRound && stepName != types.StepRebase {
 			sctx.RestoredSurvivedWork, err = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
-		} else {
+		} else if !fixRound {
 			// Restored work a shutdown left in the worktree goes back into a
 			// ref before a round that is not a repair can see it.
 			err = e.settleSurvivedWork(run.ID, sctx.WorkDir, false, writeLog)
@@ -1628,11 +1630,16 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 		writeLog("continuing interrupted repair work restored from " + work.Ref)
 		return work, nil
 	}
-	restored := *work
-	restored.State, restored.Worktree = types.SurvivedWorkRestored, workDir
-	if err := e.db.SetRunSurvivedWork(runID, &restored); err != nil {
+	// While the restore writes the worktree the work is split between the
+	// ref and a partly restored worktree, so it is recorded in place: a crash
+	// part way through then reads as split, never as a complete restore.
+	restoring := *work
+	restoring.State, restoring.Worktree = types.SurvivedWorkInPlace, workDir
+	if err := e.db.SetRunSurvivedWork(runID, &restoring); err != nil {
 		return nil, err
 	}
+	restored := restoring
+	restored.State = types.SurvivedWorkRestored
 	if err := RestoreSurvivedWork(workDir, work); err != nil {
 		// The round stops rather than running without the work: a capture
 		// it then took would replace this one, which it never contained.
@@ -1642,6 +1649,9 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 			return nil, dbErr
 		}
 		return nil, fmt.Errorf("could not restore interrupted repair work from %s, which stays captured there: %w", work.Ref, err)
+	}
+	if err := e.db.SetRunSurvivedWork(runID, &restored); err != nil {
+		return nil, err
 	}
 	writeLog("restored interrupted repair work from " + work.Ref + " for this repair to continue")
 	return &restored, nil

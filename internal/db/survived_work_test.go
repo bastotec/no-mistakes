@@ -46,3 +46,38 @@ func TestBoundSurvivedWorkFiles(t *testing.T) {
 		t.Fatalf("bounded = %d entries, last %q", len(bounded), bounded[len(bounded)-1])
 	}
 }
+
+// Consuming a ref retires only captured copies: a run that restored it and
+// never settled keeps its row, and the ref with it.
+func TestClearSurvivedWorkRefKeepsRestoredHandoffs(t *testing.T) {
+	d := openTestDB(t)
+	repo, err := d.InsertRepo("/tmp/repo", "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var runs []string
+	for i := 0; i < 2; i++ {
+		run, err := d.InsertRun(repo.ID, "feature/x", "head", "base")
+		if err != nil {
+			t.Fatal(err)
+		}
+		runs = append(runs, run.ID)
+	}
+	ref := "refs/no-mistakes/survived/a/1"
+	if err := d.SetRunSurvivedWork(runs[0], &types.SurvivedWork{State: types.SurvivedWorkCaptured, Ref: ref, Next: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunSurvivedWork(runs[1], &types.SurvivedWork{State: types.SurvivedWorkRestored, Ref: ref, Next: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	inUse, err := d.ClearSurvivedWorkRef(ref)
+	if err != nil || !inUse {
+		t.Fatalf("ClearSurvivedWorkRef = %v, %v; want the restored row to keep the ref in use", inUse, err)
+	}
+	if w, _ := d.GetRunSurvivedWork(runs[0]); w != nil {
+		t.Fatalf("captured copy kept: %+v", w)
+	}
+	if w, _ := d.GetRunSurvivedWork(runs[1]); w == nil {
+		t.Fatal("restored handoff retired")
+	}
+}

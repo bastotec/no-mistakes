@@ -110,10 +110,11 @@ func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.Su
 		if previous != nil && previous.Ref != "" && work.Ref != "" && previous.Ref != work.Ref {
 			// The new capture holds the old one's work: retire the old ref and
 			// every rerun's copy of it.
-			if err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
+			if inUse, err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
 				return err
+			} else if !inUse {
+				deleteSurvivedWorkRef(workDir, previous.Ref)
 			}
-			deleteSurvivedWorkRef(workDir, previous.Ref)
 		}
 		return nil
 	}
@@ -130,10 +131,11 @@ func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
 		return err
 	}
 	if previous != nil && previous.Ref != "" {
-		if err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
+		if inUse, err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
 			return err
+		} else if !inUse {
+			deleteSurvivedWorkRef(workDir, previous.Ref)
 		}
-		deleteSurvivedWorkRef(workDir, previous.Ref)
 	}
 	return nil
 }

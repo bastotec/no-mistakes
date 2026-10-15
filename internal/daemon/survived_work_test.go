@@ -154,8 +154,8 @@ func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
 	if left, _ := database.GetRunSurvivedWork(old.ID); left == nil {
 		t.Fatal("the copy consumed the original handoff")
 	}
-	if err := database.ClearSurvivedWorkRef(captured.Ref); err != nil {
-		t.Fatal(err)
+	if inUse, err := database.ClearSurvivedWorkRef(captured.Ref); err != nil || inUse {
+		t.Fatalf("ClearSurvivedWorkRef = %v, %v", inUse, err)
 	}
 	for _, id := range []string{old.ID, next.ID} {
 		if left, _ := database.GetRunSurvivedWork(id); left != nil {

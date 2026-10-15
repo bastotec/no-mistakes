@@ -74,16 +74,23 @@ func (d *DB) CopyRunSurvivedWork(fromRunID, toRunID, worktree string) error {
 	return nil
 }
 
-// ClearSurvivedWorkRef drops every run's handoff that points at ref: copies
-// a rerun took (see CopyRunSurvivedWork) describe the same work.
-func (d *DB) ClearSurvivedWorkRef(ref string) error {
+// ClearSurvivedWorkRef retires the captured copies of ref other runs hold
+// (see CopyRunSurvivedWork): they describe the same work, which is now
+// consumed. A run that restored ref and is not settled keeps its row, since
+// its worktree may hold more than ref. It reports whether any handoff still
+// points at ref, in which case the ref itself must stay.
+func (d *DB) ClearSurvivedWorkRef(ref string) (bool, error) {
 	if ref == "" {
-		return nil
+		return false, nil
 	}
-	if _, err := d.sql.Exec(`DELETE FROM run_survived_work WHERE ref = ?`, ref); err != nil {
-		return fmt.Errorf("clear survived work ref: %w", err)
+	if _, err := d.sql.Exec(`DELETE FROM run_survived_work WHERE ref = ? AND state = ?`, ref, string(types.SurvivedWorkCaptured)); err != nil {
+		return false, fmt.Errorf("clear survived work ref: %w", err)
 	}
-	return nil
+	var remaining int
+	if err := d.sql.QueryRow(`SELECT COUNT(*) FROM run_survived_work WHERE ref = ?`, ref).Scan(&remaining); err != nil {
+		return false, fmt.Errorf("count survived work ref: %w", err)
+	}
+	return remaining > 0, nil
 }
 
 // ClearRunSurvivedWork drops the run's survived-work handoff.
