@@ -1218,8 +1218,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			sctx.RestoredSurvivedWork, err = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
 		} else if !fixRound {
 			// Restored work a shutdown left in the worktree goes back into a
-			// ref before a round that is not a repair can see it.
+			// ref before a round that is not a repair can see it; work that
+			// cannot be moved out stops the round instead of being run over
+			// (a catch-all commit would publish it).
 			err = e.settleSurvivedWork(run.ID, sctx.WorkDir, false, writeLog)
+			if err == nil {
+				err = e.refuseSurvivedWorkInWorktree(run.ID, sctx.WorkDir)
+			}
 		}
 		if err == nil {
 			outcome, err = step.Execute(sctx)
@@ -1236,7 +1241,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// Nor on a protected-path refusal, which leaves the index and
 			// files in place for the operator to inspect and resolve; the
 			// handoff stays restored and the next round continues it.
-			if (timedOut || sctx.RestoredSurvivedWork != nil) && ProtectedPathOutcome(err) == nil && e.mayTouchRepairWorktree(sctx, run.ID, err) {
+			refused := ProtectedPathOutcome(err) != nil || (outcome != nil && HasProtectedPathRefusal(outcome.Findings))
+			if (timedOut || sctx.RestoredSurvivedWork != nil) && !refused && e.mayTouchRepairWorktree(sctx, run.ID, err) {
 				if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
 					outcome, err = nil, errors.Join(err, settleErr)
 				}
@@ -1689,6 +1695,20 @@ func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writ
 		return ClearSurvivedWork(e.db, runID, workDir)
 	}
 	return err
+}
+
+// refuseSurvivedWorkInWorktree stops a round that is not a repair while the
+// run's interrupted repair work is still in the worktree (it could not be
+// captured, or a refusal left it restored), until it is recovered by hand.
+func (e *Executor) refuseSurvivedWorkInWorktree(runID, workDir string) error {
+	work, err := e.db.GetRunSurvivedWork(runID)
+	if err != nil || work == nil || work.State == types.SurvivedWorkCaptured {
+		return err
+	}
+	if !survivedWorkUnclean(workDir) {
+		return nil
+	}
+	return fmt.Errorf("interrupted repair work is still in the worktree %s (%s); only a repair may continue it: %s", workDir, work.State, work.Next)
 }
 
 // restoresSurvivedWork reports whether a step's fix round runs a repair

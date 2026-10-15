@@ -862,3 +862,51 @@ func TestExecutor_ProtectedPathRefusalLeavesRestoredWork(t *testing.T) {
 		t.Fatalf("handoff after refusal = %+v %v", left, err)
 	}
 }
+
+// A round that is not a repair never runs over interrupted work still in
+// the worktree.
+func TestExecutor_PlainRoundRefusesWorkStillInTheWorktree(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	if err := database.SetRunSurvivedWork(run.ID, &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: dir, Next: "recover by hand"}); err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	step := &adaptiveCallStep{name: types.StepDocument, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		ran = true
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, dir); err == nil || !strings.Contains(err.Error(), "only a repair may continue it") {
+		t.Fatalf("Execute() = %v, want the refusal", err)
+	}
+	if ran {
+		t.Fatal("an ordinary round ran over interrupted work")
+	}
+}
+
+// CI reports a protected-path refusal as an outcome, not an error; it is
+// left alone all the same.
+func TestExecutor_RefusalOutcomeLeavesRestoredWork(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "package.lock", "locked\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	step := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		return ProtectedPathOutcome(&ProtectedPathError{Path: "package.lock", Rule: "*.lock"}), nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = exec.Execute(ctx, run, repo, dir)
+	if got := readFile(t, dir, "package.lock"); got != "locked\n" {
+		t.Fatalf("refused file taken from the worktree: %q", got)
+	}
+	if left, _ := database.GetRunSurvivedWork(run.ID); left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkRestored {
+		t.Fatalf("handoff after refusal = %+v", left)
+	}
+}
