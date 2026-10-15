@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -817,5 +818,47 @@ func TestPorcelainZPathsSkipsRenameSources(t *testing.T) {
 	got := porcelainZPaths("R  moved.sqlite\x00?? link/state.sqlite\x00?? real.txt\x00")
 	if len(got) != 2 || got[0][1] != "moved.sqlite" || got[1][1] != "real.txt" {
 		t.Fatalf("entries = %v", got)
+	}
+}
+
+// A file the repair ignored is not in the snapshot; once the reset restores
+// HEAD's rules it shows up, and the work stays in place instead of the file
+// being cleaned away.
+func TestCaptureSurvivedWork_KeepsFilesTheRepairIgnored(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, ".gitignore", "scratch.txt\n")
+	writeFile(t, dir, "scratch.txt", "not in the snapshot\n")
+	work, _ := CaptureSurvivedWork(dir, "run-18", nil)
+	if work == nil || work.State != types.SurvivedWorkInPlace || work.Ref == "" {
+		t.Fatalf("capture = %+v, want in place with its ref", work)
+	}
+	if got := readFile(t, dir, "scratch.txt"); got != "not in the snapshot\n" {
+		t.Fatalf("scratch.txt = %q", got)
+	}
+}
+
+// A protected-path refusal leaves the index and files for the operator:
+// restored work is not recaptured out from under it.
+func TestExecutor_ProtectedPathRefusalLeavesRestoredWork(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "package.lock", "locked\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		return nil, &ProtectedPathError{Path: "package.lock", Rule: "*.lock"}
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	_ = exec.Execute(ctx, run, repo, dir)
+	if got := readFile(t, dir, "package.lock"); got != "locked\n" {
+		t.Fatalf("refused file taken from the worktree: %q", got)
+	}
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkRestored {
+		t.Fatalf("handoff after refusal = %+v %v", left, err)
 	}
 }

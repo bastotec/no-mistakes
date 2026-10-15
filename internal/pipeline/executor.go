@@ -1233,7 +1233,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// may still be running: an independent repair wrapper may still be
 			// editing the worktree, the handoff stays restored, and cleanup
 			// keeps the worktree.
-			if (timedOut || sctx.RestoredSurvivedWork != nil) && e.mayTouchRepairWorktree(sctx, run.ID, err) {
+			// Nor on a protected-path refusal, which leaves the index and
+			// files in place for the operator to inspect and resolve; the
+			// handoff stays restored and the next round continues it.
+			if (timedOut || sctx.RestoredSurvivedWork != nil) && ProtectedPathOutcome(err) == nil && e.mayTouchRepairWorktree(sctx, run.ID, err) {
 				if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
 					outcome, err = nil, errors.Join(err, settleErr)
 				}

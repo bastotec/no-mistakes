@@ -217,16 +217,15 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		inPlace.Next = survivedWorkInPlaceNext
 		return &inPlace
 	}
-	// Untracked files go first, under the repair's own ignore rules - the
-	// rules the snapshot was taken under. After the reset, HEAD's rules could
-	// hide one the repair un-ignored. git clean never follows symlinks.
+	// Untracked files are cleaned once, before the reset, under the repair's
+	// own ignore rules - the rules the snapshot was taken under, so only
+	// files it holds go. After the reset, HEAD's rules can expose a file the
+	// repair had ignored, which the snapshot does not hold: the status check
+	// below then keeps the work in place rather than cleaning it away. git
+	// clean never follows symlinks.
 	if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
 		work.InspectionError = "captured, but its untracked files could not be removed: " + err.Error()
-	} else if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err == nil {
-		if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
-			work.InspectionError = "captured, but the worktree could not be cleaned: " + err.Error()
-		}
-	} else {
+	} else if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err != nil {
 		work.InspectionError = "captured, but the worktree could not be reset: " + err.Error()
 	}
 	// git clean skips nested repositories, and the snapshot holds only a
