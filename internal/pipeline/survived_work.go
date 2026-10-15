@@ -143,7 +143,7 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
 	// Raw output: a porcelain line's leading status column is significant.
-	statusRaw, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all")
+	statusRaw, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	status := string(statusRaw)
 	if err == nil && strings.TrimSpace(status) == "" {
 		return nil
@@ -267,7 +267,7 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all")
+	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return fmt.Errorf("read worktree status: %w", err)
 	}
@@ -316,7 +316,7 @@ func SurvivedWorkPrompt(restored *types.SurvivedWork) string {
 func survivedWorkUnclean(workDir string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all")
+	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	return err != nil || strings.TrimSpace(status) != ""
 }
 

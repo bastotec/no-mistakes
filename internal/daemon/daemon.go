@@ -965,7 +965,9 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if pipeline.SurvivedWorkHoldsWorktree(work, workDir) {
 		return "interrupted repair has uncommitted or unreadable work; preserving worktree"
 	}
-	if work.State == types.SurvivedWorkInPlace {
+	// In-place work with a ref was only partly removed; the ref still holds
+	// the rest, so the record stays. Without a ref it was all in the worktree.
+	if work.State == types.SurvivedWorkInPlace && work.Ref == "" {
 		if err := pipeline.ClearSurvivedWork(d, run.ID, workDir); err != nil {
 			return "cannot clear survived-work evidence"
 		}

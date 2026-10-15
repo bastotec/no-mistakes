@@ -1609,10 +1609,18 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	if err != nil {
 		return nil, err
 	}
-	if work == nil || work.State == types.SurvivedWorkInPlace {
+	if work == nil || (work.State == types.SurvivedWorkInPlace && work.Ref == "") {
 		return nil, nil
 	}
-	if work.State == types.SurvivedWorkRestored && survivedWorkUnclean(workDir) {
+	unclean := survivedWorkUnclean(workDir)
+	// Work whose capture could not be removed from the worktree is split:
+	// part in the ref, part still in the worktree. Neither half can be
+	// continued alone without losing the other, so the round stops for a
+	// hand recovery until the worktree is clean again.
+	if work.State == types.SurvivedWorkInPlace && unclean {
+		return nil, fmt.Errorf("interrupted repair work is split between %s and the worktree %s; recover it by hand (git diff %s %s) and clean the worktree before another repair", work.Ref, workDir, work.BaseSHA, work.Ref)
+	}
+	if work.State == types.SurvivedWorkRestored && unclean {
 		writeLog("continuing interrupted repair work restored from " + work.Ref)
 		return work, nil
 	}
@@ -1622,10 +1630,14 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 		return nil, err
 	}
 	if err := RestoreSurvivedWork(workDir, work); err != nil {
-		writeLog(fmt.Sprintf("could not restore interrupted repair work from %s (%v); it stays captured there", work.Ref, err))
+		// The round stops rather than running without the work: a capture
+		// it then took would replace this one, which it never contained.
 		captured := *work
 		captured.State = types.SurvivedWorkCaptured
-		return nil, e.db.SetRunSurvivedWork(runID, &captured)
+		if dbErr := e.db.SetRunSurvivedWork(runID, &captured); dbErr != nil {
+			return nil, dbErr
+		}
+		return nil, fmt.Errorf("could not restore interrupted repair work from %s, which stays captured there: %w", work.Ref, err)
 	}
 	writeLog("restored interrupted repair work from " + work.Ref + " for this repair to continue")
 	return &restored, nil

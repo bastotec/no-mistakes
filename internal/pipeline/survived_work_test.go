@@ -488,3 +488,74 @@ func TestExecutor_CancelledRoundLeavesRestoredWorkAlone(t *testing.T) {
 		t.Fatalf("handoff changed on cancel: %+v %v", left, err)
 	}
 }
+
+// A submodule configured to hide its dirty state still counts: its edits are
+// kept in place rather than read as a clean worktree.
+func TestCaptureSurvivedWork_IgnoredDirtySubmoduleStillCounts(t *testing.T) {
+	sub := survivedWorkRepo(t)
+	dir := survivedWorkRepo(t)
+	gitRun(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	gitRun(t, dir, "commit", "-qm", "add submodule")
+	gitRun(t, dir, "config", "submodule.sub.ignore", "dirty")
+	writeFile(t, filepath.Join(dir, "sub"), "tracked.txt", "edited inside the submodule\n")
+	work, _ := CaptureSurvivedWork(dir, "run-10", nil)
+	if work == nil || work.State != types.SurvivedWorkInPlace {
+		t.Fatalf("ignored dirty submodule read as clean: %+v", work)
+	}
+}
+
+// A restore that fails stops the round: running without the captured work
+// would let a later capture replace it.
+func TestExecutor_FailedRestoreStopsTheRound(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	ran := false
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			// Something else dirtied the worktree, so the restore refuses.
+			writeFile(t, dir, "other.txt", "x\n")
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		ran = true
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, dir); err == nil || !strings.Contains(err.Error(), "could not restore interrupted repair work") {
+		t.Fatalf("Execute() = %v, want the restore failure", err)
+	}
+	if ran {
+		t.Fatal("the repair ran without the captured work")
+	}
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkCaptured {
+		t.Fatalf("handoff after failed restore = %+v %v", left, err)
+	}
+}
+
+// Work split between its ref and a worktree that could not be cleaned is
+// never continued in part.
+func TestExecutor_SplitInPlaceWorkStopsTheRound(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	split := *work
+	split.State = types.SurvivedWorkInPlace
+	if err := database.SetRunSurvivedWork(run.ID, &split); err != nil {
+		t.Fatal(err)
+	}
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			writeFile(t, dir, "leftover.txt", "not cleaned\n")
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		t.Fatal("the repair ran on half of the work")
+		return nil, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, dir); err == nil || !strings.Contains(err.Error(), "split between") {
+		t.Fatalf("Execute() = %v, want the split-work refusal", err)
+	}
+}
