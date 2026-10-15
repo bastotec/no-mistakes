@@ -87,6 +87,11 @@ Exhausting the bound fails the step with `validate review analyzer findings afte
 
 - Deck's retry classifier accepts only native `run_failed` gateway errors, never gateway text quoted by output validation or process diagnostics. Classification and worktree replay rationale live in `internal/agent/deck.go`; user-facing retry semantics are owned by `docs/src/content/docs/reference/global-config.md` (`agent`). Regressions: `internal/agent/deck_retry_test.go`.
 
+**Interrupted Repair Work (`internal/pipeline/survived_work.go`)**
+
+- A fix round cut short by its deadline has its uncommitted work moved out of the worktree into `refs/no-mistakes/survived/<run>/<id>` (index commit, then working-tree commit) and the worktree reset to HEAD; the next authorized fix round restores it (`Executor.restoreSurvivedWork`) and clears the evidence. Keeping the work out of the worktree is what makes "never published" hold: an earlier design that left it in place and scoped staging to paths changed since a round-start snapshot was refuted by review (it stranded protected-path retries and replayed repairs, let a formatter or pathspec magic publish it, and lost staged content). Do not reintroduce path-scoped staging.
+- Only a failed capture leaves work in place (empty `Ref`); the daemon's `survivedWorkCleanupReason` then keeps the worktree until it is clean. User-facing semantics are owned by `docs/src/content/docs/reference/pipeline-steps.md` (CI). Regressions: `internal/pipeline/survived_work_test.go`, `TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished`, `TestCIStep_ProtectedPathRetryUsesPersistedRepair`, `internal/daemon/survived_work_test.go`.
+
 **Advisory Jev Signal (`internal/jev`, `internal/pipeline/steps/jev.go`)**
 
 - `JevStep` (runs after review) is ADVISORY ONLY and can never gate: every finding is severity `info` with action `no-op`, so the executor neither parks nor spends an auto-fix round, and there is deliberately no code path from a Jev answer to a blocked or failed run.

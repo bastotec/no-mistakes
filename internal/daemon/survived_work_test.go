@@ -9,7 +9,6 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -40,7 +39,8 @@ func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: pipeline.InspectSurvivedWork(dir)})
+	// Work that could not be captured stays in the worktree (empty Ref).
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: &types.SurvivedWork{Worktree: dir, Files: []string{"?? partial.txt"}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,5 +84,42 @@ func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 	cleanupOrphanWorktrees(database, p, nil)
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
 		t.Fatalf("clean worktree not reclaimed: %v", err)
+	}
+}
+
+// Captured survived work lives in a run-owned ref, so it never holds the
+// worktree, even when the worktree is dirty for another reason.
+func TestCapturedSurvivedWorkDoesNotHoldTheWorktree(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, head := setupTestGitRepo(t, p, database, "survived-captured")
+	run, err := database.InsertRun(repo.ID, "main", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: &types.SurvivedWork{Worktree: dir, Ref: "refs/no-mistakes/survived/" + run.ID + "/abc", BaseSHA: head}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepFindings(sr.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if reason := survivedWorkCleanupReason(database, run, dir); reason != "" {
+		t.Fatalf("captured work held the worktree: %s", reason)
 	}
 }

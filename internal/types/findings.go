@@ -265,10 +265,15 @@ type findingWire struct {
 // SurvivedWork is local-only evidence of an interrupted repair. It is never
 // included in PR summaries or attestations: Worktree names an operator path.
 type SurvivedWork struct {
-	Worktree        string   `json:"worktree"`
-	Files           []string `json:"files,omitempty"`
-	InspectionError string   `json:"inspection_error,omitempty"`
-	Next            string   `json:"next"`
+	Worktree string   `json:"worktree"`
+	Files    []string `json:"files,omitempty"`
+	// Ref and BaseSHA locate the captured work: a run-owned local ref whose
+	// commits sit on BaseSHA. Empty Ref means the work could not be captured
+	// and was left in the worktree.
+	Ref             string `json:"ref,omitempty"`
+	BaseSHA         string `json:"base_sha,omitempty"`
+	InspectionError string `json:"inspection_error,omitempty"`
+	Next            string `json:"next"`
 }
 
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.

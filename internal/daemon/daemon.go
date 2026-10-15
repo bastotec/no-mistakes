@@ -944,8 +944,10 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 }
 
 // survivedWorkCleanupReason has no abort exemption: aborting a run is not
-// authorization to destroy uncommitted repairs. A clean live status releases
-// retention after the operator or a later repair has dealt with the files.
+// authorization to destroy uncommitted repairs. Captured work lives in a
+// run-owned ref, not the worktree, so it never holds the worktree. Only work
+// that could not be captured, and so was left in place, keeps it until the
+// worktree is clean again.
 func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if run == nil {
 		return ""
@@ -962,10 +964,10 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 		if err != nil {
 			return "cannot parse survived-work evidence"
 		}
-		if findings.SurvivedWork == nil {
+		if findings.SurvivedWork == nil || findings.SurvivedWork.Ref != "" {
 			continue
 		}
-		if pipeline.InspectSurvivedWork(workDir) != nil {
+		if pipeline.SurvivedWorkHoldsWorktree(findings.SurvivedWork, workDir) {
 			return "interrupted repair has uncommitted or unreadable work; preserving worktree"
 		}
 		findings.SurvivedWork = nil

@@ -1619,7 +1619,14 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: pipeline.InspectSurvivedWork(dir)})
+	work := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID)
+	if work == nil || work.Ref == "" {
+		t.Fatalf("survived work not captured: %+v", work)
+	}
+	if got := gitStatusPorcelain(t, dir); got != "" {
+		t.Fatalf("capture left the worktree dirty: %q", got)
+	}
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: work})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1640,13 +1647,9 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	if err != nil || resetFindings.SurvivedWork == nil {
 		t.Fatalf("CI restart did not preserve survived work: %+v, %v", resetFindings, err)
 	}
-	survived, err := pipeline.HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
-	if err != nil || !survived {
-		t.Fatalf("survived-work evidence after restart = %v, %v", survived, err)
-	}
-	sctx.RoundStartWorktree, err = pipeline.SnapshotWorktree(dir)
-	if err != nil {
-		t.Fatal(err)
+	survived, err := pipeline.LatestSurvivedWork(sctx.DB, sctx.Run.ID)
+	if err != nil || survived == nil || survived.Ref != work.Ref {
+		t.Fatalf("survived-work evidence after restart = %+v, %v", survived, err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected repair\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1662,7 +1665,7 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	if fileAtRef(t, upstream, pushedHead, "deferred.txt") {
 		t.Fatal("deferred survived work was published")
 	}
-	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "deferred.txt") {
-		t.Fatalf("deferred survived work was not retained: %q", got)
+	if got := gitCmd(t, dir, "show", work.Ref+":deferred.txt"); got != "survived but unselected" {
+		t.Fatalf("deferred survived work was not retained in %s: %q", work.Ref, got)
 	}
 }

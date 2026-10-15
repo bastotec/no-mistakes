@@ -281,7 +281,7 @@ CI logs:
 	prompt += roundHistoryPromptSection(sctx)
 	prompt += userIntentPromptSection(sctx)
 	prompt += executionContextPromptSection(sctx.WorkDir)
-	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt)) + pipeline.SurvivedWorkPrompt(sctx.WorkDir)
+	prompt = fixerPrompt(testguidance.LateRepairPrompt(string(s.Name()), prompt)) + pipeline.SurvivedWorkPrompt(sctx.RestoredSurvivedWork)
 
 	sctx.Log("running agent to fix CI issues...")
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
@@ -541,7 +541,7 @@ func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err e
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
 	outcome := ciFixAgentTimeoutOutcome(issueDesc, err)
 	findings, _ := types.ParseFindingsJSON(outcome.Findings)
-	findings.SurvivedWork = pipeline.InspectSurvivedWork(sctx.WorkDir)
+	findings.SurvivedWork = pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID)
 	outcome.Findings, _ = types.MarshalFindingsJSON(findings)
 	return outcome
 }

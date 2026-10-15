@@ -10,7 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
-	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // Start a later real review repair with both index and working-tree progress.
@@ -35,7 +35,7 @@ func TestReviewFixContinuesExistingUncommittedWork(t *testing.T) {
 					t.Fatalf("prior progress lost: %s %v", data, err)
 				}
 			}
-			if !strings.Contains(opts.Prompt, "Existing uncommitted repair work") || !strings.Contains(opts.Prompt, "selected findings") {
+			if !strings.Contains(opts.Prompt, "restored before you started") || !strings.Contains(opts.Prompt, "staged-repair.txt") || !strings.Contains(opts.Prompt, "selected findings") {
 				t.Fatal("missing continuation instructions")
 			}
 			return &agent.Result{Output: json.RawMessage(`{"summary":"finish prior repair"}`)}, nil
@@ -44,6 +44,8 @@ func TestReviewFixContinuesExistingUncommittedWork(t *testing.T) {
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 	sctx.Fixing = true
+	// The executor restores captured work before a fix round and names it.
+	sctx.RestoredSurvivedWork = &types.SurvivedWork{Files: []string{"A  staged-repair.txt", "?? unstaged-repair.txt"}}
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1","description":"finish repair","severity":"error","action":"auto-fix"}]}`
 	if _, _, err := resolveCIRepairBases(context.Background(), sctx, "main"); err != nil {
 		t.Fatal(err)
@@ -54,8 +56,8 @@ func TestReviewFixContinuesExistingUncommittedWork(t *testing.T) {
 	if calls != 2 {
 		t.Fatalf("calls: %d", calls)
 	}
-	if work := pipeline.InspectSurvivedWork(dir); work != nil {
-		t.Fatalf("successful boundary did not commit progress: %+v", work)
+	if got := gitCmd(t, dir, "status", "--porcelain"); got != "" {
+		t.Fatalf("successful boundary did not commit progress: %q", got)
 	}
 	for _, name := range []string{"staged-repair.txt", "unstaged-repair.txt"} {
 		if data := gitCmd(t, dir, "show", "HEAD:"+name); data != "prior partial repair" {
