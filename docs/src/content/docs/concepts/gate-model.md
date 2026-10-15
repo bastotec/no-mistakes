@@ -255,7 +255,7 @@ can also end early after `rebase` if the branch has no diff against the default
 branch, marking the remaining steps as skipped.
 
 1. Execute the step
-2. If the step finds `action: auto-fix` findings and the step result is auto-fixable, reserve a repair at the shared durable pre-launch boundary. Automatic and user-triggered repairs share the configured ceiling; exhaustion parks for explicit authority instead of launching another repair. See [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/) for the one-repair response rule
+2. If the step finds `action: auto-fix` findings and the step result is auto-fixable, reserve a repair at the shared durable pre-launch boundary. See [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/#how-it-works) for automatic limits, exhaustion, and the one-repair response rule
 3. If blocking findings remain, or any finding has `action: ask-user`, pause and wait for user action
 4. `action: no-op` findings are informational only; the user can approve, fix selected findings, skip, or cancel the run when the step pauses
 

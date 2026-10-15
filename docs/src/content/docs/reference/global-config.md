@@ -641,7 +641,7 @@ The key is matched against the checkout path recorded at `init`. After moving a 
 
 ### auto_fix
 
-Maximum follow-up repair attempts per step. Started automatic and user-triggered repairs both consume this ceiling. A fix response authorizes exactly one additional repair and pins unattended authority there until another explicit response, without exceeding the configured maximum. The [auto-fix loop](/no-mistakes/concepts/auto-fix/#how-it-works) owns the durable authorization and exhaustion behavior. Set a step to `0` to disable follow-up repairs, so findings require approval, skip, or abort. Repository-declared custom gates have no automatic budget; each repair requires a separate explicit response.
+Maximum automatic follow-up repair attempts per step. Set a step to `0` to disable automatic follow-up repairs, not explicitly authorized fixes; findings then pause for a decision. The [auto-fix loop](/no-mistakes/concepts/auto-fix/#how-it-works) owns durable repair counting, one-repair manual grants, and exhaustion behavior, including repository-declared custom gates.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
 For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
 
