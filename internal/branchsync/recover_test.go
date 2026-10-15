@@ -247,6 +247,32 @@ func assertKeepLocalRecoveryOffer(t *testing.T, state State) {
 	}
 }
 
+func TestManualReconciliationRefusalsAlwaysOfferInspection(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name   string
+		refuse func(State) State
+	}{
+		{"blocked plan", func(state State) State {
+			return blockedPlan(state, StatePipelineOwned, "blocked_recover_manual_reconciliation", "conflicting recovery evidence")
+		}},
+		{"unavailable recovery source", func(state State) State {
+			return unavailableRecoverySource("blocked_recover_manual_reconciliation", "divergent recovery evidence").apply(state)
+		}},
+		{"unspecified recovery source", func(state State) State {
+			return (recoverySourceProof{}).apply(state)
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, action := range []*NextAction{nil, {Code: "recover_custody", Command: "no-mistakes axi sync --recover"}} {
+				state := tt.refuse(State{NextAction: action})
+				assertManualReconciliationOffer(t, state)
+			}
+		})
+	}
+}
+
 func assertManualReconciliationOffer(t *testing.T, state State) {
 	t.Helper()
 	if state.Safety != "blocked_recover_manual_reconciliation" {
@@ -1510,6 +1536,7 @@ func TestRecoverKeepLocalPreflightsEveryStrandedRun(t *testing.T) {
 			if kept.Recovered || kept.Safety != "blocked_recover_manual_reconciliation" {
 				t.Fatalf("keep-local with unsafe older run = %#v", kept)
 			}
+			assertManualReconciliationOffer(t, kept)
 			for _, id := range []string{f.run.ID, newest.ID} {
 				run, err := f.db.GetRun(id)
 				if err != nil || run == nil || run.CustodyReturnedAt != nil {
@@ -1580,6 +1607,7 @@ func TestRecoverKeepLocalRefusesDanglingIndependentGateHead(t *testing.T) {
 	if state.Recovered || state.Safety != "blocked_recover_manual_reconciliation" {
 		t.Fatalf("recovery with dangling independent gate head = %#v", state)
 	}
+	assertManualReconciliationOffer(t, state)
 	if got := mustRun(t, f.gate, "rev-parse", "refs/heads/feature/recover"); got != dangling {
 		t.Fatalf("gate head = %s, want dangling head %s", got, dangling)
 	}
@@ -1603,6 +1631,7 @@ func TestInspectDoesNotAdvertiseRecoveryWhenIndependentGateAnchorConflicts(t *te
 	if kept.Recovered || kept.Safety != "blocked_recover_manual_reconciliation" {
 		t.Fatalf("keep-local with conflicting independent gate anchor = %#v", kept)
 	}
+	assertManualReconciliationOffer(t, kept)
 	if f.custodyReturned() {
 		t.Fatal("conflicting independent gate anchor stamped custody")
 	}
@@ -1624,6 +1653,7 @@ func TestInspectDoesNotAdvertiseRecoveryWhenTerminalAnchorConflicts(t *testing.T
 	if kept.Recovered || kept.Safety != "blocked_recover_manual_reconciliation" {
 		t.Fatalf("keep-local with conflicting anchor = %#v", kept)
 	}
+	assertManualReconciliationOffer(t, kept)
 	if f.custodyReturned() {
 		t.Fatal("keep-local stamped custody despite conflicting evidence")
 	}

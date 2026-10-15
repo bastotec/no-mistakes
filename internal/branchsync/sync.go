@@ -2817,6 +2817,11 @@ func blockedPlan(state State, resultState, safety, message string) State {
 	// classification-level action (sync, recover_custody, release_binding,
 	// ...) from current evidence. Callers that know more override this.
 	state.NextAction = &NextAction{Code: "retry", Command: "no-mistakes axi sync --check"}
+	if safety == "blocked_recover_manual_reconciliation" {
+		// Rechecking cannot resolve conflicting evidence; offer read-only
+		// inspection rather than sending the operator back to the same refusal.
+		state.NextAction = &NextAction{Code: "inspect_and_reconcile_manually", Command: "no-mistakes axi status"}
+	}
 	state.Error = message
 	return state
 }
