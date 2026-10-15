@@ -960,3 +960,27 @@ func TestCaptureSurvivedWork_KeepsAnUntrackedIgnoredHeadFile(t *testing.T) {
 		t.Fatalf("generated.txt = %q", got)
 	}
 }
+
+// An ignored file under a directory that replaced a HEAD file is lost to the
+// reset as well: the work stays in place.
+func TestCaptureSurvivedWork_KeepsIgnoredFileWhereHeadHasAFile(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "config", "head file\n")
+	gitRun(t, dir, "add", "config")
+	gitRun(t, dir, "commit", "-qm", "config file")
+	gitRun(t, dir, "rm", "-q", "config")
+	if err := os.MkdirAll(filepath.Join(dir, "config"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "config/default.yaml", "a: 1\n")
+	gitRun(t, dir, "add", "config/default.yaml")
+	writeFile(t, dir, ".gitignore", "config/local.yaml\n")
+	writeFile(t, dir, "config/local.yaml", "secret: local\n")
+	work, _ := CaptureSurvivedWork(dir, "run-20", nil)
+	if work == nil || work.State != types.SurvivedWorkInPlace || !strings.Contains(work.InspectionError, "config/local.yaml") {
+		t.Fatalf("capture = %+v", work)
+	}
+	if got := readFile(t, dir, "config/local.yaml"); got != "secret: local\n" {
+		t.Fatalf("local file = %q", got)
+	}
+}

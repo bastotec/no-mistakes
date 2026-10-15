@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strings"
 	"time"
@@ -435,8 +436,9 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 	return "", nil
 }
 
-// ignoredTrackedFile returns the first ignored, untracked file that HEAD
-// tracks, or "".
+// ignoredTrackedFile returns the first ignored, untracked file the reset to
+// HEAD would overwrite - HEAD tracks it, or a file or directory in its
+// place - or "".
 func ignoredTrackedFile(ctx context.Context, workDir string) (string, error) {
 	ignored, err := git.RunRaw(ctx, workDir, "ls-files", "-z", "--others", "--ignored", "--exclude-standard")
 	if err != nil {
@@ -449,15 +451,30 @@ func ignoredTrackedFile(ctx context.Context, workDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	inHead := map[string]bool{}
+	// The reset also replaces a HEAD file where an ignored file now sits
+	// under a directory of that name, and a HEAD directory where an
+	// ignored file now has its name.
+	headFiles, headDirs := map[string]bool{}, map[string]bool{}
 	for _, path := range strings.Split(string(tracked), "\x00") {
-		if path != "" {
-			inHead[path] = true
+		if path == "" {
+			continue
+		}
+		headFiles[path] = true
+		for dir := pathpkg.Dir(path); dir != "."; dir = pathpkg.Dir(dir) {
+			headDirs[dir] = true
 		}
 	}
 	for _, path := range strings.Split(string(ignored), "\x00") {
-		if inHead[path] {
+		if path == "" {
+			continue
+		}
+		if headFiles[path] || headDirs[path] {
 			return path, nil
+		}
+		for dir := pathpkg.Dir(path); dir != "."; dir = pathpkg.Dir(dir) {
+			if headFiles[dir] {
+				return path, nil
+			}
 		}
 	}
 	return "", nil
