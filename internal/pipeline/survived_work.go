@@ -34,10 +34,24 @@ const survivedWorkGitTimeout = 30 * time.Second
 
 // CaptureSurvivedWork moves a cut-short repair's uncommitted work into a
 // run-owned ref and returns the worktree to HEAD. It returns nil for a clean
-// worktree. When the work cannot be captured it is left where it is, the
-// evidence says why, and Ref is empty: cleanup then refuses to remove the
-// worktree (see the daemon) rather than lose it.
-func CaptureSurvivedWork(workDir, runID string) *types.SurvivedWork {
+// worktree. record makes the evidence durable and is called before the
+// worktree is touched, so a crash in between leaves the work in both places,
+// never in neither. When the work cannot be captured or recorded it is left
+// where it is, the evidence says why, and Ref is empty: cleanup then refuses
+// to remove the worktree (see the daemon) rather than lose it.
+func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
+	if record == nil {
+		record = func(*types.SurvivedWork) error { return nil }
+	}
+	work := captureSurvivedWork(workDir, runID, record)
+	if work != nil && work.Ref == "" {
+		// Best effort: in-place evidence is what keeps cleanup away.
+		_ = record(work)
+	}
+	return work
+}
+
+func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
 	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all")
@@ -63,17 +77,27 @@ func CaptureSurvivedWork(workDir, runID string) *types.SurvivedWork {
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
-	// Only once the ref holds the work is the worktree returned to HEAD.
+	work.Ref, work.BaseSHA = ref, base
+	work.Next = fmt.Sprintf("Captured in %s and removed from the worktree, so nothing commits or pushes it. The next authorized repair restores it before it runs and continues it within its selected findings; only that repair's commit publishes it. To recover it by hand: git diff %s %s.", ref, base, ref)
+	// Only once the ref holds the work and the evidence is durable is the
+	// worktree returned to HEAD.
+	if err := record(work); err != nil {
+		inPlace := *work
+		inPlace.Ref, inPlace.BaseSHA = "", ""
+		inPlace.InspectionError = fmt.Sprintf("captured in %s, but the handoff could not be recorded (%v), so it was also left in the worktree", ref, err)
+		inPlace.Next = survivedWorkInPlaceNext
+		return &inPlace
+	}
 	if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err == nil {
-		_, err = git.Run(ctx, workDir, "clean", "-fdq")
-		if err != nil {
+		if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
 			work.InspectionError = "captured, but the worktree could not be cleaned: " + err.Error()
 		}
 	} else {
 		work.InspectionError = "captured, but the worktree could not be reset: " + err.Error()
 	}
-	work.Ref, work.BaseSHA = ref, base
-	work.Next = fmt.Sprintf("Captured in %s and removed from the worktree, so nothing commits or pushes it. The next authorized repair restores it before it runs and continues it within its selected findings; only that repair's commit publishes it. To recover it by hand: git diff %s %s.", ref, base, ref)
+	if work.InspectionError != "" {
+		_ = record(work)
+	}
 	return work
 }
 

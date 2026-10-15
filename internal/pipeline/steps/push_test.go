@@ -1619,7 +1619,7 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	work := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID)
+	work := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID, nil)
 	if work == nil || work.Ref == "" {
 		t.Fatalf("survived work not captured: %+v", work)
 	}

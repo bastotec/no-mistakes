@@ -541,7 +541,21 @@ func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err e
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
 	outcome := ciFixAgentTimeoutOutcome(issueDesc, err)
 	findings, _ := types.ParseFindingsJSON(outcome.Findings)
-	findings.SurvivedWork = pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID)
+	// The handoff is recorded on the step before the worktree is cleaned; the
+	// executor persists the same outcome when the step returns.
+	record := func(work *types.SurvivedWork) error {
+		if sctx.DB == nil || sctx.StepResultID == "" {
+			return nil
+		}
+		withWork := findings
+		withWork.SurvivedWork = work
+		raw, err := types.MarshalFindingsJSON(withWork)
+		if err != nil {
+			return err
+		}
+		return sctx.DB.SetStepFindings(sctx.StepResultID, raw)
+	}
+	findings.SurvivedWork = pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID, record)
 	outcome.Findings, _ = types.MarshalFindingsJSON(findings)
 	return outcome
 }
