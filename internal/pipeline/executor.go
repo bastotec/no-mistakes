@@ -1193,7 +1193,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var skipReason string
 	currentRoundID := state.currentRoundID
 	reviewApprovedHeadSHA := state.reviewApprovedHeadSHA
-	cappedGateFindings := state.cappedGateFindings
+	cappedGateFindings := withoutSurvivedWork(state.cappedGateFindings)
 	var restartFrom types.StepName
 
 	// Execute with possible fix loop
@@ -1231,10 +1231,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if work := CaptureSurvivedWork(sctx.WorkDir, run.ID, record); work != nil {
 				writeLog("interrupted repair left uncommitted work: " + work.Next)
 			}
-		} else if sctx.RestoredSurvivedWork != nil {
+		} else if sctx.RestoredSurvivedWork != nil && !errors.Is(err, ErrDaemonShutdown) {
 			// A round that got restored work back either committed it, and the
 			// handoff is done, or did not reach its repair (skipped, failed,
 			// parked), and the work goes back where nothing can publish it.
+			// Not on shutdown: an independent repair wrapper may still be
+			// editing the worktree, and recovery owns that round.
 			if finishErr := e.finishRestoredSurvivedWork(run.ID, sr.ID, sctx.WorkDir, writeLog); finishErr != nil {
 				return false, "", finishErr
 			}
@@ -1275,6 +1277,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		if stepName == types.StepReview {
 			if sctx.FixWithoutRereview {
 				e.resolveReviewFixWithoutRereview(outcome, cappedGateFindings, sctx.PreviousFindings, sctx.DeferredFindings, run.HeadSHA != reviewStartingHeadSHA, writeLog)
+				// The capped snapshot carries no handoff; attach the current one.
+				outcome.Findings = e.retainSurvivedWork(sr.ID, outcome.Findings)
 				sctx.FixWithoutRereview = false
 				cappedGateFindings = ""
 			} else {
@@ -1555,7 +1559,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if roundCap := reviewRoundCapOf(outcome.Findings); stepName == types.StepReview && roundCap > 0 {
 				writeLog(fmt.Sprintf("review.max_rounds (%d) reached: running the accepted fix once, without another rereview", roundCap))
 				sctx.FixWithoutRereview = true
-				cappedGateFindings = outcome.Findings
+				cappedGateFindings = withoutSurvivedWork(outcome.Findings)
 				sctx.PreviousFindings = withoutRoundCapRecord(mergedFindings)
 			}
 			nextTrigger = "auto_fix"
@@ -1662,10 +1666,7 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 // records the new handoff.
 func (e *Executor) finishRestoredSurvivedWork(runID, stepResultID, workDir string, writeLog func(string)) error {
 	record := func(work *types.SurvivedWork) error {
-		if err := ClearSurvivedWork(e.db, runID); err != nil {
-			return err
-		}
-		return e.setStepSurvivedWork(stepResultID, work)
+		return e.db.ReplaceRunSurvivedWork(runID, stepResultID, work)
 	}
 	work := CaptureSurvivedWork(workDir, runID, record)
 	if work == nil {
@@ -1673,25 +1674,6 @@ func (e *Executor) finishRestoredSurvivedWork(runID, stepResultID, workDir strin
 	}
 	writeLog("restored repair work was not committed this round: " + work.Next)
 	return nil
-}
-
-func (e *Executor) setStepSurvivedWork(stepResultID string, work *types.SurvivedWork) error {
-	var findings types.Findings
-	step, err := e.db.GetStepResult(stepResultID)
-	if err != nil {
-		return err
-	}
-	if step != nil && step.FindingsJSON != nil {
-		if findings, err = types.ParseFindingsJSON(*step.FindingsJSON); err != nil {
-			return err
-		}
-	}
-	findings.SurvivedWork = work
-	raw, err := types.MarshalFindingsJSON(findings)
-	if err != nil {
-		return err
-	}
-	return e.db.SetStepFindings(stepResultID, raw)
 }
 
 // withoutSurvivedWork drops survived-work evidence from a findings payload.

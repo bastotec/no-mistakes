@@ -573,3 +573,67 @@ func (d *DB) ClearStepFindings(id string) error {
 	}
 	return nil
 }
+
+// ReplaceRunSurvivedWork removes every survived-work record from the run's
+// step findings and, when work is non-nil, records it on stepResultID, in one
+// transaction: an interruption leaves either the old handoff or the new one,
+// never neither.
+func (d *DB) ReplaceRunSurvivedWork(runID, stepResultID string, work *types.SurvivedWork) error {
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin survived-work update: %w", err)
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(`SELECT id, findings_json FROM step_results WHERE run_id = ?`, runID)
+	if err != nil {
+		return fmt.Errorf("read survived-work records: %w", err)
+	}
+	updates := map[string]string{}
+	targetFound := false
+	for rows.Next() {
+		var id string
+		var raw *string
+		if err := rows.Scan(&id, &raw); err != nil {
+			rows.Close()
+			return fmt.Errorf("scan survived-work records: %w", err)
+		}
+		var findings types.Findings
+		if raw != nil {
+			parsed, err := types.ParseFindingsJSON(*raw)
+			if err != nil {
+				rows.Close()
+				return fmt.Errorf("parse step findings: %w", err)
+			}
+			findings = parsed
+		}
+		if id == stepResultID && work != nil {
+			targetFound = true
+			findings.SurvivedWork = work
+		} else if findings.SurvivedWork != nil {
+			findings.SurvivedWork = nil
+		} else {
+			continue
+		}
+		encoded, err := types.MarshalFindingsJSON(findings)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		updates[id] = encoded
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if work != nil && !targetFound {
+		return fmt.Errorf("step result %s is not part of run %s", stepResultID, runID)
+	}
+	for id, encoded := range updates {
+		if _, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, encoded, id); err != nil {
+			return fmt.Errorf("write survived-work record: %w", err)
+		}
+	}
+	return tx.Commit()
+}

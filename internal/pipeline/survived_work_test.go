@@ -359,3 +359,58 @@ func TestExecutor_RestoredWorkNotCommittedIsCapturedAgain(t *testing.T) {
 		t.Fatalf("recaptured work = %q", got)
 	}
 }
+
+// A dirty submodule's edits cannot be written as a superproject tree, so
+// such work stays in place, where cleanup keeps it, instead of being reported
+// as captured.
+func TestCaptureSurvivedWork_DirtySubmoduleStaysInPlace(t *testing.T) {
+	sub := survivedWorkRepo(t)
+	dir := survivedWorkRepo(t)
+	gitRun(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "sub")
+	gitRun(t, dir, "commit", "-qm", "add submodule")
+	writeFile(t, filepath.Join(dir, "sub"), "tracked.txt", "edited inside the submodule\n")
+
+	work := CaptureSurvivedWork(dir, "run-8", nil)
+	if work == nil || work.Ref != "" || !strings.Contains(work.InspectionError, "submodule sub") {
+		t.Fatalf("dirty submodule reported as captured: %+v", work)
+	}
+	if got := readFile(t, filepath.Join(dir, "sub"), "tracked.txt"); got != "edited inside the submodule\n" {
+		t.Fatalf("submodule edit lost: %q", got)
+	}
+}
+
+// On daemon shutdown an independent repair may still be editing, so a round
+// that restored work leaves the worktree and the handoff alone.
+func TestExecutor_ShutdownLeavesRestoredWorkAlone(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work := CaptureSurvivedWork(dir, run.ID, nil)
+	prior, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: work})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetStepFindings(prior.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		writeFile(t, dir, "in-flight.txt", "agent still writing\n")
+		return nil, ErrDaemonShutdown
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+	_ = exec.Execute(context.Background(), run, repo, dir)
+	if got := readFile(t, dir, "in-flight.txt"); got != "agent still writing\n" {
+		t.Fatalf("shutdown settlement touched the live repair's files: %q", got)
+	}
+	left, err := LatestSurvivedWork(database, run.ID)
+	if err != nil || left == nil || left.Ref != work.Ref {
+		t.Fatalf("handoff changed on shutdown: %+v %v", left, err)
+	}
+}

@@ -54,7 +54,9 @@ func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all")
+	// Raw output: a porcelain line's leading status column is significant.
+	statusRaw, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all")
+	status := string(statusRaw)
 	if err == nil && strings.TrimSpace(status) == "" {
 		return nil
 	}
@@ -65,6 +67,18 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		return work
 	}
 	work.Files = strings.Split(strings.TrimRight(status, "\r\n"), "\n")
+	// A dirty submodule's own edits live in its repository, not in anything
+	// the superproject can write as a tree: capture would record a gitlink
+	// and lose them. Leave such work in place.
+	if dirty, err := dirtySubmodule(ctx, workDir, status); err != nil || dirty != "" {
+		if err != nil {
+			work.InspectionError = "could not check submodules: " + err.Error()
+		} else {
+			work.InspectionError = "submodule " + dirty + " has uncommitted changes the capture cannot hold"
+		}
+		work.Next = survivedWorkInPlaceNext
+		return work
+	}
 	base, commit, err := snapshotSurvivedWork(ctx, workDir)
 	if err != nil {
 		work.InspectionError = "could not capture the uncommitted work: " + err.Error()
@@ -218,35 +232,9 @@ func LatestSurvivedWork(database *db.DB, runID string) (*types.SurvivedWork, err
 	return nil, nil
 }
 
-// ClearSurvivedWork drops the evidence once its work is back in the worktree:
-// from then on it is ordinary repair work, and a repair that is cut short again
-// captures it afresh.
+// ClearSurvivedWork drops the evidence once a repair committed the work.
 func ClearSurvivedWork(database *db.DB, runID string) error {
-	steps, err := database.GetStepsByRun(runID)
-	if err != nil {
-		return err
-	}
-	for _, step := range steps {
-		if step.FindingsJSON == nil {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-		if err != nil {
-			return err
-		}
-		if findings.SurvivedWork == nil {
-			continue
-		}
-		findings.SurvivedWork = nil
-		raw, err := types.MarshalFindingsJSON(findings)
-		if err != nil {
-			return err
-		}
-		if err := database.SetStepFindings(step.ID, raw); err != nil {
-			return err
-		}
-	}
-	return nil
+	return database.ReplaceRunSurvivedWork(runID, "", nil)
 }
 
 // SurvivedWorkPrompt tells a repair whose worktree holds restored work what it
@@ -272,4 +260,30 @@ func survivedWorkUnclean(workDir string) bool {
 // worktree still holds changes.
 func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string) bool {
 	return work != nil && work.Ref == "" && survivedWorkUnclean(workDir)
+}
+
+// dirtySubmodule returns the first changed path in status that is a
+// submodule (a gitlink in the index), or "".
+func dirtySubmodule(ctx context.Context, workDir, status string) (string, error) {
+	stage, err := git.Run(ctx, workDir, "ls-files", "--stage")
+	if err != nil {
+		return "", err
+	}
+	gitlinks := map[string]bool{}
+	for _, line := range strings.Split(stage, "\n") {
+		if strings.HasPrefix(line, "160000 ") {
+			if tab := strings.IndexByte(line, '\t'); tab >= 0 {
+				gitlinks[line[tab+1:]] = true
+			}
+		}
+	}
+	if len(gitlinks) == 0 {
+		return "", nil
+	}
+	for _, line := range strings.Split(status, "\n") {
+		if len(line) > 3 && gitlinks[strings.TrimSpace(line[3:])] {
+			return strings.TrimSpace(line[3:]), nil
+		}
+	}
+	return "", nil
 }
