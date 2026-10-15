@@ -1269,6 +1269,11 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(fmt.Sprintf("⚠️ **%s** - findings unavailable", name))
 	}
 
+	// A review that went on without an angle never reads as a clean pass.
+	if sr.StepName == types.StepReview && finalFindings != nil && len(finalFindings.ReviewUnreviewed) > 0 && !hadAnyFindings {
+		return buildDetail(fmt.Sprintf("⚠️ **%s** - passed, not reviewed: %s", name, strings.Join(finalFindings.ReviewUnreviewed, ", ")))
+	}
+
 	if sr.StepName == types.StepReview && (riskLevel == "medium" || riskLevel == "high") && !hadAnyFindings {
 		return buildDetail(fmt.Sprintf("%s **%s** - %s risk", riskEmoji(riskLevel), name, riskLevel))
 	}
@@ -1515,6 +1520,10 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			}
 			inner.WriteString("\n")
 			continue
+		}
+
+		if len(findings.ReviewUnreviewed) > 0 {
+			inner.WriteString("⚠️ " + unreviewedAnglesLine(findings.ReviewUnreviewed) + "\n\n")
 		}
 
 		if len(findings.Items) == 0 {

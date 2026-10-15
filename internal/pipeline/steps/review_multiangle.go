@@ -145,10 +145,16 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 	merged.Summary = fmt.Sprintf("Multi-angle review (%s): %d finders, %d claims, %d after de-duplication; %d confirmed, %d plausible, %d refuted.",
 		plan.Effort, len(plan.Dimensions), claims, len(candidates)+len(overflow), confirmed, plausible, len(candidates)+len(overflow)-confirmed-plausible)
 	if len(unreviewed) > 0 {
-		merged.Summary += fmt.Sprintf(" Not reviewed (finder ran out of time): %s.", strings.Join(unreviewed, ", "))
+		merged.ReviewUnreviewed = unreviewed
+		merged.Summary += " " + unreviewedAnglesLine(unreviewed)
 	}
 	log(merged.Summary)
 	return merged, nil
+}
+
+// unreviewedAnglesLine names the angles a review went on without.
+func unreviewedAnglesLine(dims []string) string {
+	return fmt.Sprintf("Not reviewed (finder ran out of time): %s.", strings.Join(dims, ", "))
 }
 
 // finderFailures decides what the finders' errors mean for the review. It

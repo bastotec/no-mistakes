@@ -508,7 +508,7 @@ func TestReviewStep_MultiAngleTimedOutFinderIsReportedNotFatal(t *testing.T) {
 		t.Fatalf("Execute() error = %v, want the review to go on without the security angle", err)
 	}
 	findings, err := types.ParseFindingsJSON(outcome.Findings)
-	if err != nil || !strings.Contains(findings.Summary, "Not reviewed (finder ran out of time): security.") {
+	if err != nil || !strings.Contains(findings.Summary, "Not reviewed (finder ran out of time): security.") || len(findings.ReviewUnreviewed) != 1 {
 		t.Fatalf("summary = %q, %v; want the unreviewed angle named", findings.Summary, err)
 	}
 }

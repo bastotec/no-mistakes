@@ -295,6 +295,10 @@ type Findings struct {
 	// the review step; the PR attestation publishes them.
 	ReviewEffort       string `json:"review_effort,omitempty"`
 	ReviewEffortReason string `json:"review_effort_reason,omitempty"`
+	// ReviewUnreviewed names the multi-angle dimensions whose finder ran out
+	// of time, so the review went on without them. Written only by the
+	// review step; the PR summary shows them.
+	ReviewUnreviewed []string `json:"review_unreviewed,omitempty"`
 }
 
 type findingsWire struct {
@@ -315,6 +319,7 @@ type findingsWire struct {
 	RoundCap           int            `json:"round_cap"`
 	ReviewEffort       string         `json:"review_effort"`
 	ReviewEffortReason string         `json:"review_effort_reason"`
+	ReviewUnreviewed   []string       `json:"review_unreviewed"`
 }
 
 // ParseFindingsJSON decodes findings JSON, accepting current and legacy item
@@ -345,6 +350,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		RoundCap:           wire.RoundCap,
 		ReviewEffort:       wire.ReviewEffort,
 		ReviewEffortReason: wire.ReviewEffortReason,
+		ReviewUnreviewed:   wire.ReviewUnreviewed,
 	}, nil
 }
 

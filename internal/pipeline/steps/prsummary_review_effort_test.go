@@ -57,3 +57,21 @@ func TestRebindPipelineAttestation_ReviewLevelFollowsTheSteps(t *testing.T) {
 		t.Fatalf("rebind with this run's skipped review = %+v, want no level", got)
 	}
 }
+
+// A review that went on without an angle shows it on the PR instead of
+// reading as a clean pass.
+func TestBuildPipelineSummary_NamesUnreviewedAngles(t *testing.T) {
+	t.Parallel()
+	review := `{"findings":[],"risk_level":"low","risk_rationale":"clean","review_effort":"high","review_unreviewed":["security"]}`
+	steps := []*db.StepResult{{ID: "review", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &review}}
+	rounds := map[string][]*db.StepRound{"review": {{Round: 1, Trigger: "initial", FindingsJSON: &review}}}
+	md, _ := buildPipelineSummaryFor(steps, rounds, testPipelineHeadSHA, scm.ProviderUnknown, pipelineAttestationPolicy{})
+	for _, want := range []string{"**Review** - passed, not reviewed: security", "Not reviewed (finder ran out of time): security."} {
+		if !strings.Contains(md, want) {
+			t.Fatalf("summary missing %q:\n%s", want, md)
+		}
+	}
+	if strings.Contains(md, "✅ **Review** - passed") {
+		t.Fatalf("review with an unreviewed angle reads as a clean pass:\n%s", md)
+	}
+}
