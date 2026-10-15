@@ -1138,7 +1138,32 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	// A rerun is not an operator claiming the pull request's head: the branch's
 	// own association supplies the target, and the head it publishes is proven
 	// against the remote before the push like every other run's.
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), "")
+	runID, err := m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), "")
+	if err == nil {
+		m.carrySurvivedWork(repo.ID, selectedRun.ID, runID)
+	}
+	return runID, err
+}
+
+// carrySurvivedWork hands a terminal run's captured repair work to the run
+// that reruns it, so that run's next authorized repair restores it; a
+// repair timeout that failed its step would otherwise leave the work where no
+// repair can reach it. Only captured work moves: it lives in a ref, not in
+// the old worktree. Best effort: the ref and the old record stay on failure.
+func (m *RunManager) carrySurvivedWork(repoID, fromRunID, toRunID string) {
+	work, err := m.db.GetRunSurvivedWork(fromRunID)
+	if err != nil || work == nil || work.State != types.SurvivedWorkCaptured {
+		return
+	}
+	carried := *work
+	carried.Worktree = m.paths.WorktreeDir(repoID, toRunID)
+	if err := m.db.SetRunSurvivedWork(toRunID, &carried); err != nil {
+		slog.Warn("could not carry interrupted repair work to the rerun", "from_run", fromRunID, "to_run", toRunID, "error", err)
+		return
+	}
+	if err := m.db.ClearRunSurvivedWork(fromRunID); err != nil {
+		slog.Warn("could not clear carried interrupted repair work", "run_id", fromRunID, "error", err)
+	}
 }
 
 func inheritablePRURL(run *db.Run) string {

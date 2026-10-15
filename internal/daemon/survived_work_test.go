@@ -113,3 +113,52 @@ func TestCapturedSurvivedWorkDoesNotHoldTheWorktreeButRestoredWorkDoes(t *testin
 		t.Fatal("restored work released a dirty worktree")
 	}
 }
+
+// A rerun takes over a terminal run's captured repair work, so its next
+// authorized repair can restore it; work still in the old worktree stays.
+func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, head := setupTestGitRepo(t, p, database, "survived-carry")
+	old, err := database.InsertRun(repo.ID, "main", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next, err := database.InsertRun(repo.ID, "main", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := NewRunManager(database, p, nil)
+	captured := &types.SurvivedWork{State: types.SurvivedWorkCaptured, Worktree: "/old", Ref: "refs/no-mistakes/survived/" + old.ID + "/abc", BaseSHA: head, Next: "n"}
+	if err := database.SetRunSurvivedWork(old.ID, captured); err != nil {
+		t.Fatal(err)
+	}
+	m.carrySurvivedWork(repo.ID, old.ID, next.ID)
+	moved, err := database.GetRunSurvivedWork(next.ID)
+	if err != nil || moved == nil || moved.Ref != captured.Ref || moved.Worktree != p.WorktreeDir(repo.ID, next.ID) {
+		t.Fatalf("carried handoff = %+v %v", moved, err)
+	}
+	if left, _ := database.GetRunSurvivedWork(old.ID); left != nil {
+		t.Fatalf("old run kept the carried handoff: %+v", left)
+	}
+
+	inPlace := &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: "/old", Next: "n"}
+	if err := database.SetRunSurvivedWork(old.ID, inPlace); err != nil {
+		t.Fatal(err)
+	}
+	third, err := database.InsertRun(repo.ID, "main", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.carrySurvivedWork(repo.ID, old.ID, third.ID)
+	if moved, _ := database.GetRunSurvivedWork(third.ID); moved != nil {
+		t.Fatalf("in-place work moved off its worktree: %+v", moved)
+	}
+}

@@ -248,11 +248,20 @@ func TestExecutor_NextFixRoundRestoresSurvivedWork(t *testing.T) {
 func TestCaptureSurvivedWork_RecordsBeforeCleaningAndKeepsWorkWhenItCannot(t *testing.T) {
 	dir := survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
+	var states []types.SurvivedWorkState
 	var dirtyWhenRecorded bool
-	work, _ := CaptureSurvivedWork(dir, "run-6", func(*types.SurvivedWork) error {
-		dirtyWhenRecorded = gitRun(t, dir, "status", "--porcelain", "--untracked-files=all") != ""
+	work, _ := CaptureSurvivedWork(dir, "run-6", func(w *types.SurvivedWork) error {
+		if len(states) == 0 {
+			dirtyWhenRecorded = gitRun(t, dir, "status", "--porcelain", "--untracked-files=all") != ""
+		}
+		states = append(states, w.State)
 		return nil
 	})
+	// First in place, while the worktree still holds the work; captured
+	// only once the worktree is verified clean.
+	if len(states) != 2 || states[0] != types.SurvivedWorkInPlace || states[1] != types.SurvivedWorkCaptured {
+		t.Fatalf("recorded states = %v, want in_place then captured", states)
+	}
 	if work == nil || work.Ref == "" || !dirtyWhenRecorded {
 		t.Fatalf("evidence was not recorded before the worktree was cleaned: %+v recordedDirty=%v", work, dirtyWhenRecorded)
 	}

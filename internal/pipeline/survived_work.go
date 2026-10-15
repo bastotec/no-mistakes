@@ -179,7 +179,10 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
-	work.State, work.Ref, work.BaseSHA = types.SurvivedWorkCaptured, ref, base
+	// Recorded in place first: until the worktree is verified clean below,
+	// the worktree may still hold work the ref does not (a nested
+	// repository), and only in_place keeps cleanup away from it.
+	work.State, work.Ref, work.BaseSHA = types.SurvivedWorkInPlace, ref, base
 	work.Next = fmt.Sprintf("Captured in %s and removed from the worktree, so nothing commits or pushes it. The next authorized repair restores it before it runs and continues it within its selected findings; only that repair's commit publishes it. To recover it by hand: git diff %s %s.", ref, base, ref)
 	// Only once the ref holds the work and the evidence is durable is the
 	// worktree returned to HEAD.
@@ -206,10 +209,17 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 			work.InspectionError = "captured, but changes the capture cannot hold (such as a nested repository) are still in the worktree"
 		}
 	}
+	if work.InspectionError == "" {
+		work.State = types.SurvivedWorkCaptured
+		if err := record(work); err != nil {
+			// The ref holds everything and the worktree is clean; the in_place
+			// row still points at the ref, so nothing is lost.
+			work.State = types.SurvivedWorkInPlace
+		}
+	}
 	if work.InspectionError != "" {
 		// The work is still (partly) in the worktree: it stays in place,
 		// and the ref is kept for recovery. The caller records this.
-		work.State = types.SurvivedWorkInPlace
 		work.Next = fmt.Sprintf("Captured in %s, but also still in the run worktree, which cleanup keeps while it holds changes. Recover it with git diff %s %s, or from the worktree.", ref, base, ref)
 	}
 	return work
