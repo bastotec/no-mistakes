@@ -11,8 +11,8 @@ const (
 	// SurvivedWorkRestored: a fix round put the work back into the worktree;
 	// Ref still holds the capture it came from.
 	SurvivedWorkRestored SurvivedWorkState = "restored"
-	// SurvivedWorkInPlace: the work could not be captured and was left in
-	// the worktree.
+	// SurvivedWorkInPlace: capture or restore has not been confirmed complete;
+	// work may remain wholly in the worktree or be split with Ref.
 	SurvivedWorkInPlace SurvivedWorkState = "in_place"
 )
 
@@ -29,7 +29,7 @@ type SurvivedWork struct {
 	Worktree string            `json:"worktree"`
 	Files    []string          `json:"files,omitempty"`
 	// Ref and BaseSHA locate the captured work: a run-owned local ref whose
-	// commits sit on BaseSHA. Empty for in-place work.
+	// commits sit on BaseSHA. Empty when no ref-backed handoff was recorded.
 	Ref             string `json:"ref,omitempty"`
 	BaseSHA         string `json:"base_sha,omitempty"`
 	InspectionError string `json:"inspection_error,omitempty"`

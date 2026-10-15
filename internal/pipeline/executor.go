@@ -1619,10 +1619,10 @@ done:
 }
 
 // restoreSurvivedWork puts the run's captured work back before an authorized
-// fix round and marks it restored before touching the worktree, so cleanup
-// holds the worktree from then on. Work a shutdown left restored is already in
-// the worktree and is continued as it is. Work that cannot be restored stays
-// captured and the round runs without it.
+// fix round, recording in_place before touching the worktree and restored
+// only after restoration completes, so a crash cannot certify a partial restore.
+// Work a shutdown left restored is continued as it is. A failed restore keeps
+// the capture and stops the round rather than continuing without its work.
 func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(string)) (*types.SurvivedWork, error) {
 	work, err := e.db.GetRunSurvivedWork(runID)
 	if err != nil {

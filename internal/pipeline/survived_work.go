@@ -318,9 +318,10 @@ func snapshotSurvivedWork(ctx context.Context, workDir string) (base, commit str
 
 // RestoreSurvivedWork puts captured work back into a clean worktree before an
 // authorized repair runs. On the HEAD it was captured from, the index and the
-// working tree come back exactly; on a moved HEAD the working-tree changes are
-// three-way applied, unstaged. A restore that cannot apply cleanly leaves the
-// worktree as it was and returns an error; the ref and its evidence stay.
+// working tree come back exactly; on a moved HEAD the staged layer and then
+// the unstaged layer are each merged three-way, preserving their index split.
+// A restore that cannot apply cleanly leaves the worktree as it was and
+// returns an error; the ref and its evidence stay.
 func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 	if work == nil || work.Ref == "" {
 		return fmt.Errorf("no captured work to restore")
