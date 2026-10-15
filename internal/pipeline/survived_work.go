@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -35,19 +36,107 @@ const survivedWorkGitTimeout = 30 * time.Second
 // run-owned ref and returns the worktree to HEAD. It returns nil for a clean
 // worktree. record makes the evidence durable and is called before the
 // worktree is touched, so a crash in between leaves the work in both places,
-// never in neither. When the work cannot be captured or recorded it is left
-// where it is, the evidence says why, and Ref is empty: cleanup then refuses
-// to remove the worktree (see the daemon) rather than lose it.
-func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
+// never in neither. When the work cannot be captured, recorded or removed it
+// stays where it is, marked in_place, and cleanup refuses to remove the
+// worktree (see the daemon) rather than lose it. The error reports in-place
+// work whose handoff could not be recorded either: a marker file in the
+// worktree's git directory then stands in for it, best effort.
+func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) (*types.SurvivedWork, error) {
 	if record == nil {
 		record = func(*types.SurvivedWork) error { return nil }
 	}
 	work := captureSurvivedWork(workDir, runID, record)
-	if work != nil && work.Ref == "" {
-		// Best effort: in-place evidence is what keeps cleanup away.
-		_ = record(work)
+	if work == nil || work.State != types.SurvivedWorkInPlace {
+		return work, nil
 	}
-	return work
+	if err := record(work); err != nil {
+		writeSurvivedWorkMarker(workDir)
+		return work, fmt.Errorf("record interrupted repair work left in %s: %w", workDir, err)
+	}
+	return work, nil
+}
+
+// survivedWorkMarker names the file in a worktree's git directory that keeps
+// cleanup away from in-place work whose handoff could not be recorded.
+const survivedWorkMarker = "no-mistakes-survived-work"
+
+func survivedWorkMarkerPath(workDir string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
+	defer cancel()
+	dir, err := git.Run(ctx, workDir, "rev-parse", "--path-format=absolute", "--git-dir")
+	if err != nil || strings.TrimSpace(dir) == "" {
+		return ""
+	}
+	return filepath.Join(strings.TrimSpace(dir), survivedWorkMarker)
+}
+
+func writeSurvivedWorkMarker(workDir string) {
+	if path := survivedWorkMarkerPath(workDir); path != "" {
+		_ = os.WriteFile(path, []byte("interrupted repair work left in this worktree\n"), 0o600)
+	}
+}
+
+// SurvivedWorkMarked reports whether in-place work whose handoff could not be
+// recorded marked this worktree, and drops the marker once the worktree is
+// clean again.
+func SurvivedWorkMarked(workDir string) bool {
+	path := survivedWorkMarkerPath(workDir)
+	if path == "" {
+		return false
+	}
+	if _, err := os.Stat(path); err != nil {
+		return false
+	}
+	if survivedWorkUnclean(workDir) {
+		return true
+	}
+	_ = os.Remove(path)
+	return false
+}
+
+// SurvivedWorkRecorder returns the record callback that stores a run's
+// handoff and then deletes the capture ref it replaced, so only the latest
+// capture is kept. A replaced in-place handoff has no ref; a new in-place one
+// keeps the old ref, since that is all that is known to hold the work.
+func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.SurvivedWork) error {
+	return func(work *types.SurvivedWork) error {
+		previous, err := database.GetRunSurvivedWork(runID)
+		if err != nil {
+			return err
+		}
+		if err := database.SetRunSurvivedWork(runID, work); err != nil {
+			return err
+		}
+		if previous != nil && previous.Ref != "" && work.Ref != "" && previous.Ref != work.Ref {
+			deleteSurvivedWorkRef(workDir, previous.Ref)
+		}
+		return nil
+	}
+}
+
+// ClearSurvivedWork drops the run's handoff once a repair committed the work,
+// and the capture ref with it.
+func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
+	previous, err := database.GetRunSurvivedWork(runID)
+	if err != nil {
+		return err
+	}
+	if err := database.ClearRunSurvivedWork(runID); err != nil {
+		return err
+	}
+	if previous != nil && previous.Ref != "" {
+		deleteSurvivedWorkRef(workDir, previous.Ref)
+	}
+	return nil
+}
+
+func deleteSurvivedWorkRef(workDir, ref string) {
+	if !strings.HasPrefix(ref, survivedWorkRefPrefix) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
+	defer cancel()
+	_, _ = git.Run(ctx, workDir, "update-ref", "-d", ref)
 }
 
 func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
@@ -109,7 +198,10 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		work.InspectionError = "captured, but the worktree could not be reset: " + err.Error()
 	}
 	if work.InspectionError != "" {
-		_ = record(work)
+		// The work is still (partly) in the worktree: it stays in place,
+		// and the ref is kept for recovery. The caller records this.
+		work.State = types.SurvivedWorkInPlace
+		work.Next = fmt.Sprintf("Captured in %s, but also still in the run worktree, which cleanup keeps while it holds changes. Recover it with git diff %s %s, or from the worktree.", ref, base, ref)
 	}
 	return work
 }

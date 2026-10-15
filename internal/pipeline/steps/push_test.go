@@ -1617,7 +1617,7 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	if _, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI); err != nil {
 		t.Fatal(err)
 	}
-	work := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID, func(w *types.SurvivedWork) error {
+	work, _ := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID, func(w *types.SurvivedWork) error {
 		return sctx.DB.SetRunSurvivedWork(sctx.Run.ID, w)
 	})
 	if work == nil || work.Ref == "" {

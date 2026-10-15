@@ -66,13 +66,13 @@ func leavePartialRepair(t *testing.T, dir string) {
 
 func TestCaptureSurvivedWork_MovesTheWorkIntoARefAndRestoresItExactly(t *testing.T) {
 	dir := survivedWorkRepo(t)
-	if work := CaptureSurvivedWork(dir, "run-1", nil); work != nil {
+	if work, _ := CaptureSurvivedWork(dir, "run-1", nil); work != nil {
 		t.Fatalf("clean worktree captured: %+v", work)
 	}
 	leavePartialRepair(t, dir)
 	head := gitRun(t, dir, "rev-parse", "HEAD")
 
-	work := CaptureSurvivedWork(dir, "run-1", nil)
+	work, _ := CaptureSurvivedWork(dir, "run-1", nil)
 	if work == nil || work.InspectionError != "" || !strings.HasPrefix(work.Ref, "refs/no-mistakes/survived/run-1/") || work.BaseSHA != head || len(work.Files) != 3 {
 		t.Fatalf("capture = %+v", work)
 	}
@@ -109,7 +109,7 @@ func TestCaptureSurvivedWork_MovesTheWorkIntoARefAndRestoresItExactly(t *testing
 func TestRestoreSurvivedWork_OnAMovedHeadAppliesTheWorkUnstaged(t *testing.T) {
 	dir := survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
-	work := CaptureSurvivedWork(dir, "run-2", nil)
+	work, _ := CaptureSurvivedWork(dir, "run-2", nil)
 	writeFile(t, dir, "unrelated.txt", "moved\n")
 	gitRun(t, dir, "add", "unrelated.txt")
 	gitRun(t, dir, "commit", "-m", "head moved")
@@ -131,7 +131,7 @@ func TestRestoreSurvivedWork_OnAMovedHeadAppliesTheWorkUnstaged(t *testing.T) {
 func TestRestoreSurvivedWork_ConflictLeavesTheWorktreeCleanAndTheRef(t *testing.T) {
 	dir := survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
-	work := CaptureSurvivedWork(dir, "run-3", nil)
+	work, _ := CaptureSurvivedWork(dir, "run-3", nil)
 	writeFile(t, dir, "tracked.txt", "conflicting head\n")
 	gitRun(t, dir, "commit", "-qam", "conflict")
 
@@ -149,7 +149,7 @@ func TestRestoreSurvivedWork_ConflictLeavesTheWorktreeCleanAndTheRef(t *testing.
 func TestRestoreSurvivedWork_RefusesADirtyWorktree(t *testing.T) {
 	dir := survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
-	work := CaptureSurvivedWork(dir, "run-4", nil)
+	work, _ := CaptureSurvivedWork(dir, "run-4", nil)
 	writeFile(t, dir, "other.txt", "someone else's change\n")
 	if err := RestoreSurvivedWork(dir, work); err == nil {
 		t.Fatal("restore mixed captured work into a dirty worktree")
@@ -157,7 +157,7 @@ func TestRestoreSurvivedWork_RefusesADirtyWorktree(t *testing.T) {
 }
 
 func TestCaptureSurvivedWork_UnreadableStatusStaysInPlace(t *testing.T) {
-	work := CaptureSurvivedWork(filepath.Join(t.TempDir(), "missing"), "run-5", nil)
+	work, _ := CaptureSurvivedWork(filepath.Join(t.TempDir(), "missing"), "run-5", nil)
 	if work == nil || work.InspectionError == "" || work.Ref != "" {
 		t.Fatalf("unreadable status treated as clean or captured: %+v", work)
 	}
@@ -212,7 +212,7 @@ func TestExecutor_NextFixRoundRestoresSurvivedWork(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	work := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 
 	var sawInPlainRound, sawInFixRound bool
 	var restored *types.SurvivedWork
@@ -249,7 +249,7 @@ func TestCaptureSurvivedWork_RecordsBeforeCleaningAndKeepsWorkWhenItCannot(t *te
 	dir := survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
 	var dirtyWhenRecorded bool
-	work := CaptureSurvivedWork(dir, "run-6", func(*types.SurvivedWork) error {
+	work, _ := CaptureSurvivedWork(dir, "run-6", func(*types.SurvivedWork) error {
 		dirtyWhenRecorded = gitRun(t, dir, "status", "--porcelain", "--untracked-files=all") != ""
 		return nil
 	})
@@ -259,7 +259,7 @@ func TestCaptureSurvivedWork_RecordsBeforeCleaningAndKeepsWorkWhenItCannot(t *te
 
 	dir = survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
-	work = CaptureSurvivedWork(dir, "run-7", func(w *types.SurvivedWork) error {
+	work, _ = CaptureSurvivedWork(dir, "run-7", func(w *types.SurvivedWork) error {
 		if w.Ref != "" {
 			return fmt.Errorf("database is locked")
 		}
@@ -283,7 +283,7 @@ func TestExecutor_RestoredWorkNotCommittedIsCapturedAgain(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	_, _ = CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 	// Findings are agent-written: a survived_work key in them is ignored.
 	gate := `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}],"survived_work":{"worktree":"x","ref":"refs/forged","base_sha":"abc","next":"n"}}`
 	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
@@ -317,7 +317,7 @@ func TestCaptureSurvivedWork_DirtySubmoduleStaysInPlace(t *testing.T) {
 	gitRun(t, dir, "commit", "-qm", "add submodule")
 	writeFile(t, filepath.Join(dir, "sub"), "tracked.txt", "edited inside the submodule\n")
 
-	work := CaptureSurvivedWork(dir, "run-8", nil)
+	work, _ := CaptureSurvivedWork(dir, "run-8", nil)
 	if work == nil || work.Ref != "" || !strings.Contains(work.InspectionError, "submodule sub") {
 		t.Fatalf("dirty submodule reported as captured: %+v", work)
 	}
@@ -332,7 +332,7 @@ func TestExecutor_ShutdownLeavesRestoredWorkAlone(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	work := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		if !sctx.Fixing {
 			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
@@ -361,14 +361,14 @@ func TestExecutor_StepRecaptureOfRestoredWorkIsKept(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	_, _ = CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 	var recaptured *types.SurvivedWork
 	step := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		if !sctx.Fixing {
 			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
 		}
 		writeFile(t, dir, "more.txt", "more\n")
-		recaptured = CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+		recaptured, _ = CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 		return &StepOutcome{}, nil
 	}}
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
@@ -388,7 +388,7 @@ func TestExecutor_PlainRoundRecapturesWorkAShutdownLeftRestored(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	work := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 	if err := RestoreSurvivedWork(dir, work); err != nil {
 		t.Fatal(err)
 	}
@@ -416,5 +416,75 @@ func TestExecutor_PlainRoundRecapturesWorkAShutdownLeftRestored(t *testing.T) {
 	}
 	if got := gitRun(t, dir, "show", left.Ref+":partial.txt"); got != "survived" {
 		t.Fatalf("recaptured work = %q", got)
+	}
+}
+
+// Only the latest capture is kept: a replaced capture's ref is deleted, and
+// so is the last one once a repair committed the work.
+func TestSurvivedWorkRecorderReleasesSupersededRefs(t *testing.T) {
+	database, _, run, _ := setupTest(t)
+	dir := survivedWorkRepo(t)
+	record := SurvivedWorkRecorder(database, run.ID, dir)
+	writeFile(t, dir, "first.txt", "one\n")
+	first, _ := CaptureSurvivedWork(dir, run.ID, record)
+	writeFile(t, dir, "second.txt", "two\n")
+	second, _ := CaptureSurvivedWork(dir, run.ID, record)
+	if first == nil || second == nil || first.Ref == second.Ref {
+		t.Fatalf("captures = %+v / %+v", first, second)
+	}
+	if _, err := git.Run(context.Background(), dir, "rev-parse", "--verify", "-q", first.Ref); err == nil {
+		t.Fatal("superseded capture ref kept")
+	}
+	if err := ClearSurvivedWork(database, run.ID, dir); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := git.Run(context.Background(), dir, "rev-parse", "--verify", "-q", second.Ref); err == nil {
+		t.Fatal("committed capture ref kept")
+	}
+}
+
+// In-place work whose handoff cannot be recorded fails loudly and marks the
+// worktree, so cleanup keeps it without the row.
+func TestCaptureSurvivedWork_UnrecordableInPlaceWorkMarksTheWorktree(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	failing := func(*types.SurvivedWork) error { return fmt.Errorf("disk full") }
+	work, err := CaptureSurvivedWork(dir, "run-9", failing)
+	if work == nil || work.State != types.SurvivedWorkInPlace || err == nil || !strings.Contains(err.Error(), "disk full") {
+		t.Fatalf("capture = %+v, %v; want in-place work and the record error", work, err)
+	}
+	if !SurvivedWorkMarked(dir) {
+		t.Fatal("unrecorded in-place work left no marker")
+	}
+	if err := os.Remove(filepath.Join(dir, "partial.txt")); err != nil {
+		t.Fatal(err)
+	}
+	if SurvivedWorkMarked(dir) {
+		t.Fatal("marker held a clean worktree")
+	}
+}
+
+// A cancelled round (shutdown or abort, as the CI repair reports it) never
+// settles restored work: a dispatched repair may still be editing.
+func TestExecutor_CancelledRoundLeavesRestoredWorkAlone(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	step := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		writeFile(t, dir, "in-flight.txt", "agent still writing\n")
+		return nil, context.Canceled
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
+	_ = exec.Execute(context.Background(), run, repo, dir)
+	if got := readFile(t, dir, "in-flight.txt"); got != "agent still writing\n" {
+		t.Fatalf("cancelled round's settlement touched the live repair's files: %q", got)
+	}
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkRestored {
+		t.Fatalf("handoff changed on cancel: %+v %v", left, err)
 	}
 }

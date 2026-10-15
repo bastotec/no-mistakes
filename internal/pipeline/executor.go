@@ -1221,10 +1221,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		outcome, err := step.Execute(sctx)
 		timedOut := fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout))
 		// A timed-out repair's leftovers, and restored work a round did not
-		// commit, go back where nothing can publish them. Not on shutdown: an
-		// independent repair wrapper may still be editing the worktree, and
-		// recovery owns that round.
-		if timedOut || (sctx.RestoredSurvivedWork != nil && !errors.Is(err, ErrDaemonShutdown)) {
+		// commit, go back where nothing can publish them. Not while the round
+		// was cancelled (shutdown or abort) or a repair it dispatched may still
+		// be running: an independent repair wrapper may still be editing the
+		// worktree, the handoff stays restored, and cleanup keeps the worktree.
+		if (timedOut || sctx.RestoredSurvivedWork != nil) && e.mayTouchRepairWorktree(sctx, run.ID, err) {
 			if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
 				return false, "", settleErr
 			}
@@ -1645,19 +1646,27 @@ func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writ
 	if !timedOut && !wasRestored {
 		return nil
 	}
-	record := func(work *types.SurvivedWork) error {
-		return e.db.SetRunSurvivedWork(runID, work)
-	}
-	work := CaptureSurvivedWork(workDir, runID, record)
+	work, err := CaptureSurvivedWork(workDir, runID, SurvivedWorkRecorder(e.db, runID, workDir))
 	switch {
 	case work != nil && timedOut:
 		writeLog("interrupted repair left uncommitted work: " + work.Next)
 	case work != nil:
 		writeLog("restored repair work was not committed this round: " + work.Next)
 	case wasRestored:
-		return e.db.ClearRunSurvivedWork(runID)
+		return ClearSurvivedWork(e.db, runID, workDir)
 	}
-	return nil
+	return err
+}
+
+// mayTouchRepairWorktree reports whether settlement may snapshot and reset
+// the worktree after a round: not once the round was cancelled, and not
+// while a repair it dispatched may still be running.
+func (e *Executor) mayTouchRepairWorktree(sctx *StepContext, runID string, err error) bool {
+	if errors.Is(err, ErrDaemonShutdown) || errors.Is(err, context.Canceled) || (sctx.Ctx != nil && sctx.Ctx.Err() != nil) {
+		return false
+	}
+	active, dispatchErr := e.db.HasStartedRepairDispatch(runID)
+	return dispatchErr == nil && !active
 }
 
 // applyReviewRoundCap enforces review.max_rounds on one review outcome. Once

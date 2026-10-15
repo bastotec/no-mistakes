@@ -952,6 +952,9 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if run == nil {
 		return ""
 	}
+	if pipeline.SurvivedWorkMarked(workDir) {
+		return "interrupted repair left unrecorded uncommitted work; preserving worktree"
+	}
 	work, err := d.GetRunSurvivedWork(run.ID)
 	if err != nil {
 		return "cannot read survived-work evidence"
@@ -963,7 +966,7 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 		return "interrupted repair has uncommitted or unreadable work; preserving worktree"
 	}
 	if work.State == types.SurvivedWorkInPlace {
-		if err := d.ClearRunSurvivedWork(run.ID); err != nil {
+		if err := pipeline.ClearSurvivedWork(d, run.ID, workDir); err != nil {
 			return "cannot clear survived-work evidence"
 		}
 	}

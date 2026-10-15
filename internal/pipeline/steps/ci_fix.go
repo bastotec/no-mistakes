@@ -540,14 +540,16 @@ func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err e
 	}
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
 	// The handoff is recorded on the run before the worktree is cleaned.
-	record := func(work *types.SurvivedWork) error {
-		if sctx.DB == nil {
-			return nil
-		}
-		return sctx.DB.SetRunSurvivedWork(sctx.Run.ID, work)
+	var record func(*types.SurvivedWork) error
+	if sctx.DB != nil {
+		record = pipeline.SurvivedWorkRecorder(sctx.DB, sctx.Run.ID, sctx.WorkDir)
 	}
-	if work := pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID, record); work != nil {
+	work, recordErr := pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID, record)
+	if work != nil {
 		sctx.Log("interrupted repair left uncommitted work: " + work.Next)
+	}
+	if recordErr != nil {
+		sctx.Log("could not record the interrupted repair handoff: " + recordErr.Error())
 	}
 	return ciFixAgentTimeoutOutcome(issueDesc, err)
 }
