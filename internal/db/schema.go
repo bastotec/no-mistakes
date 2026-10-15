@@ -215,6 +215,21 @@ CREATE TABLE IF NOT EXISTS run_agent_sessions (
     PRIMARY KEY (run_id, role)
 );
 
+-- Uncommitted work a repair left when its round was cut short. One row per
+-- run: the latest handoff replaces any earlier one. Local-only evidence; it
+-- never rides findings, PR text or attestations.
+CREATE TABLE IF NOT EXISTS run_survived_work (
+    run_id           TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+    state            TEXT NOT NULL,
+    worktree         TEXT NOT NULL,
+    files_json       TEXT NOT NULL,
+    ref              TEXT NOT NULL,
+    base_sha         TEXT NOT NULL,
+    inspection_error TEXT NOT NULL,
+    next             TEXT NOT NULL,
+    updated_at       INTEGER NOT NULL
+);
+
 -- User-attachment URLs are durable for the life of a run so restarting the
 -- pipeline from Review can render the same evidence without uploading another
 -- orphaned GitHub asset. The digest prevents reuse if a file is overwritten at

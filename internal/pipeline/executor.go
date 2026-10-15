@@ -1193,7 +1193,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	var skipReason string
 	currentRoundID := state.currentRoundID
 	reviewApprovedHeadSHA := state.reviewApprovedHeadSHA
-	cappedGateFindings := withoutSurvivedWork(state.cappedGateFindings)
+	cappedGateFindings := state.cappedGateFindings
 	var restartFrom types.StepName
 
 	// Execute with possible fix loop
@@ -1206,39 +1206,27 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// of this run left when it was cut short (see survived_work.go), so it
 		// can continue it; until then that work sits in a run-owned ref where
 		// nothing can commit or publish it.
-		// The evidence lives only on step records: the round's selected and
-		// deferred payloads never carry it, so a consumed capture cannot be
-		// persisted again from them.
-		sctx.PreviousFindings = withoutSurvivedWork(sctx.PreviousFindings)
-		sctx.DeferredFindings = withoutSurvivedWork(sctx.DeferredFindings)
 		sctx.RestoredSurvivedWork = nil
 		if fixRound {
-			sctx.RestoredSurvivedWork = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
+			restored, restoreErr := e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
+			if restoreErr != nil {
+				return false, "", restoreErr
+			}
+			sctx.RestoredSurvivedWork = restored
+		} else if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, false, writeLog); settleErr != nil {
+			// Restored work a shutdown left in the worktree goes back into a
+			// ref before a round that is not a repair can see it.
+			return false, "", settleErr
 		}
 		outcome, err := step.Execute(sctx)
 		timedOut := fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout))
-		if timedOut {
-			priorRaw := mergeFindingsJSON(sctx.PreviousFindings, sctx.DeferredFindings)
-			record := func(work *types.SurvivedWork) error {
-				prior, _ := types.ParseFindingsJSON(priorRaw)
-				prior.SurvivedWork = work
-				raw, err := types.MarshalFindingsJSON(prior)
-				if err != nil {
-					return err
-				}
-				return e.db.SetStepFindings(sr.ID, raw)
-			}
-			if work := CaptureSurvivedWork(sctx.WorkDir, run.ID, record); work != nil {
-				writeLog("interrupted repair left uncommitted work: " + work.Next)
-			}
-		} else if sctx.RestoredSurvivedWork != nil && !errors.Is(err, ErrDaemonShutdown) {
-			// A round that got restored work back either committed it, and the
-			// handoff is done, or did not reach its repair (skipped, failed,
-			// parked), and the work goes back where nothing can publish it.
-			// Not on shutdown: an independent repair wrapper may still be
-			// editing the worktree, and recovery owns that round.
-			if finishErr := e.finishRestoredSurvivedWork(run.ID, sr.ID, sctx.WorkDir, writeLog); finishErr != nil {
-				return false, "", finishErr
+		// A timed-out repair's leftovers, and restored work a round did not
+		// commit, go back where nothing can publish them. Not on shutdown: an
+		// independent repair wrapper may still be editing the worktree, and
+		// recovery owns that round.
+		if timedOut || (sctx.RestoredSurvivedWork != nil && !errors.Is(err, ErrDaemonShutdown)) {
+			if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
+				return false, "", settleErr
 			}
 		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
@@ -1266,7 +1254,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, stepName, string(types.StepStatusFailed), "", redactedErr, &durationMS)
 			return false, "", fmt.Errorf("step %s failed: %s", stepName, redactedErr)
 		}
-		outcome.Findings = e.retainSurvivedWork(sr.ID, outcome.Findings)
 		restartFrom = outcome.RestartFrom
 
 		// A fix accepted at review.max_rounds reviews nothing: the round
@@ -1277,8 +1264,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		if stepName == types.StepReview {
 			if sctx.FixWithoutRereview {
 				e.resolveReviewFixWithoutRereview(outcome, cappedGateFindings, sctx.PreviousFindings, sctx.DeferredFindings, run.HeadSHA != reviewStartingHeadSHA, writeLog)
-				// The capped snapshot carries no handoff; attach the current one.
-				outcome.Findings = e.retainSurvivedWork(sr.ID, outcome.Findings)
 				sctx.FixWithoutRereview = false
 				cappedGateFindings = ""
 			} else {
@@ -1559,7 +1544,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			if roundCap := reviewRoundCapOf(outcome.Findings); stepName == types.StepReview && roundCap > 0 {
 				writeLog(fmt.Sprintf("review.max_rounds (%d) reached: running the accepted fix once, without another rereview", roundCap))
 				sctx.FixWithoutRereview = true
-				cappedGateFindings = withoutSurvivedWork(outcome.Findings)
+				cappedGateFindings = outcome.Findings
 				sctx.PreviousFindings = withoutRoundCapRecord(mergedFindings)
 			}
 			nextTrigger = "auto_fix"
@@ -1613,84 +1598,66 @@ done:
 	return skipRemaining, restartFrom, nil
 }
 
-// retainSurvivedWork keeps a step's survived-work evidence on the outcome
-// that replaces its findings, until a fix round restores that work.
-func (e *Executor) retainSurvivedWork(stepResultID, findingsRaw string) string {
-	step, err := e.db.GetStepResult(stepResultID)
-	if err != nil || step == nil || step.FindingsJSON == nil {
-		return findingsRaw
-	}
-	previous, err := types.ParseFindingsJSON(*step.FindingsJSON)
-	if err != nil || previous.SurvivedWork == nil {
-		return findingsRaw
-	}
-	var findings types.Findings
-	if findingsRaw != "" {
-		findings, err = types.ParseFindingsJSON(findingsRaw)
-		if err != nil {
-			return findingsRaw
-		}
-	}
-	if findings.SurvivedWork != nil {
-		return findingsRaw
-	}
-	findings.SurvivedWork = previous.SurvivedWork
-	raw, err := types.MarshalFindingsJSON(findings)
-	if err != nil {
-		return findingsRaw
-	}
-	return raw
-}
-
 // restoreSurvivedWork puts the run's captured work back before an authorized
-// fix round. Work that cannot be restored stays captured, with its evidence,
-// and the round runs without it. The evidence stays until the round ends (see
-// finishRestoredSurvivedWork), so a round that never reaches its repair does
-// not lose the handoff.
-func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(string)) *types.SurvivedWork {
-	work, err := LatestSurvivedWork(e.db, runID)
-	if err != nil || work == nil || work.Ref == "" {
-		return nil
+// fix round and marks it restored before touching the worktree, so cleanup
+// holds the worktree from then on. Work a shutdown left restored is already in
+// the worktree and is continued as it is. Work that cannot be restored stays
+// captured and the round runs without it.
+func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(string)) (*types.SurvivedWork, error) {
+	work, err := e.db.GetRunSurvivedWork(runID)
+	if err != nil {
+		return nil, err
+	}
+	if work == nil || work.State == types.SurvivedWorkInPlace {
+		return nil, nil
+	}
+	if work.State == types.SurvivedWorkRestored && survivedWorkUnclean(workDir) {
+		writeLog("continuing interrupted repair work restored from " + work.Ref)
+		return work, nil
+	}
+	restored := *work
+	restored.State = types.SurvivedWorkRestored
+	if err := e.db.SetRunSurvivedWork(runID, &restored); err != nil {
+		return nil, err
 	}
 	if err := RestoreSurvivedWork(workDir, work); err != nil {
 		writeLog(fmt.Sprintf("could not restore interrupted repair work from %s (%v); it stays captured there", work.Ref, err))
-		return nil
+		captured := *work
+		captured.State = types.SurvivedWorkCaptured
+		return nil, e.db.SetRunSurvivedWork(runID, &captured)
 	}
 	writeLog("restored interrupted repair work from " + work.Ref + " for this repair to continue")
-	return work
+	return &restored, nil
 }
 
-// finishRestoredSurvivedWork settles a round that started with restored work.
-// A clean worktree means the repair committed it: the evidence is cleared. A
-// dirty one means it did not, so the work is captured again and the step
-// records the new handoff.
-func (e *Executor) finishRestoredSurvivedWork(runID, stepResultID, workDir string, writeLog func(string)) error {
+// settleSurvivedWork ends a round that timed out or started with restored
+// work. Whatever the worktree still holds is captured again and replaces the
+// run's handoff. A clean worktree after restored work means the repair
+// committed it, so the handoff is cleared. When the step already settled the
+// restored work itself (the CI repair captures on its own timeout), the
+// handoff is no longer marked restored and is left alone.
+func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writeLog func(string)) error {
+	current, err := e.db.GetRunSurvivedWork(runID)
+	if err != nil {
+		return err
+	}
+	wasRestored := current != nil && current.State == types.SurvivedWorkRestored
+	if !timedOut && !wasRestored {
+		return nil
+	}
 	record := func(work *types.SurvivedWork) error {
-		return e.db.ReplaceRunSurvivedWork(runID, stepResultID, work)
+		return e.db.SetRunSurvivedWork(runID, work)
 	}
 	work := CaptureSurvivedWork(workDir, runID, record)
-	if work == nil {
-		return ClearSurvivedWork(e.db, runID)
+	switch {
+	case work != nil && timedOut:
+		writeLog("interrupted repair left uncommitted work: " + work.Next)
+	case work != nil:
+		writeLog("restored repair work was not committed this round: " + work.Next)
+	case wasRestored:
+		return e.db.ClearRunSurvivedWork(runID)
 	}
-	writeLog("restored repair work was not committed this round: " + work.Next)
 	return nil
-}
-
-// withoutSurvivedWork drops survived-work evidence from a findings payload.
-func withoutSurvivedWork(raw string) string {
-	if raw == "" {
-		return raw
-	}
-	findings, err := types.ParseFindingsJSON(raw)
-	if err != nil || findings.SurvivedWork == nil {
-		return raw
-	}
-	findings.SurvivedWork = nil
-	stripped, err := types.MarshalFindingsJSON(findings)
-	if err != nil {
-		return raw
-	}
-	return stripped
 }
 
 // applyReviewRoundCap enforces review.max_rounds on one review outcome. Once

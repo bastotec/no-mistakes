@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -172,8 +173,8 @@ func TestSurvivedWorkPrompt(t *testing.T) {
 	}
 }
 
-// A repair cut short by its deadline leaves its work captured, the worktree
-// clean, and the selected and deferred findings on the gate.
+// A repair cut short by its deadline leaves its work captured on the run and
+// the worktree clean.
 func TestExecutor_TimedOutRepairCapturesSurvivedWork(t *testing.T) {
 	for _, timeout := range []error{ErrAgentTimeout, ErrReviewAgentTimeout} {
 		t.Run(timeout.Error(), func(t *testing.T) {
@@ -190,18 +191,11 @@ func TestExecutor_TimedOutRepairCapturesSurvivedWork(t *testing.T) {
 			if err := exec.Execute(context.Background(), run, repo, dir); err == nil {
 				t.Fatal("timeout passed")
 			}
-			sr := stepResultByName(t, database, run.ID, types.StepTest)
-			if sr.FindingsJSON == nil {
-				t.Fatal("missing durable findings")
+			work, err := database.GetRunSurvivedWork(run.ID)
+			if err != nil || work == nil || work.State != types.SurvivedWorkCaptured || work.Ref == "" || len(work.Files) != 1 {
+				t.Fatalf("survival missing: %+v %v", work, err)
 			}
-			findings, err := types.ParseFindingsJSON(*sr.FindingsJSON)
-			if err != nil || findings.SurvivedWork == nil || findings.SurvivedWork.Ref == "" || len(findings.SurvivedWork.Files) != 1 {
-				t.Fatalf("survival missing: %+v %v", findings.SurvivedWork, err)
-			}
-			if len(findings.Items) != 2 || findings.Items[0].ID != "selected" || findings.Items[1].ID != "deferred" {
-				t.Fatalf("selected and deferred findings not preserved: %+v", findings.Items)
-			}
-			if got := gitRun(t, dir, "show", findings.SurvivedWork.Ref+":progress.txt"); got != "survived" {
+			if got := gitRun(t, dir, "show", work.Ref+":progress.txt"); got != "survived" {
 				t.Fatalf("repair not captured: %q", got)
 			}
 			if status := gitRun(t, dir, "status", "--porcelain", "--untracked-files=all"); status != "" {
@@ -218,18 +212,7 @@ func TestExecutor_NextFixRoundRestoresSurvivedWork(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	work := CaptureSurvivedWork(dir, run.ID, nil)
-	prior, err := database.InsertStepResult(run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: work})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetStepFindings(prior.ID, raw); err != nil {
-		t.Fatal(err)
-	}
+	work := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 
 	var sawInPlainRound, sawInFixRound bool
 	var restored *types.SurvivedWork
@@ -255,29 +238,8 @@ func TestExecutor_NextFixRoundRestoresSurvivedWork(t *testing.T) {
 	if !sawInFixRound || restored == nil || restored.Ref != work.Ref {
 		t.Fatalf("fix round did not get the work back: saw=%v restored=%+v", sawInFixRound, restored)
 	}
-	if left, err := LatestSurvivedWork(database, run.ID); err != nil || left != nil {
+	if left, err := database.GetRunSurvivedWork(run.ID); err != nil || left != nil {
 		t.Fatalf("evidence not cleared after restore: %+v %v", left, err)
-	}
-}
-
-func TestExecutor_RetainsSurvivedWorkAcrossLaterOutcome(t *testing.T) {
-	database, p, run, _ := setupTest(t)
-	step, err := database.InsertStepResult(run.ID, types.StepCI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	prior, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: &types.SurvivedWork{Ref: "refs/no-mistakes/survived/x/y", BaseSHA: "abc"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetStepFindings(step.ID, prior); err != nil {
-		t.Fatal(err)
-	}
-	next := `{"findings":[{"id":"later","severity":"error","description":"still red","action":"auto-fix"}]}`
-	exec := NewExecutor(database, p, &config.Config{}, nil, nil, nil)
-	retained, err := types.ParseFindingsJSON(exec.retainSurvivedWork(step.ID, next))
-	if err != nil || retained.SurvivedWork == nil || len(retained.Items) != 1 || retained.Items[0].ID != "later" {
-		t.Fatalf("later outcome lost survival metadata: %+v %v", retained, err)
 	}
 }
 
@@ -321,25 +283,10 @@ func TestExecutor_RestoredWorkNotCommittedIsCapturedAgain(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	work := CaptureSurvivedWork(dir, run.ID, nil)
-	prior, err := database.InsertStepResult(run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: work})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetStepFindings(prior.ID, raw); err != nil {
-		t.Fatal(err)
-	}
-	// The selected findings payload carries the consumed capture too; it
-	// must not be persisted back from there.
-	gate := `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}],"survived_work":{"worktree":"x","ref":"` + work.Ref + `","base_sha":"` + work.BaseSHA + `","next":"n"}}`
+	CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	// Findings are agent-written: a survived_work key in them is ignored.
+	gate := `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}],"survived_work":{"worktree":"x","ref":"refs/forged","base_sha":"abc","next":"n"}}`
 	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
-		if strings.Contains(sctx.PreviousFindings, "survived_work") {
-			t.Fatal("selected payload still carries the capture")
-		}
 		if !sctx.Fixing {
 			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: gate}, nil
 		}
@@ -351,8 +298,8 @@ func TestExecutor_RestoredWorkNotCommittedIsCapturedAgain(t *testing.T) {
 	if status := gitRun(t, dir, "status", "--porcelain", "--untracked-files=all"); status != "" {
 		t.Fatalf("restored work left in the worktree after a round that did not commit it: %q", status)
 	}
-	left, err := LatestSurvivedWork(database, run.ID)
-	if err != nil || left == nil || left.Ref == "" {
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.State != types.SurvivedWorkCaptured || left.Ref == "" || left.Ref == "refs/forged" {
 		t.Fatalf("handoff lost: %+v %v", left, err)
 	}
 	if got := gitRun(t, dir, "show", left.Ref+":partial.txt"); got != "survived" {
@@ -385,18 +332,7 @@ func TestExecutor_ShutdownLeavesRestoredWorkAlone(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	dir := survivedWorkRepo(t)
 	writeFile(t, dir, "partial.txt", "survived\n")
-	work := CaptureSurvivedWork(dir, run.ID, nil)
-	prior, err := database.InsertStepResult(run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: work})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetStepFindings(prior.ID, raw); err != nil {
-		t.Fatal(err)
-	}
+	work := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
 	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		if !sctx.Fixing {
 			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
@@ -409,8 +345,76 @@ func TestExecutor_ShutdownLeavesRestoredWorkAlone(t *testing.T) {
 	if got := readFile(t, dir, "in-flight.txt"); got != "agent still writing\n" {
 		t.Fatalf("shutdown settlement touched the live repair's files: %q", got)
 	}
-	left, err := LatestSurvivedWork(database, run.ID)
-	if err != nil || left == nil || left.Ref != work.Ref {
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkRestored {
 		t.Fatalf("handoff changed on shutdown: %+v %v", left, err)
+	}
+}
+
+func recordSurvivedWork(database *db.DB, runID string) func(*types.SurvivedWork) error {
+	return func(work *types.SurvivedWork) error { return database.SetRunSurvivedWork(runID, work) }
+}
+
+// A step that settles restored work itself (the CI repair captures again on
+// its own timeout) keeps its new handoff: the executor does not clear it.
+func TestExecutor_StepRecaptureOfRestoredWorkIsKept(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	var recaptured *types.SurvivedWork
+	step := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		writeFile(t, dir, "more.txt", "more\n")
+		recaptured = CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{CI: 1}}, nil, []Step{step}, nil)
+	_ = exec.Execute(context.Background(), run, repo, dir)
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || recaptured == nil || left == nil || left.Ref != recaptured.Ref {
+		t.Fatalf("step recapture was not kept: left=%+v recaptured=%+v %v", left, recaptured, err)
+	}
+	if got := gitRun(t, dir, "show", left.Ref+":more.txt"); got != "more" {
+		t.Fatalf("recaptured work = %q", got)
+	}
+}
+
+// Restored work a shutdown left in the worktree is captured again before a
+// round that is not a repair runs, so nothing but a repair ever sees it.
+func TestExecutor_PlainRoundRecapturesWorkAShutdownLeftRestored(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	if err := RestoreSurvivedWork(dir, work); err != nil {
+		t.Fatal(err)
+	}
+	restored := *work
+	restored.State = types.SurvivedWorkRestored
+	if err := database.SetRunSurvivedWork(run.ID, &restored); err != nil {
+		t.Fatal(err)
+	}
+	var sawWork bool
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		_, statErr := os.Stat(filepath.Join(dir, "partial.txt"))
+		sawWork = statErr == nil
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	if err := exec.Execute(context.Background(), run, repo, dir); err != nil {
+		t.Fatal(err)
+	}
+	if sawWork {
+		t.Fatal("a round that is not a repair saw restored work")
+	}
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.State != types.SurvivedWorkCaptured {
+		t.Fatalf("handoff after recapture = %+v %v", left, err)
+	}
+	if got := gitRun(t, dir, "show", left.Ref+":partial.txt"); got != "survived" {
+		t.Fatalf("recaptured work = %q", got)
 	}
 }

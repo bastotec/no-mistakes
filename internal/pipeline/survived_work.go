@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -60,13 +59,13 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	if err == nil && strings.TrimSpace(status) == "" {
 		return nil
 	}
-	work := &types.SurvivedWork{Worktree: workDir}
+	work := &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: workDir}
 	if err != nil {
 		work.InspectionError = "worktree status unreadable"
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
-	work.Files = strings.Split(strings.TrimRight(status, "\r\n"), "\n")
+	work.Files = types.BoundSurvivedWorkFiles(strings.Split(strings.TrimRight(status, "\r\n"), "\n"))
 	// A dirty submodule's own edits live in its repository, not in anything
 	// the superproject can write as a tree: capture would record a gitlink
 	// and lose them. Leave such work in place.
@@ -91,13 +90,13 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
-	work.Ref, work.BaseSHA = ref, base
+	work.State, work.Ref, work.BaseSHA = types.SurvivedWorkCaptured, ref, base
 	work.Next = fmt.Sprintf("Captured in %s and removed from the worktree, so nothing commits or pushes it. The next authorized repair restores it before it runs and continues it within its selected findings; only that repair's commit publishes it. To recover it by hand: git diff %s %s.", ref, base, ref)
 	// Only once the ref holds the work and the evidence is durable is the
 	// worktree returned to HEAD.
 	if err := record(work); err != nil {
 		inPlace := *work
-		inPlace.Ref, inPlace.BaseSHA = "", ""
+		inPlace.State, inPlace.Ref, inPlace.BaseSHA = types.SurvivedWorkInPlace, "", ""
 		inPlace.InspectionError = fmt.Sprintf("captured in %s, but the handoff could not be recorded (%v), so it was also left in the worktree", ref, err)
 		inPlace.Next = survivedWorkInPlaceNext
 		return &inPlace
@@ -211,32 +210,6 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 	return nil
 }
 
-// LatestSurvivedWork returns the survived-work evidence the run carries, if any.
-func LatestSurvivedWork(database *db.DB, runID string) (*types.SurvivedWork, error) {
-	steps, err := database.GetStepsByRun(runID)
-	if err != nil {
-		return nil, err
-	}
-	for _, step := range steps {
-		if step.FindingsJSON == nil {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-		if err != nil {
-			return nil, err
-		}
-		if findings.SurvivedWork != nil {
-			return findings.SurvivedWork, nil
-		}
-	}
-	return nil, nil
-}
-
-// ClearSurvivedWork drops the evidence once a repair committed the work.
-func ClearSurvivedWork(database *db.DB, runID string) error {
-	return database.ReplaceRunSurvivedWork(runID, "", nil)
-}
-
 // SurvivedWorkPrompt tells a repair whose worktree holds restored work what it
 // is. It grants no new repair scope and certifies nothing.
 func SurvivedWorkPrompt(restored *types.SurvivedWork) string {
@@ -255,11 +228,13 @@ func survivedWorkUnclean(workDir string) bool {
 	return err != nil || strings.TrimSpace(status) != ""
 }
 
-// SurvivedWorkHoldsWorktree reports whether cleanup must keep a worktree: only
-// when the run's survived work could not be captured into a ref and the
-// worktree still holds changes.
+// SurvivedWorkHoldsWorktree reports whether cleanup must keep a worktree:
+// when the run's survived work is in it - left in place, or restored for a
+// repair that never settled (a shutdown mid-round) and may have added to it -
+// and the worktree still holds changes. Captured work lives in its ref and
+// never holds the worktree.
 func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string) bool {
-	return work != nil && work.Ref == "" && survivedWorkUnclean(workDir)
+	return work != nil && work.State != types.SurvivedWorkCaptured && survivedWorkUnclean(workDir)
 }
 
 // dirtySubmodule returns the first changed path in status that is a

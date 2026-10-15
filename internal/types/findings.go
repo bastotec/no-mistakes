@@ -262,20 +262,6 @@ type findingWire struct {
 	RequiresHumanReview *bool  `json:"requires_human_review,omitempty"`
 }
 
-// SurvivedWork is local-only evidence of an interrupted repair. It is never
-// included in PR summaries or attestations: Worktree names an operator path.
-type SurvivedWork struct {
-	Worktree string   `json:"worktree"`
-	Files    []string `json:"files,omitempty"`
-	// Ref and BaseSHA locate the captured work: a run-owned local ref whose
-	// commits sit on BaseSHA. Empty Ref means the work could not be captured
-	// and was left in the worktree.
-	Ref             string `json:"ref,omitempty"`
-	BaseSHA         string `json:"base_sha,omitempty"`
-	InspectionError string `json:"inspection_error,omitempty"`
-	Next            string `json:"next"`
-}
-
 // Findings is the structured findings payload exchanged across pipeline, IPC, and TUI.
 //
 // Scenarios and Verdict are the test step's live-validation contract. Both are
@@ -283,7 +269,6 @@ type SurvivedWork struct {
 // written before the contract existed, so an older recorded run still parses
 // and simply renders no scenario table.
 type Findings struct {
-	SurvivedWork   *SurvivedWork  `json:"survived_work,omitempty"`
 	Items          []Finding      `json:"findings"`
 	Summary        string         `json:"summary"`
 	Tested         []string       `json:"tested,omitempty"`
@@ -313,7 +298,6 @@ type Findings struct {
 }
 
 type findingsWire struct {
-	SurvivedWork       *SurvivedWork  `json:"survived_work"`
 	Items              []Finding      `json:"findings"`
 	Legacy             []Finding      `json:"items"`
 	Summary            string         `json:"summary"`
@@ -345,7 +329,6 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		items = wire.Legacy
 	}
 	return Findings{
-		SurvivedWork:       wire.SurvivedWork,
 		Items:              items,
 		Summary:            wire.Summary,
 		Tested:             wire.Tested,

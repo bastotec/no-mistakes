@@ -1611,43 +1611,26 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	if err := os.WriteFile(deferred, []byte("survived but unselected\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
-	if err != nil {
+	if _, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview); err != nil {
 		t.Fatal(err)
 	}
-	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
-	if err != nil {
+	if _, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI); err != nil {
 		t.Fatal(err)
 	}
-	work := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID, nil)
+	work := pipeline.CaptureSurvivedWork(dir, sctx.Run.ID, func(w *types.SurvivedWork) error {
+		return sctx.DB.SetRunSurvivedWork(sctx.Run.ID, w)
+	})
 	if work == nil || work.Ref == "" {
 		t.Fatalf("survived work not captured: %+v", work)
 	}
 	if got := gitStatusPorcelain(t, dir); got != "" {
 		t.Fatalf("capture left the worktree dirty: %q", got)
 	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: work})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.SetStepFindings(step.ID, raw); err != nil {
-		t.Fatal(err)
-	}
+	// A restart from review resets the step rows; the handoff is the run's.
 	if err := sctx.DB.ResetStepsFrom(sctx.Run.ID, types.StepReview.Order()); err != nil {
 		t.Fatal(err)
 	}
-	resetReview, err := sctx.DB.GetStepResult(reviewStep.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resetReview.FindingsJSON == nil {
-		t.Fatal("CI restart erased survived-work evidence")
-	}
-	resetFindings, err := types.ParseFindingsJSON(*resetReview.FindingsJSON)
-	if err != nil || resetFindings.SurvivedWork == nil {
-		t.Fatalf("CI restart did not preserve survived work: %+v, %v", resetFindings, err)
-	}
-	survived, err := pipeline.LatestSurvivedWork(sctx.DB, sctx.Run.ID)
+	survived, err := sctx.DB.GetRunSurvivedWork(sctx.Run.ID)
 	if err != nil || survived == nil || survived.Ref != work.Ref {
 		t.Fatalf("survived-work evidence after restart = %+v, %v", survived, err)
 	}

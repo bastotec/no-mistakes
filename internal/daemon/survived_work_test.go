@@ -35,16 +35,8 @@ func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 	if err := os.WriteFile(file, []byte("survived"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	sr, err := database.InsertStepResult(run.ID, types.StepCI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Work that could not be captured stays in the worktree (empty Ref).
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: &types.SurvivedWork{Worktree: dir, Files: []string{"?? partial.txt"}}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetStepFindings(sr.ID, raw); err != nil {
+	// Work that could not be captured stays in the worktree.
+	if err := database.SetRunSurvivedWork(run.ID, &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: dir, Files: []string{"?? partial.txt"}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.UpdateRunStatus(run.ID, types.RunCancelled); err != nil {
@@ -73,13 +65,8 @@ func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 	if reason := survivedWorkCleanupReason(database, run, dir); reason != "" {
 		t.Fatalf("clean worktree retained: %s", reason)
 	}
-	cleared, err := database.GetStepResult(sr.ID)
-	if err != nil || cleared.FindingsJSON == nil {
-		t.Fatalf("read cleared survival metadata: %+v %v", cleared, err)
-	}
-	clearedFindings, err := types.ParseFindingsJSON(*cleared.FindingsJSON)
-	if err != nil || clearedFindings.SurvivedWork != nil {
-		t.Fatalf("stale survival metadata remains: %+v %v", clearedFindings.SurvivedWork, err)
+	if left, err := database.GetRunSurvivedWork(run.ID); err != nil || left != nil {
+		t.Fatalf("stale survival metadata remains: %+v %v", left, err)
 	}
 	cleanupOrphanWorktrees(database, p, nil)
 	if _, err := os.Stat(dir); !os.IsNotExist(err) {
@@ -88,8 +75,9 @@ func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 }
 
 // Captured survived work lives in a run-owned ref, so it never holds the
-// worktree, even when the worktree is dirty for another reason.
-func TestCapturedSurvivedWorkDoesNotHoldTheWorktree(t *testing.T) {
+// worktree, even when the worktree is dirty for another reason. Restored work
+// does.
+func TestCapturedSurvivedWorkDoesNotHoldTheWorktreeButRestoredWorkDoes(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
 		t.Fatal(err)
@@ -108,18 +96,20 @@ func TestCapturedSurvivedWorkDoesNotHoldTheWorktree(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "other.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	sr, err := database.InsertStepResult(run.ID, types.StepCI)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: &types.SurvivedWork{Worktree: dir, Ref: "refs/no-mistakes/survived/" + run.ID + "/abc", BaseSHA: head}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := database.SetStepFindings(sr.ID, raw); err != nil {
+	work := &types.SurvivedWork{State: types.SurvivedWorkCaptured, Worktree: dir, Ref: "refs/no-mistakes/survived/" + run.ID + "/abc", BaseSHA: head}
+	if err := database.SetRunSurvivedWork(run.ID, work); err != nil {
 		t.Fatal(err)
 	}
 	if reason := survivedWorkCleanupReason(database, run, dir); reason != "" {
 		t.Fatalf("captured work held the worktree: %s", reason)
+	}
+	// Restored for a round a shutdown cut off: the worktree may hold more
+	// than the ref, so it is held while dirty.
+	work.State = types.SurvivedWorkRestored
+	if err := database.SetRunSurvivedWork(run.ID, work); err != nil {
+		t.Fatal(err)
+	}
+	if reason := survivedWorkCleanupReason(database, run, dir); reason == "" {
+		t.Fatal("restored work released a dirty worktree")
 	}
 }

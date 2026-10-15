@@ -539,25 +539,17 @@ func ciFixAgentBudgetOutcome(sctx *pipeline.StepContext, issueDesc string, err e
 		return nil
 	}
 	sctx.Log(fmt.Sprintf("CI auto-fix agent exceeded its invocation budget: %v", err))
-	outcome := ciFixAgentTimeoutOutcome(issueDesc, err)
-	findings, _ := types.ParseFindingsJSON(outcome.Findings)
-	// The handoff is recorded on the step before the worktree is cleaned; the
-	// executor persists the same outcome when the step returns.
+	// The handoff is recorded on the run before the worktree is cleaned.
 	record := func(work *types.SurvivedWork) error {
-		if sctx.DB == nil || sctx.StepResultID == "" {
+		if sctx.DB == nil {
 			return nil
 		}
-		withWork := findings
-		withWork.SurvivedWork = work
-		raw, err := types.MarshalFindingsJSON(withWork)
-		if err != nil {
-			return err
-		}
-		return sctx.DB.SetStepFindings(sctx.StepResultID, raw)
+		return sctx.DB.SetRunSurvivedWork(sctx.Run.ID, work)
 	}
-	findings.SurvivedWork = pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID, record)
-	outcome.Findings, _ = types.MarshalFindingsJSON(findings)
-	return outcome
+	if work := pipeline.CaptureSurvivedWork(sctx.WorkDir, sctx.Run.ID, record); work != nil {
+		sctx.Log("interrupted repair left uncommitted work: " + work.Next)
+	}
+	return ciFixAgentTimeoutOutcome(issueDesc, err)
 }
 
 // ciRepairResult reports what a repair did to the run. The monitor needs both

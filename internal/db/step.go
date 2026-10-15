@@ -135,38 +135,6 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 	}
 	defer tx.Rollback()
 
-	var resetTargetID string
-	var survivedWork *types.SurvivedWork
-	rows, err := tx.Query(`SELECT id, findings_json FROM step_results
-		WHERE run_id = ? AND step_order >= ? AND status != ?
-		ORDER BY step_order, id`, runID, stepOrder, types.StepStatusSkipped)
-	if err != nil {
-		return fmt.Errorf("read reset step findings: %w", err)
-	}
-	for rows.Next() {
-		var id string
-		var findingsJSON *string
-		if err := rows.Scan(&id, &findingsJSON); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan reset step findings: %w", err)
-		}
-		if resetTargetID == "" {
-			resetTargetID = id
-		}
-		if survivedWork == nil && findingsJSON != nil {
-			findings, parseErr := types.ParseFindingsJSON(*findingsJSON)
-			if parseErr == nil {
-				survivedWork = findings.SurvivedWork
-			}
-		}
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close reset step findings: %w", err)
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("read reset step findings: %w", err)
-	}
-
 	legacyArgs := []any{runID, stepOrder, types.StepStatusPending, types.StepStatusSkipped}
 	legacySteps := `SELECT id FROM step_results
 		WHERE run_id = ? AND step_order >= ? AND status != ? AND status != ?
@@ -190,15 +158,6 @@ func (d *DB) ResetStepsFrom(runID string, stepOrder int) error {
 			agent_pid = NULL, override_reason = NULL
 		WHERE run_id = ? AND step_order >= ? AND status != ?`, types.StepStatusPending, runID, stepOrder, types.StepStatusSkipped); err != nil {
 		return fmt.Errorf("reset steps for revalidation: %w", err)
-	}
-	if survivedWork != nil && resetTargetID != "" {
-		findingsJSON, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: survivedWork})
-		if err != nil {
-			return fmt.Errorf("marshal survived work for revalidation: %w", err)
-		}
-		if _, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, findingsJSON, resetTargetID); err != nil {
-			return fmt.Errorf("preserve survived work for revalidation: %w", err)
-		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit reset steps for revalidation: %w", err)
@@ -572,68 +531,4 @@ func (d *DB) ClearStepFindings(id string) error {
 		return fmt.Errorf("clear step findings: %w", err)
 	}
 	return nil
-}
-
-// ReplaceRunSurvivedWork removes every survived-work record from the run's
-// step findings and, when work is non-nil, records it on stepResultID, in one
-// transaction: an interruption leaves either the old handoff or the new one,
-// never neither.
-func (d *DB) ReplaceRunSurvivedWork(runID, stepResultID string, work *types.SurvivedWork) error {
-	tx, err := d.sql.Begin()
-	if err != nil {
-		return fmt.Errorf("begin survived-work update: %w", err)
-	}
-	defer tx.Rollback()
-	rows, err := tx.Query(`SELECT id, findings_json FROM step_results WHERE run_id = ?`, runID)
-	if err != nil {
-		return fmt.Errorf("read survived-work records: %w", err)
-	}
-	updates := map[string]string{}
-	targetFound := false
-	for rows.Next() {
-		var id string
-		var raw *string
-		if err := rows.Scan(&id, &raw); err != nil {
-			rows.Close()
-			return fmt.Errorf("scan survived-work records: %w", err)
-		}
-		var findings types.Findings
-		if raw != nil {
-			parsed, err := types.ParseFindingsJSON(*raw)
-			if err != nil {
-				rows.Close()
-				return fmt.Errorf("parse step findings: %w", err)
-			}
-			findings = parsed
-		}
-		if id == stepResultID && work != nil {
-			targetFound = true
-			findings.SurvivedWork = work
-		} else if findings.SurvivedWork != nil {
-			findings.SurvivedWork = nil
-		} else {
-			continue
-		}
-		encoded, err := types.MarshalFindingsJSON(findings)
-		if err != nil {
-			rows.Close()
-			return err
-		}
-		updates[id] = encoded
-	}
-	if err := rows.Close(); err != nil {
-		return err
-	}
-	if err := rows.Err(); err != nil {
-		return err
-	}
-	if work != nil && !targetFound {
-		return fmt.Errorf("step result %s is not part of run %s", stepResultID, runID)
-	}
-	for id, encoded := range updates {
-		if _, err := tx.Exec(`UPDATE step_results SET findings_json = ? WHERE id = ?`, encoded, id); err != nil {
-			return fmt.Errorf("write survived-work record: %w", err)
-		}
-	}
-	return tx.Commit()
 }

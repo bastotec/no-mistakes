@@ -1549,8 +1549,13 @@ func TestCIStep_FixAgentBudgetExhaustionParksForADecisionInsteadOfRetrying(t *te
 	if jsonErr := json.Unmarshal([]byte(outcome.Findings), &findings); jsonErr != nil {
 		t.Fatalf("parse findings %q: %v", outcome.Findings, jsonErr)
 	}
-	if findings.SurvivedWork == nil || findings.SurvivedWork.Worktree != dir || len(findings.SurvivedWork.Files) != 1 || !strings.Contains(findings.SurvivedWork.Files[0], "partial-ci-fix.txt") {
-		t.Fatalf("missing structured survived work: %+v", findings.SurvivedWork)
+	// This context has no run row, so the handoff cannot be recorded and the
+	// timed-out agent's edit stays in the worktree, said so in the step log.
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "partial-ci-fix.txt") {
+		t.Fatalf("unrecorded repair work left the worktree: %q", got)
+	}
+	if !strings.Contains(strings.Join(logs, "\n"), "interrupted repair left uncommitted work: Left uncommitted in the run worktree") {
+		t.Fatalf("handoff not logged: %v", logs)
 	}
 	if len(findings.Items) != 3 {
 		t.Fatalf("findings = %#v, want timeout, selected check, and deferred bot findings", findings.Items)

@@ -945,37 +945,25 @@ func skipWorktreeCleanup(ctx context.Context, d *db.DB, runID, wtPath string) (b
 
 // survivedWorkCleanupReason has no abort exemption: aborting a run is not
 // authorization to destroy uncommitted repairs. Captured work lives in a
-// run-owned ref, not the worktree, so it never holds the worktree. Only work
-// that could not be captured, and so was left in place, keeps it until the
-// worktree is clean again.
+// run-owned ref, not the worktree, so it never holds the worktree. Work left
+// in place, or restored for a round that never settled, keeps it until the
+// worktree is clean again; then the stale handoff is dropped.
 func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if run == nil {
 		return ""
 	}
-	results, err := d.GetStepsByRun(run.ID)
+	work, err := d.GetRunSurvivedWork(run.ID)
 	if err != nil {
 		return "cannot read survived-work evidence"
 	}
-	for _, step := range results {
-		if step.FindingsJSON == nil {
-			continue
-		}
-		findings, err := types.ParseFindingsJSON(*step.FindingsJSON)
-		if err != nil {
-			return "cannot parse survived-work evidence"
-		}
-		if findings.SurvivedWork == nil || findings.SurvivedWork.Ref != "" {
-			continue
-		}
-		if pipeline.SurvivedWorkHoldsWorktree(findings.SurvivedWork, workDir) {
-			return "interrupted repair has uncommitted or unreadable work; preserving worktree"
-		}
-		findings.SurvivedWork = nil
-		raw, err := types.MarshalFindingsJSON(findings)
-		if err != nil {
-			return "cannot clear survived-work evidence"
-		}
-		if err := d.SetStepFindings(step.ID, raw); err != nil {
+	if work == nil || work.State == types.SurvivedWorkCaptured {
+		return ""
+	}
+	if pipeline.SurvivedWorkHoldsWorktree(work, workDir) {
+		return "interrupted repair has uncommitted or unreadable work; preserving worktree"
+	}
+	if work.State == types.SurvivedWorkInPlace {
+		if err := d.ClearRunSurvivedWork(run.ID); err != nil {
 			return "cannot clear survived-work evidence"
 		}
 	}
@@ -1521,6 +1509,9 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 		CreatedAt:              r.CreatedAt,
 		UpdatedAt:              r.UpdatedAt,
+	}
+	if work, err := d.GetRunSurvivedWork(r.ID); err == nil {
+		info.SurvivedWork = work
 	}
 	if len(steps) > 0 {
 		info.Steps = make([]ipc.StepResultInfo, 0, len(steps))
