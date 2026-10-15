@@ -1153,17 +1153,16 @@ func withSurvivedWorkFrom(ctx context.Context, fromRunID string) context.Context
 	return context.WithValue(ctx, survivedWorkFromKey{}, fromRunID)
 }
 
-// carrySurvivedWork moves the captured repair work of the run named by ctx
+// carrySurvivedWork copies the captured repair work of the run named by ctx
 // (withSurvivedWorkFrom) to the run being created, naming its recorded
-// worktree. It runs before the run launches, so the move is durable before
-// anything can consume or lose it, and a failure fails the start.
+// worktree. It runs before the run launches and a failure fails the start;
+// the original stays, so a setup that fails later strands nothing.
 func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree string) error {
 	fromRunID, _ := ctx.Value(survivedWorkFromKey{}).(string)
 	if fromRunID == "" {
 		return nil
 	}
-	_, err := m.db.MoveRunSurvivedWork(fromRunID, toRunID, worktree)
-	return err
+	return m.db.CopyRunSurvivedWork(fromRunID, toRunID, worktree)
 }
 
 func inheritablePRURL(run *db.Run) string {

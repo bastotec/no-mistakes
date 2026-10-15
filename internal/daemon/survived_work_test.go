@@ -114,7 +114,7 @@ func TestCapturedSurvivedWorkDoesNotHoldTheWorktreeButRestoredWorkDoes(t *testin
 	}
 }
 
-// A rerun takes over a terminal run's captured repair work, naming its
+// A rerun copies a terminal run's captured repair work, naming its
 // recorded worktree, so its next authorized repair can restore it; work
 // still in the old worktree stays.
 func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
@@ -149,8 +149,18 @@ func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
 	if err != nil || moved == nil || moved.Ref != captured.Ref || moved.Worktree != "/custom/root/wt" {
 		t.Fatalf("carried handoff = %+v %v", moved, err)
 	}
-	if left, _ := database.GetRunSurvivedWork(old.ID); left != nil {
-		t.Fatalf("old run kept the carried handoff: %+v", left)
+	// The original stays until the work is consumed; consuming it retires
+	// every copy.
+	if left, _ := database.GetRunSurvivedWork(old.ID); left == nil {
+		t.Fatal("the copy consumed the original handoff")
+	}
+	if err := database.ClearSurvivedWorkRef(captured.Ref); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{old.ID, next.ID} {
+		if left, _ := database.GetRunSurvivedWork(id); left != nil {
+			t.Fatalf("run %s kept a consumed handoff: %+v", id, left)
+		}
 	}
 
 	inPlace := &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: "/old", Next: "n"}

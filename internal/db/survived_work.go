@@ -54,20 +54,36 @@ func (d *DB) GetRunSurvivedWork(runID string) (*types.SurvivedWork, error) {
 	return &work, nil
 }
 
-// MoveRunSurvivedWork hands a run's captured handoff to another run, whose
-// worktree it now names, in one statement. Only captured work moves: work in
-// place or restored is in the old run's worktree. It reports whether a
-// handoff moved.
-func (d *DB) MoveRunSurvivedWork(fromRunID, toRunID, worktree string) (bool, error) {
-	res, err := d.sql.Exec(
-		`UPDATE run_survived_work SET run_id = ?, worktree = ?, updated_at = ? WHERE run_id = ? AND state = ?`,
+// CopyRunSurvivedWork gives a rerun the captured handoff of the run it
+// reruns, naming the rerun's worktree. The original row stays, so a rerun
+// whose setup fails strands nothing; ClearSurvivedWorkRef retires every copy
+// once the work is consumed. Only captured work is copied: work in place or
+// restored is in the old run's worktree.
+func (d *DB) CopyRunSurvivedWork(fromRunID, toRunID, worktree string) error {
+	_, err := d.sql.Exec(
+		`INSERT INTO run_survived_work (run_id, state, worktree, files_json, ref, base_sha, inspection_error, next, updated_at)
+		 SELECT ?, state, ?, files_json, ref, base_sha, inspection_error, next, ? FROM run_survived_work WHERE run_id = ? AND state = ?
+		 ON CONFLICT(run_id) DO UPDATE SET state = excluded.state, worktree = excluded.worktree,
+		   files_json = excluded.files_json, ref = excluded.ref, base_sha = excluded.base_sha,
+		   inspection_error = excluded.inspection_error, next = excluded.next, updated_at = excluded.updated_at`,
 		toRunID, worktree, now(), fromRunID, string(types.SurvivedWorkCaptured),
 	)
 	if err != nil {
-		return false, fmt.Errorf("move run survived work: %w", err)
+		return fmt.Errorf("copy run survived work: %w", err)
 	}
-	n, err := res.RowsAffected()
-	return n > 0, err
+	return nil
+}
+
+// ClearSurvivedWorkRef drops every run's handoff that points at ref: copies
+// a rerun took (see CopyRunSurvivedWork) describe the same work.
+func (d *DB) ClearSurvivedWorkRef(ref string) error {
+	if ref == "" {
+		return nil
+	}
+	if _, err := d.sql.Exec(`DELETE FROM run_survived_work WHERE ref = ?`, ref); err != nil {
+		return fmt.Errorf("clear survived work ref: %w", err)
+	}
+	return nil
 }
 
 // ClearRunSurvivedWork drops the run's survived-work handoff.

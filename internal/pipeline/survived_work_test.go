@@ -603,3 +603,31 @@ func TestCaptureSurvivedWork_DirtySubmoduleWithSpaceInPathStaysInPlace(t *testin
 		t.Fatalf("dirty submodule with a space reported as captured: %+v", work)
 	}
 }
+
+// The moved-HEAD restore ignores diff.noprefix: the patch it builds and
+// applies always carries a/ b/ prefixes, so a nested path lands where it was.
+func TestRestoreSurvivedWork_MovedHeadIgnoresNoprefixConfig(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	if err := os.MkdirAll(filepath.Join(dir, "src"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "src/config.json", "base\n")
+	writeFile(t, dir, "config.json", "base\n")
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-qm", "two configs")
+	writeFile(t, dir, "src/config.json", "edited\n")
+	work, _ := CaptureSurvivedWork(dir, "run-13", nil)
+	writeFile(t, dir, "unrelated.txt", "moves HEAD\n")
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-qm", "move head")
+	gitRun(t, dir, "config", "diff.noprefix", "true")
+	if err := RestoreSurvivedWork(dir, work); err != nil {
+		t.Fatal(err)
+	}
+	if got := readFile(t, dir, "src/config.json"); got != "edited\n" {
+		t.Fatalf("src/config.json = %q, want the restored edit", got)
+	}
+	if got := readFile(t, dir, "config.json"); got != "base\n" {
+		t.Fatalf("config.json = %q, the edit landed on the wrong file", got)
+	}
+}

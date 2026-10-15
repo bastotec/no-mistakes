@@ -108,6 +108,11 @@ func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.Su
 			return err
 		}
 		if previous != nil && previous.Ref != "" && work.Ref != "" && previous.Ref != work.Ref {
+			// The new capture holds the old one's work: retire the old ref and
+			// every rerun's copy of it.
+			if err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
+				return err
+			}
 			deleteSurvivedWorkRef(workDir, previous.Ref)
 		}
 		return nil
@@ -125,6 +130,9 @@ func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
 		return err
 	}
 	if previous != nil && previous.Ref != "" {
+		if err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
+			return err
+		}
 		deleteSurvivedWorkRef(workDir, previous.Ref)
 	}
 	return nil
@@ -306,11 +314,13 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 		}
 		return nil
 	}
-	patch, err := git.RunRaw(ctx, workDir, "diff", "--binary", work.BaseSHA, work.Ref)
+	// A machine-read patch: fixed a/ b/ prefixes whatever diff.noprefix or
+	// diff.mnemonicPrefix say, applied with the matching -p1.
+	patch, err := git.RunRaw(ctx, workDir, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--binary", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", work.BaseSHA, work.Ref)
 	if err != nil {
 		return fmt.Errorf("read captured changes: %w", err)
 	}
-	if _, err := git.RunWithInput(ctx, workDir, string(patch), "apply", "--3way", "--index"); err != nil {
+	if _, err := git.RunWithInput(ctx, workDir, string(patch), "apply", "-p1", "--3way", "--index"); err != nil {
 		_, _ = git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD")
 		_, _ = git.Run(ctx, workDir, "clean", "-fdq")
 		return fmt.Errorf("captured work does not apply to the moved HEAD: %w", err)
