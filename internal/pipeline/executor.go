@@ -1629,7 +1629,7 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 		return work, nil
 	}
 	restored := *work
-	restored.State = types.SurvivedWorkRestored
+	restored.State, restored.Worktree = types.SurvivedWorkRestored, workDir
 	if err := e.db.SetRunSurvivedWork(runID, &restored); err != nil {
 		return nil, err
 	}

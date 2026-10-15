@@ -54,6 +54,22 @@ func (d *DB) GetRunSurvivedWork(runID string) (*types.SurvivedWork, error) {
 	return &work, nil
 }
 
+// MoveRunSurvivedWork hands a run's captured handoff to another run, whose
+// worktree it now names, in one statement. Only captured work moves: work in
+// place or restored is in the old run's worktree. It reports whether a
+// handoff moved.
+func (d *DB) MoveRunSurvivedWork(fromRunID, toRunID, worktree string) (bool, error) {
+	res, err := d.sql.Exec(
+		`UPDATE run_survived_work SET run_id = ?, worktree = ?, updated_at = ? WHERE run_id = ? AND state = ?`,
+		toRunID, worktree, now(), fromRunID, string(types.SurvivedWorkCaptured),
+	)
+	if err != nil {
+		return false, fmt.Errorf("move run survived work: %w", err)
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // ClearRunSurvivedWork drops the run's survived-work handoff.
 func (d *DB) ClearRunSurvivedWork(runID string) error {
 	if _, err := d.sql.Exec(`DELETE FROM run_survived_work WHERE run_id = ?`, runID); err != nil {

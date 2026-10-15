@@ -114,8 +114,9 @@ func TestCapturedSurvivedWorkDoesNotHoldTheWorktreeButRestoredWorkDoes(t *testin
 	}
 }
 
-// A rerun takes over a terminal run's captured repair work, so its next
-// authorized repair can restore it; work still in the old worktree stays.
+// A rerun takes over a terminal run's captured repair work, naming its
+// recorded worktree, so its next authorized repair can restore it; work
+// still in the old worktree stays.
 func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())
 	if err := p.EnsureDirs(); err != nil {
@@ -140,9 +141,12 @@ func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
 	if err := database.SetRunSurvivedWork(old.ID, captured); err != nil {
 		t.Fatal(err)
 	}
-	m.carrySurvivedWork(repo.ID, old.ID, next.ID)
+	ctx := withSurvivedWorkFrom(context.Background(), old.ID)
+	if err := m.carrySurvivedWork(ctx, next.ID, "/custom/root/wt"); err != nil {
+		t.Fatal(err)
+	}
 	moved, err := database.GetRunSurvivedWork(next.ID)
-	if err != nil || moved == nil || moved.Ref != captured.Ref || moved.Worktree != p.WorktreeDir(repo.ID, next.ID) {
+	if err != nil || moved == nil || moved.Ref != captured.Ref || moved.Worktree != "/custom/root/wt" {
 		t.Fatalf("carried handoff = %+v %v", moved, err)
 	}
 	if left, _ := database.GetRunSurvivedWork(old.ID); left != nil {
@@ -157,7 +161,9 @@ func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	m.carrySurvivedWork(repo.ID, old.ID, third.ID)
+	if err := m.carrySurvivedWork(ctx, third.ID, "/wt3"); err != nil {
+		t.Fatal(err)
+	}
 	if moved, _ := database.GetRunSurvivedWork(third.ID); moved != nil {
 		t.Fatalf("in-place work moved off its worktree: %+v", moved)
 	}
