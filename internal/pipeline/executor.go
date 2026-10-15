@@ -1223,7 +1223,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		if err == nil {
 			outcome, err = step.Execute(sctx)
-			timedOut := fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout) || errors.Is(err, ErrTestAgentTimeout))
+			// Only repair steps capture: another step's leftovers are not a
+			// repair to continue, and capturing them would replace a handoff
+			// they never contained.
+			timedOut := fixRound && restoresSurvivedWork(stepName) && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout) || errors.Is(err, ErrTestAgentTimeout))
 			// A timed-out repair's leftovers, and restored work a round did
 			// not commit, go back where nothing can publish them. Not while the
 			// round was cancelled (shutdown or abort) or a repair it dispatched

@@ -608,7 +608,7 @@ func TestCaptureSurvivedWork_NestedRepositoryStaysInPlace(t *testing.T) {
 	gitRun(t, nested, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "fixture")
 	writeFile(t, nested, "edited.txt", "inside a nested repo\n")
 	work, _ := CaptureSurvivedWork(dir, "run-11", nil)
-	if work == nil || work.State != types.SurvivedWorkInPlace || !strings.Contains(work.InspectionError, "still in the worktree") {
+	if work == nil || work.State != types.SurvivedWorkInPlace || work.Ref != "" || !strings.Contains(work.InspectionError, "nested repository fixture") {
 		t.Fatalf("nested repository reported as captured: %+v", work)
 	}
 	if got := readFile(t, nested, "edited.txt"); got != "inside a nested repo\n" {
@@ -756,5 +756,50 @@ func TestRestoresSurvivedWorkOnlyForRepairSteps(t *testing.T) {
 		if got := restoresSurvivedWork(step); got != want {
 			t.Errorf("restoresSurvivedWork(%s) = %v, want %v", step, got, want)
 		}
+	}
+}
+
+// A nested repository the repair un-ignored is caught before the reset
+// restores the rule that would hide it.
+func TestCaptureSurvivedWork_UnignoredNestedRepositoryStaysInPlace(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, ".gitignore", "fixture/\n")
+	gitRun(t, dir, "add", ".gitignore")
+	gitRun(t, dir, "commit", "-qm", "ignore fixture")
+	writeFile(t, dir, ".gitignore", "")
+	nested := filepath.Join(dir, "fixture")
+	gitRun(t, dir, "init", "-q", nested)
+	writeFile(t, nested, "edited.txt", "committed\n")
+	gitRun(t, nested, "add", "-A")
+	gitRun(t, nested, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "fixture")
+	writeFile(t, nested, "edited.txt", "inside a nested repo\n")
+	work, _ := CaptureSurvivedWork(dir, "run-17", nil)
+	if work == nil || work.State != types.SurvivedWorkInPlace {
+		t.Fatalf("un-ignored nested repository reported as captured: %+v", work)
+	}
+	if got := readFile(t, nested, "edited.txt"); got != "inside a nested repo\n" {
+		t.Fatalf("nested edit lost: %q", got)
+	}
+}
+
+// A Rebase resolver timeout is not a repair: it captures nothing and leaves
+// an inherited handoff as it was.
+func TestExecutor_RebaseTimeoutKeepsTheHandoff(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	step := &adaptiveCallStep{name: types.StepRebase, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"conflict","severity":"error","description":"conflict","action":"auto-fix"}]}`}, nil
+		}
+		writeFile(t, dir, "mergetool.orig", "backup\n")
+		return nil, ErrAgentTimeout
+	}}
+	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Rebase: 1}}, nil, []Step{step}, nil)
+	_ = exec.Execute(context.Background(), run, repo, dir)
+	left, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkCaptured {
+		t.Fatalf("rebase timeout changed the handoff: %+v %v", left, err)
 	}
 }

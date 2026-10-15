@@ -177,6 +177,14 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
+	// A nested repository (an untracked directory with its own .git) is
+	// snapshotted only as a gitlink, and HEAD's ignore rules can hide it
+	// once the worktree is reset, so it is caught here, before anything moves.
+	if nested := nestedRepository(status); nested != "" {
+		work.InspectionError = "nested repository " + nested + " holds changes the capture cannot hold"
+		work.Next = survivedWorkInPlaceNext
+		return work
+	}
 	base, commit, err := snapshotSurvivedWork(ctx, workDir)
 	if err != nil {
 		work.InspectionError = "could not capture the uncommitted work: " + err.Error()
@@ -407,6 +415,18 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// nestedRepository returns the first untracked directory in a porcelain
+// status (--untracked-files=all lists files, so a directory entry is a
+// nested repository), or "".
+func nestedRepository(status string) string {
+	for _, line := range strings.Split(status, "\n") {
+		if path, ok := strings.CutPrefix(line, "?? "); ok && strings.HasSuffix(path, "/") {
+			return strings.Trim(path, "\"/")
+		}
+	}
+	return ""
 }
 
 // removeCapturedUntracked deletes the untracked, unignored files the capture
