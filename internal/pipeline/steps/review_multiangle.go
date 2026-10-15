@@ -54,7 +54,11 @@ type candidateFinding struct {
 // runMultiAngleReview runs one finder per plan dimension in parallel, merges
 // their findings, verifies surviving claims up to the level's cap, and rates
 // risk from the retained findings. A finder that cannot produce a valid review
-// fails the step: an unrun angle must not read as a clean one.
+// fails the step: an unrun angle must not read as a clean one. The one
+// exception is a finder other than correctness that ran out of time while the
+// correctness finder completed: its angle is named as not reviewed in the
+// summary and the review goes on with the rest, since a hung finder would
+// otherwise fail exactly the large changes this review exists for.
 func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.RunOpts, plan reviewPlan, verifyContext string) (Findings, error) {
 	log := lockedLog(sctx.Log)
 	routes := sctx.Config.Review.Routes
@@ -83,8 +87,12 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 		}(i, dim)
 	}
 	wg.Wait()
-	if err := errors.Join(errs...); err != nil {
+	unreviewed, err := finderFailures(sctx, plan.Dimensions, errs)
+	if err != nil {
 		return Findings{}, err
+	}
+	for _, name := range unreviewed {
+		log(fmt.Sprintf("finder %s ran out of time; continuing without the %s angle", name, name))
 	}
 
 	names := make([]string, len(plan.Dimensions))
@@ -136,8 +144,47 @@ func (s *ReviewStep) runMultiAngleReview(sctx *pipeline.StepContext, opts agent.
 	verifiedRisk(&merged)
 	merged.Summary = fmt.Sprintf("Multi-angle review (%s): %d finders, %d claims, %d after de-duplication; %d confirmed, %d plausible, %d refuted.",
 		plan.Effort, len(plan.Dimensions), claims, len(candidates)+len(overflow), confirmed, plausible, len(candidates)+len(overflow)-confirmed-plausible)
+	if len(unreviewed) > 0 {
+		merged.Summary += fmt.Sprintf(" Not reviewed (finder ran out of time): %s.", strings.Join(unreviewed, ", "))
+	}
 	log(merged.Summary)
 	return merged, nil
+}
+
+// finderFailures decides what the finders' errors mean for the review. It
+// returns the dimensions whose finder only ran out of time, or an error when
+// the review cannot stand: any other failure, a cancelled step, or a
+// correctness finder that did not complete.
+func finderFailures(sctx *pipeline.StepContext, dims []reviewDimension, errs []error) ([]string, error) {
+	var unreviewed []string
+	var fatal []error
+	for i, err := range errs {
+		if err == nil {
+			continue
+		}
+		timedOut := errors.Is(err, agent.ErrRunDeadline) || errors.Is(err, errReviewAgentTimeout)
+		if !timedOut || dims[i] == dimensionCorrectness || sctx.Ctx.Err() != nil {
+			fatal = append(fatal, err)
+			continue
+		}
+		unreviewed = append(unreviewed, dims[i].Name)
+	}
+	if len(fatal) > 0 {
+		return nil, errors.Join(append(fatal, timeoutsAsErrors(dims, errs, unreviewed)...)...)
+	}
+	return unreviewed, nil
+}
+
+// timeoutsAsErrors returns the tolerated timeouts too, so a review that fails
+// for another reason still reports every finder that did not complete.
+func timeoutsAsErrors(dims []reviewDimension, errs []error, unreviewed []string) []error {
+	var out []error
+	for i, err := range errs {
+		if err != nil && slices.Contains(unreviewed, dims[i].Name) {
+			out = append(out, err)
+		}
+	}
+	return out
 }
 
 func finderFocusSection(dim reviewDimension, all []reviewDimension) string {

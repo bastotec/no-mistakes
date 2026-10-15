@@ -201,3 +201,24 @@ func TestClassifyDeckTransient(t *testing.T) {
 		}
 	}
 }
+
+// Deck's own deadline is a typed error, never retried: a rerun would only
+// spend the same budget again.
+func TestDeckDeadlineIsTypedAndNotRetried(t *testing.T) {
+	defer withFastBackoff(t)()
+	a, count := fakeDeckFailingFirst(t, 9, "run exceeded 1500s deadline")
+	_, err := a.Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "review"})
+	if !errors.Is(err, ErrRunDeadline) {
+		t.Fatalf("Run() error = %v, want ErrRunDeadline", err)
+	}
+	if got := runCount(t, count); got != "1" {
+		t.Fatalf("deck ran %s times, want 1", got)
+	}
+	_, err = func() (*Result, error) {
+		b, _ := fakeDeckFailingFirst(t, 9, "model gateway request failed (HTTP 400)")
+		return b.Run(context.Background(), RunOpts{CWD: t.TempDir(), Prompt: "review"})
+	}()
+	if errors.Is(err, ErrRunDeadline) {
+		t.Fatalf("a gateway refusal read as a deadline: %v", err)
+	}
+}
