@@ -723,3 +723,38 @@ func TestExecutor_RebaseFixRoundDoesNotRestore(t *testing.T) {
 		t.Fatalf("handoff after rebase fix = %+v", left)
 	}
 }
+
+// A file the repair un-ignored is removed with the capture, even though
+// HEAD's ignore rules hide it again after the reset.
+func TestCaptureSurvivedWork_RemovesFilesTheRepairUnignored(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, ".gitignore", ".env\n")
+	gitRun(t, dir, "add", ".gitignore")
+	gitRun(t, dir, "commit", "-qm", "ignore env")
+	writeFile(t, dir, ".gitignore", "")
+	writeFile(t, dir, ".env", "SECRET=interrupted\n")
+	work, _ := CaptureSurvivedWork(dir, "run-16", nil)
+	if work == nil || work.State != types.SurvivedWorkCaptured {
+		t.Fatalf("capture = %+v", work)
+	}
+	if _, err := os.Stat(filepath.Join(dir, ".env")); !os.IsNotExist(err) {
+		t.Fatalf(".env left in the worktree: %v", err)
+	}
+	if got := gitRun(t, dir, "show", work.Ref+":.env"); got != "SECRET=interrupted" {
+		t.Fatalf("captured .env = %q", got)
+	}
+}
+
+// Only steps whose fix round runs a repair agent get captured work back: a
+// Rebase resolver needs a clean worktree, and a Push or PR retry would
+// publish the work with no agent continuing it.
+func TestRestoresSurvivedWorkOnlyForRepairSteps(t *testing.T) {
+	for step, want := range map[types.StepName]bool{
+		types.StepReview: true, types.StepTest: true, types.StepDocument: true, types.StepLint: true, types.StepCI: true,
+		types.StepRebase: false, types.StepPush: false, types.StepPR: false, types.StepIntent: false,
+	} {
+		if got := restoresSurvivedWork(step); got != want {
+			t.Errorf("restoresSurvivedWork(%s) = %v, want %v", step, got, want)
+		}
+	}
+}

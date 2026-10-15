@@ -1211,9 +1211,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		sctx.RestoredSurvivedWork = nil
 		var outcome *StepOutcome
 		var err error
-		// Rebase's resolver needs a clean worktree, and its abort on timeout
-		// is not a repair whose work is captured, so it never gets it back.
-		if fixRound && stepName != types.StepRebase {
+		// Only steps whose fix round runs a repair agent get the work back:
+		// Rebase's resolver needs a clean worktree, and a Push or PR retry
+		// would publish it with no agent continuing it.
+		if fixRound && restoresSurvivedWork(stepName) {
 			sctx.RestoredSurvivedWork, err = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
 		} else if !fixRound {
 			// Restored work a shutdown left in the worktree goes back into a
@@ -1682,6 +1683,16 @@ func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writ
 		return ClearSurvivedWork(e.db, runID, workDir)
 	}
 	return err
+}
+
+// restoresSurvivedWork reports whether a step's fix round runs a repair
+// agent that continues captured work.
+func restoresSurvivedWork(step types.StepName) bool {
+	switch step {
+	case types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepCI:
+		return true
+	}
+	return false
 }
 
 // mayTouchRepairWorktree reports whether settlement may snapshot and reset

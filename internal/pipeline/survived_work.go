@@ -203,7 +203,11 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		inPlace.Next = survivedWorkInPlaceNext
 		return &inPlace
 	}
-	if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err == nil {
+	// The captured untracked files go first, by path: once reset restores
+	// HEAD's ignore rules, git clean would skip one the repair un-ignored.
+	if err := removeCapturedUntracked(ctx, workDir); err != nil {
+		work.InspectionError = "captured, but its untracked files could not be removed: " + err.Error()
+	} else if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err == nil {
 		if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
 			work.InspectionError = "captured, but the worktree could not be cleaned: " + err.Error()
 		}
@@ -403,6 +407,25 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// removeCapturedUntracked deletes the untracked, unignored files the capture
+// just snapshotted, as listed under the worktree's current ignore rules.
+func removeCapturedUntracked(ctx context.Context, workDir string) error {
+	status, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		return err
+	}
+	for _, entry := range strings.Split(string(status), "\x00") {
+		// A directory entry is a nested repository, which the capture does
+		// not hold; it stays for the post-clean check to report.
+		if path, ok := strings.CutPrefix(entry, "?? "); ok && path != "" && !strings.HasSuffix(path, "/") {
+			if err := os.Remove(filepath.Join(workDir, filepath.FromSlash(path))); err != nil && !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // applySurvivedLayer applies the change from one captured commit to another.
