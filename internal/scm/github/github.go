@@ -358,12 +358,42 @@ func (h *Host) UpdatePR(ctx context.Context, pr *scm.PR, content scm.PRContent) 
 		args = append(args, "--title", content.Title)
 	}
 	args = append(args, "--body-file", "-")
-	cmd := h.cmd(ctx, "gh", args...)
-	cmd.Stdin = strings.NewReader(content.Body)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("gh pr edit: %w", err)
+		}
+		// Both the command and its consumed stdin must be fresh on each retry.
+		cmd := h.cmd(ctx, "gh", args...)
+		cmd.Stdin = strings.NewReader(content.Body)
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			return pr, nil
+		}
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("gh pr edit: %w", ctx.Err())
+		}
+		// Only known transport failures are retryable, not API/policy errors.
+		transient := false
+		failure := strings.ToLower(strings.TrimSpace(string(out)) + ": " + err.Error())
+		for _, signature := range []string{"tls handshake timeout", "connection reset by peer", "i/o timeout", "connection timed out"} {
+			if strings.Contains(failure, signature) {
+				transient = true
+				break
+			}
+		}
+		if !transient || attempt == maxAttempts {
+			return nil, fmt.Errorf("gh pr edit: %s: %w", strings.TrimSpace(string(out)), err)
+		}
+		// Updating known content is safe to repeat; creation is deliberately not.
+		timer := time.NewTimer(time.Duration(attempt) * 200 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return nil, fmt.Errorf("gh pr edit: %w", ctx.Err())
+		case <-timer.C:
+		}
 	}
-	return pr, nil
 }
 
 var _ scm.PRContentReader = (*Host)(nil)

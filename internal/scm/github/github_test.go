@@ -898,6 +898,75 @@ func TestUpdatePRStreamsBodyThroughStdin(t *testing.T) {
 	}
 }
 
+func TestUpdatePRRetriesTransportFailures(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, failure          string
+		failures, wantAttempts int
+	}{
+		{"timeout then success", "net/http: TLS handshake timeout", 1, 2},
+		{"reset then success", "read: connection reset by peer", 1, 2},
+		{"io timeout then success", "read: i/o timeout", 1, 2},
+		{"exhausted", "net/http: TLS handshake timeout", 3, 3},
+		{"unauthorized", "HTTP 401: Bad credentials", 3, 1},
+		{"forbidden", "HTTP 403: Resource not accessible", 3, 1},
+		{"not found", "HTTP 404: Not Found", 3, 1},
+		{"validation", "GraphQL: Body cannot contain an invalid HTML comment", 3, 1},
+		{"unknown", "unknown flag: --body-file", 3, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			content := scm.PRContent{Title: "fix: preserve content", Body: "## Summary\n\nOriginal body with unicode: ✓\n"}
+			attempts := 0
+			host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				attempts++
+				response := githubTestResponse{wantStdin: content.Body}
+				if attempts <= tc.failures {
+					response.stderr, response.code = tc.failure, 1
+				}
+				return githubTestCmdFactory(map[string]githubTestResponse{
+					"gh pr edit 42 --repo test/repo --title " + content.Title + " --body-file -": response,
+				})(ctx, name, args...)
+			}, nil, "", "test/repo")
+			pr := &scm.PR{Number: "42"}
+			updated, err := host.UpdatePR(context.Background(), pr, content)
+			if tc.failures < tc.wantAttempts {
+				if err != nil || updated != pr {
+					t.Fatalf("UpdatePR() = %v, %v", updated, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "gh pr edit: "+tc.failure) {
+				t.Fatalf("expected original failure, got %v", err)
+			}
+			if attempts != tc.wantAttempts {
+				t.Fatalf("attempts = %d, want %d", attempts, tc.wantAttempts)
+			}
+		})
+	}
+}
+
+func TestUpdatePRCancellationStopsRetries(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	attempts := 0
+	host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		attempts++
+		// Cancel during backoff after the helper has returned its transport error.
+		time.AfterFunc(100*time.Millisecond, cancel)
+		return githubTestCmdFactory(map[string]githubTestResponse{
+			"gh pr edit 42 --repo test/repo --body-file -": {stderr: "net/http: TLS handshake timeout", code: 1},
+		})(ctx, name, args...)
+	}, nil, "", "test/repo")
+	start := time.Now()
+	_, err := host.UpdatePR(ctx, &scm.PR{Number: "42"}, scm.PRContent{Body: "body"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context cancellation, got %v", err)
+	}
+	if attempts != 1 || time.Since(start) > time.Second {
+		t.Fatalf("cancellation did not stop promptly: attempts=%d elapsed=%v", attempts, time.Since(start))
+	}
+}
+
 func TestUpdatePROmitsTitleWhenEmpty(t *testing.T) {
 	t.Parallel()
 
