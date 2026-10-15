@@ -965,8 +965,18 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if pipeline.SurvivedWorkHoldsWorktree(work, workDir) {
 		return "interrupted repair has uncommitted or unreadable work; preserving worktree"
 	}
-	// In-place work with a ref was only partly removed; the ref still holds
-	// the rest, so the record stays. Without a ref it was all in the worktree.
+	// In-place work with a ref and a clean worktree is all in the ref - a
+	// capture whose final write failed, or split work recovered by hand - so
+	// it becomes captured, which a rerun inherits. Without a ref it was all
+	// in the worktree, which is clean now.
+	if work.State == types.SurvivedWorkInPlace && work.Ref != "" {
+		captured := *work
+		captured.State, captured.InspectionError = types.SurvivedWorkCaptured, ""
+		if err := d.SetRunSurvivedWork(run.ID, &captured); err != nil {
+			return "cannot record survived-work evidence"
+		}
+		return ""
+	}
 	if work.State == types.SurvivedWorkInPlace && work.Ref == "" {
 		if err := pipeline.ClearSurvivedWork(d, run.ID, workDir); err != nil {
 			return "cannot clear survived-work evidence"

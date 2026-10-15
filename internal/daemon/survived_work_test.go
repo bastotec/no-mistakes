@@ -178,3 +178,36 @@ func TestCarrySurvivedWorkMovesOnlyCapturedWork(t *testing.T) {
 		t.Fatalf("in-place work moved off its worktree: %+v", moved)
 	}
 }
+
+// A ref-backed in-place handoff whose worktree is clean is all in its ref:
+// cleanup records it as captured, so a rerun inherits it.
+func TestCleanRefBackedInPlaceWorkBecomesCaptured(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, head := setupTestGitRepo(t, p, database, "survived-promote")
+	run, err := database.InsertRun(repo.ID, "main", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := p.WorktreeDir(repo.ID, run.ID)
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), dir, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunSurvivedWork(run.ID, &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: dir, Ref: "refs/no-mistakes/survived/" + run.ID + "/abc", BaseSHA: head, InspectionError: "final write failed", Next: "n"}); err != nil {
+		t.Fatal(err)
+	}
+	if reason := survivedWorkCleanupReason(database, run, dir); reason != "" {
+		t.Fatalf("clean worktree retained: %s", reason)
+	}
+	work, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || work == nil || work.State != types.SurvivedWorkCaptured {
+		t.Fatalf("handoff after cleanup = %+v %v", work, err)
+	}
+}
