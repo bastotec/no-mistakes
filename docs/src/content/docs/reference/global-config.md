@@ -507,7 +507,7 @@ It is global-only: repository config and environment variables cannot override i
 
 Maximum wall-clock time for **one** Review-step agent invocation.
 Each reviewer, finder, verifier and optional fixer gets a new full configured limit, including schema-validation retries and later rereviews; no invocation inherits time spent by an earlier turn.
-When an invocation reaches this absolute deadline, the agent is cancelled with a diagnostic naming the wall-clock limit. A reviewer, finder or fixer timeout fails the step; a verifier timeout keeps its claim plausible under the [Review failure policy](/no-mistakes/reference/pipeline-steps/#review).
+When an invocation reaches this absolute deadline, the agent is cancelled with a diagnostic naming the wall-clock limit. The [Review failure policy](/no-mistakes/reference/pipeline-steps/#review) determines whether a timeout fails the step, leaves an angle not reviewed, or keeps a claim plausible.
 That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 
 |         |                        |

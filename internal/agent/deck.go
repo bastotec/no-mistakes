@@ -132,6 +132,17 @@ type deckRunFailure struct {
 
 func (e *deckRunFailure) Error() string { return "deck run failed: " + e.message }
 
+// Unwrap marks Deck's own --deadline-secs expiry ("run exceeded <n>s
+// deadline") as ErrRunDeadline, so a caller can tell a run that ran out of
+// time from one that failed.
+func (e *deckRunFailure) Unwrap() error {
+	msg := strings.ToLower(e.message)
+	if strings.HasPrefix(msg, "run exceeded ") && strings.Contains(msg, "deadline") {
+		return ErrRunDeadline
+	}
+	return nil
+}
+
 // deckGatewayStatusRE reads the HTTP status Deck appends to a gateway failure.
 var deckGatewayStatusRE = regexp.MustCompile(`^model gateway request failed \(http (\d{3})\)`)
 

@@ -488,3 +488,64 @@ func TestReviewStep_MultiAngleRefutationWithoutEvidenceKeepsTheClaim(t *testing.
 		t.Fatalf("findings = %+v, want the claim kept as plausible", findings.Items)
 	}
 }
+
+// A finder other than correctness that runs out of time does not fail the
+// review when correctness completed: its angle is named as not reviewed.
+func TestReviewStep_MultiAngleTimedOutFinderIsReportedNotFatal(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	ag := &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
+		if strings.Contains(opts.Prompt, "You are the security finder") {
+			return nil, fmt.Errorf("deck exited: exit status 1: %w", agent.ErrRunDeadline)
+		}
+		return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
+
+	outcome, err := (&ReviewStep{}).Execute(sctx)
+	if err != nil {
+		t.Fatalf("Execute() error = %v, want the review to go on without the security angle", err)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || !strings.Contains(findings.Summary, "Not reviewed (finder ran out of time): security.") || len(findings.ReviewUnreviewed) != 1 {
+		t.Fatalf("summary = %q, %v; want the unreviewed angle named", findings.Summary, err)
+	}
+}
+
+// Correctness is the angle the review cannot stand without: its timeout
+// still fails the step, and a non-timeout failure elsewhere does too.
+func TestReviewStep_MultiAngleCorrectnessTimeoutStillFails(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ finder, want string }{
+		{"correctness", "deadline"},
+	} {
+		dir, baseSHA, headSHA := setupGitRepo(t)
+		ag := &concurrentAgent{run: func(opts agent.RunOpts) (*agent.Result, error) {
+			if strings.Contains(opts.Prompt, "You are the "+tc.finder+" finder") {
+				return nil, agent.ErrRunDeadline
+			}
+			return &agent.Result{Output: json.RawMessage(cleanReviewJSON)}, nil
+		}}
+		sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+		sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: "high"})
+		if _, err := (&ReviewStep{}).Execute(sctx); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s timeout: err = %v, want the step to fail", tc.finder, err)
+		}
+	}
+}
+
+func TestFinderDeadlineScalesWithTheDiff(t *testing.T) {
+	for _, tc := range []struct {
+		lines, want int
+	}{
+		{0, 1500}, {40, 616}, {1334, 1133}, {5000, 1500},
+	} {
+		if got := finderDeadlineSecs(&agent.InvocationWorkload{Lines: tc.lines}, 1500); got != tc.want {
+			t.Fatalf("finderDeadlineSecs(%d lines) = %d, want %d", tc.lines, got, tc.want)
+		}
+	}
+	if got := finderDeadlineSecs(nil, 1800); got != 1800 {
+		t.Fatalf("unknown diff = %d, want the ceiling", got)
+	}
+}

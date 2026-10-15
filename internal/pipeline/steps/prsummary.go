@@ -1227,6 +1227,19 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		}
 	}
 
+	// A review that went on without an angle says so on whatever status it
+	// reaches, and never with a clean pass mark.
+	if sr.StepName == types.StepReview && finalFindings != nil && len(finalFindings.ReviewUnreviewed) > 0 {
+		unreviewed := strings.Join(finalFindings.ReviewUnreviewed, ", ")
+		withStatus := buildDetail
+		buildDetail = func(line string) (string, string) {
+			if rest, ok := strings.CutPrefix(line, "✅ "); ok {
+				line = "⚠️ " + rest
+			}
+			return withStatus(line + ", not reviewed: " + unreviewed)
+		}
+	}
+
 	// Parse initial round findings (round 1) for the full story.
 	var initialFindings *types.Findings
 	if len(rounds) > 0 && rounds[0].FindingsJSON != nil {
@@ -1515,6 +1528,10 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			}
 			inner.WriteString("\n")
 			continue
+		}
+
+		if len(findings.ReviewUnreviewed) > 0 {
+			inner.WriteString("⚠️ " + unreviewedAnglesLine(findings.ReviewUnreviewed) + "\n\n")
 		}
 
 		if len(findings.Items) == 0 {
