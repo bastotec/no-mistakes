@@ -191,6 +191,18 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
+	// The snapshot skips ignored files, and the reset rewrites every file
+	// HEAD tracks: a HEAD file the repair untracked and ignored would be
+	// overwritten with nothing holding its edits.
+	if path, err := ignoredTrackedFile(ctx, workDir); err != nil || path != "" {
+		if err != nil {
+			work.InspectionError = "could not check ignored files: " + err.Error()
+		} else {
+			work.InspectionError = "ignored file " + path + " is tracked in HEAD, so the capture cannot hold its edits"
+		}
+		work.Next = survivedWorkInPlaceNext
+		return work
+	}
 	base, commit, err := snapshotSurvivedWork(ctx, workDir)
 	if err != nil {
 		work.InspectionError = "could not capture the uncommitted work: " + err.Error()
@@ -418,6 +430,34 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 	for _, e := range porcelainZPaths(string(status)) {
 		if gitlinks[e[1]] {
 			return e[1], nil
+		}
+	}
+	return "", nil
+}
+
+// ignoredTrackedFile returns the first ignored, untracked file that HEAD
+// tracks, or "".
+func ignoredTrackedFile(ctx context.Context, workDir string) (string, error) {
+	ignored, err := git.RunRaw(ctx, workDir, "ls-files", "-z", "--others", "--ignored", "--exclude-standard")
+	if err != nil {
+		return "", err
+	}
+	if len(ignored) == 0 {
+		return "", nil
+	}
+	tracked, err := git.RunRaw(ctx, workDir, "ls-tree", "-r", "-z", "--name-only", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	inHead := map[string]bool{}
+	for _, path := range strings.Split(string(tracked), "\x00") {
+		if path != "" {
+			inHead[path] = true
+		}
+	}
+	for _, path := range strings.Split(string(ignored), "\x00") {
+		if inHead[path] {
+			return path, nil
 		}
 	}
 	return "", nil

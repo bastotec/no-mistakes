@@ -941,3 +941,22 @@ func TestExecutor_ResumedRoundDoesNotReapplyCommittedWork(t *testing.T) {
 	}
 	_ = repo
 }
+
+// A HEAD file the repair untracked and ignored is not in the snapshot, and
+// the reset would overwrite it: the work stays in place.
+func TestCaptureSurvivedWork_KeepsAnUntrackedIgnoredHeadFile(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "generated.txt", "head version\n")
+	gitRun(t, dir, "add", "generated.txt")
+	gitRun(t, dir, "commit", "-qm", "track generated")
+	gitRun(t, dir, "rm", "-q", "--cached", "generated.txt")
+	writeFile(t, dir, ".gitignore", "generated.txt\n")
+	writeFile(t, dir, "generated.txt", "repair edit\n")
+	work, _ := CaptureSurvivedWork(dir, "run-19", nil)
+	if work == nil || work.State != types.SurvivedWorkInPlace || !strings.Contains(work.InspectionError, "generated.txt") {
+		t.Fatalf("capture = %+v", work)
+	}
+	if got := readFile(t, dir, "generated.txt"); got != "repair edit\n" {
+		t.Fatalf("generated.txt = %q", got)
+	}
+}
