@@ -106,7 +106,7 @@ func TestCaptureSurvivedWork_MovesTheWorkIntoARefAndRestoresItExactly(t *testing
 	}
 }
 
-func TestRestoreSurvivedWork_OnAMovedHeadAppliesTheWorkUnstaged(t *testing.T) {
+func TestRestoreSurvivedWork_OnAMovedHeadRestoresBothLayers(t *testing.T) {
 	dir := survivedWorkRepo(t)
 	leavePartialRepair(t, dir)
 	work, _ := CaptureSurvivedWork(dir, "run-2", nil)
@@ -123,8 +123,33 @@ func TestRestoreSurvivedWork_OnAMovedHeadAppliesTheWorkUnstaged(t *testing.T) {
 	if got := readFile(t, dir, "new.txt"); got != "untracked\n" {
 		t.Fatalf("new file = %q", got)
 	}
-	if staged := gitRun(t, dir, "diff", "--cached", "--name-only"); staged != "" {
-		t.Fatalf("restored onto a moved head but left staged: %q", staged)
+	if staged := gitRun(t, dir, "show", ":tracked.txt"); staged != "staged version" {
+		t.Fatalf("staged layer = %q, want the staged version", staged)
+	}
+	if staged := gitRun(t, dir, "diff", "--cached", "--name-only"); staged != "doomed.txt\ntracked.txt" {
+		t.Fatalf("staged paths = %q", staged)
+	}
+}
+
+// Staged-only work (staged, then removed from the working tree) survives a
+// moved-HEAD restore too.
+func TestRestoreSurvivedWork_OnAMovedHeadKeepsStagedOnlyWork(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "staged-only.txt", "only in the index\n")
+	gitRun(t, dir, "add", "staged-only.txt")
+	if err := os.Remove(filepath.Join(dir, "staged-only.txt")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, dir, "tracked.txt", "edited\n")
+	work, _ := CaptureSurvivedWork(dir, "run-14", nil)
+	writeFile(t, dir, "unrelated.txt", "moved\n")
+	gitRun(t, dir, "add", "unrelated.txt")
+	gitRun(t, dir, "commit", "-qm", "head moved")
+	if err := RestoreSurvivedWork(dir, work); err != nil {
+		t.Fatal(err)
+	}
+	if staged := gitRun(t, dir, "show", ":staged-only.txt"); staged != "only in the index" {
+		t.Fatalf("staged-only file = %q", staged)
 	}
 }
 

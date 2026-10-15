@@ -314,19 +314,20 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 		}
 		return nil
 	}
-	// A machine-read patch: fixed a/ b/ prefixes whatever diff.noprefix or
-	// diff.mnemonicPrefix say, applied with the matching -p1.
-	patch, err := git.RunRaw(ctx, workDir, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--binary", "--no-ext-diff", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", work.BaseSHA, work.Ref)
-	if err != nil {
-		return fmt.Errorf("read captured changes: %w", err)
-	}
-	if _, err := git.RunWithInput(ctx, workDir, string(patch), "apply", "-p1", "--3way", "--index"); err != nil {
+	// Both layers go back: the index commit three-way onto the moved HEAD
+	// and into the index, then the working-tree commit on top of it into
+	// the working tree only, so staged-only work survives too.
+	undo := func() {
 		_, _ = git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD")
 		_, _ = git.Run(ctx, workDir, "clean", "-fdq")
-		return fmt.Errorf("captured work does not apply to the moved HEAD: %w", err)
 	}
-	if _, err := git.Run(ctx, workDir, "reset", "-q"); err != nil {
-		return err
+	if err := applySurvivedLayer(ctx, workDir, work.BaseSHA, work.Ref+"^", "--3way", "--index"); err != nil {
+		undo()
+		return fmt.Errorf("captured staged work does not apply to the moved HEAD: %w", err)
+	}
+	if err := applySurvivedLayer(ctx, workDir, work.Ref+"^", work.Ref); err != nil {
+		undo()
+		return fmt.Errorf("captured unstaged work does not apply to the moved HEAD: %w", err)
 	}
 	return nil
 }
@@ -388,4 +389,20 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// applySurvivedLayer applies the change from one captured commit to another.
+// It is a machine-read patch: raw bytes (no textconv, no external diff),
+// fixed a/ b/ prefixes whatever diff.noprefix or diff.mnemonicPrefix say,
+// applied with the matching -p1.
+func applySurvivedLayer(ctx context.Context, workDir, from, to string, applyArgs ...string) error {
+	patch, err := git.RunRaw(ctx, workDir, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to)
+	if err != nil {
+		return fmt.Errorf("read captured changes: %w", err)
+	}
+	if len(patch) == 0 {
+		return nil
+	}
+	_, err = git.RunWithInput(ctx, workDir, string(patch), append([]string{"apply", "-p1"}, applyArgs...)...)
+	return err
 }
