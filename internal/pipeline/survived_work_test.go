@@ -21,6 +21,9 @@ func survivedWorkRepo(t *testing.T) string {
 	for _, args := range [][]string{{"init"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.com"}} {
 		gitRun(t, dir, args...)
 	}
+	// These fixtures assert exact bytes after checkout/apply. Keep Git from
+	// rewriting their LF input according to the host's autocrlf default.
+	gitRun(t, dir, "config", "core.autocrlf", "false")
 	writeFile(t, dir, "tracked.txt", "base\n")
 	writeFile(t, dir, "doomed.txt", "base\n")
 	gitRun(t, dir, "add", ".")
