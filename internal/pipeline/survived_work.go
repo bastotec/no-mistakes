@@ -158,7 +158,7 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	// A dirty submodule's own edits live in its repository, not in anything
 	// the superproject can write as a tree: capture would record a gitlink
 	// and lose them. Leave such work in place.
-	if dirty, err := dirtySubmodule(ctx, workDir, status); err != nil || dirty != "" {
+	if dirty, err := dirtySubmodule(ctx, workDir); err != nil || dirty != "" {
 		if err != nil {
 			work.InspectionError = "could not check submodules: " + err.Error()
 		} else {
@@ -196,6 +196,15 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		}
 	} else {
 		work.InspectionError = "captured, but the worktree could not be reset: " + err.Error()
+	}
+	// git clean skips nested repositories, and the snapshot holds only a
+	// gitlink for one, so a clean exit does not prove the worktree is clean.
+	if work.InspectionError == "" {
+		if rest, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"); err != nil {
+			work.InspectionError = "captured, but the worktree could not be checked afterwards: " + err.Error()
+		} else if strings.TrimSpace(string(rest)) != "" {
+			work.InspectionError = "captured, but changes the capture cannot hold (such as a nested repository) are still in the worktree"
+		}
 	}
 	if work.InspectionError != "" {
 		// The work is still (partly) in the worktree: it stays in place,
@@ -331,25 +340,31 @@ func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string) bool {
 
 // dirtySubmodule returns the first changed path in status that is a
 // submodule (a gitlink in the index), or "".
-func dirtySubmodule(ctx context.Context, workDir, status string) (string, error) {
-	stage, err := git.Run(ctx, workDir, "ls-files", "--stage")
+// Both listings are read NUL-delimited, so paths compare exactly whatever
+// characters they hold.
+func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
+	stage, err := git.RunRaw(ctx, workDir, "ls-files", "--stage", "-z")
 	if err != nil {
 		return "", err
 	}
 	gitlinks := map[string]bool{}
-	for _, line := range strings.Split(stage, "\n") {
-		if strings.HasPrefix(line, "160000 ") {
-			if tab := strings.IndexByte(line, '\t'); tab >= 0 {
-				gitlinks[line[tab+1:]] = true
+	for _, entry := range strings.Split(string(stage), "\x00") {
+		if strings.HasPrefix(entry, "160000 ") {
+			if tab := strings.IndexByte(entry, '\t'); tab >= 0 {
+				gitlinks[entry[tab+1:]] = true
 			}
 		}
 	}
 	if len(gitlinks) == 0 {
 		return "", nil
 	}
-	for _, line := range strings.Split(status, "\n") {
-		if len(line) > 3 && gitlinks[strings.TrimSpace(line[3:])] {
-			return strings.TrimSpace(line[3:]), nil
+	status, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		return "", err
+	}
+	for _, entry := range strings.Split(string(status), "\x00") {
+		if len(entry) > 3 && gitlinks[entry[3:]] {
+			return entry[3:], nil
 		}
 	}
 	return "", nil

@@ -528,6 +528,9 @@ func TestExecutor_FailedRestoreStopsTheRound(t *testing.T) {
 	if ran {
 		t.Fatal("the repair ran without the captured work")
 	}
+	if sr := stepResultByName(t, database, run.ID, types.StepTest); sr.Status != types.StepStatusFailed {
+		t.Fatalf("step status = %s, want failed", sr.Status)
+	}
 	left, err := database.GetRunSurvivedWork(run.ID)
 	if err != nil || left == nil || left.Ref != work.Ref || left.State != types.SurvivedWorkCaptured {
 		t.Fatalf("handoff after failed restore = %+v %v", left, err)
@@ -557,5 +560,37 @@ func TestExecutor_SplitInPlaceWorkStopsTheRound(t *testing.T) {
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
 	if err := exec.Execute(context.Background(), run, repo, dir); err == nil || !strings.Contains(err.Error(), "split between") {
 		t.Fatalf("Execute() = %v, want the split-work refusal", err)
+	}
+}
+
+// git clean leaves a nested repository behind and the snapshot holds only
+// its gitlink, so such work is kept in place, not reported as captured.
+func TestCaptureSurvivedWork_NestedRepositoryStaysInPlace(t *testing.T) {
+	dir := survivedWorkRepo(t)
+	nested := filepath.Join(dir, "fixture")
+	gitRun(t, dir, "init", "-q", nested)
+	writeFile(t, nested, "edited.txt", "committed\n")
+	gitRun(t, nested, "add", "-A")
+	gitRun(t, nested, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "fixture")
+	writeFile(t, nested, "edited.txt", "inside a nested repo\n")
+	work, _ := CaptureSurvivedWork(dir, "run-11", nil)
+	if work == nil || work.State != types.SurvivedWorkInPlace || !strings.Contains(work.InspectionError, "still in the worktree") {
+		t.Fatalf("nested repository reported as captured: %+v", work)
+	}
+	if got := readFile(t, nested, "edited.txt"); got != "inside a nested repo\n" {
+		t.Fatalf("nested edit lost: %q", got)
+	}
+}
+
+// A submodule path with a space is matched exactly.
+func TestCaptureSurvivedWork_DirtySubmoduleWithSpaceInPathStaysInPlace(t *testing.T) {
+	sub := survivedWorkRepo(t)
+	dir := survivedWorkRepo(t)
+	gitRun(t, dir, "-c", "protocol.file.allow=always", "submodule", "add", "-q", sub, "my lib")
+	gitRun(t, dir, "commit", "-qm", "add submodule")
+	writeFile(t, filepath.Join(dir, "my lib"), "tracked.txt", "edited inside the submodule\n")
+	work, _ := CaptureSurvivedWork(dir, "run-12", nil)
+	if work == nil || work.Ref != "" || !strings.Contains(work.InspectionError, "submodule my lib") {
+		t.Fatalf("dirty submodule with a space reported as captured: %+v", work)
 	}
 }

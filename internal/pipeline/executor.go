@@ -1206,28 +1206,31 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// of this run left when it was cut short (see survived_work.go), so it
 		// can continue it; until then that work sits in a run-owned ref where
 		// nothing can commit or publish it.
+		// Survived-work errors fail the step through the same path as a step
+		// error, so the step and its events reach a terminal state.
 		sctx.RestoredSurvivedWork = nil
+		var outcome *StepOutcome
+		var err error
 		if fixRound {
-			restored, restoreErr := e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
-			if restoreErr != nil {
-				return false, "", restoreErr
-			}
-			sctx.RestoredSurvivedWork = restored
-		} else if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, false, writeLog); settleErr != nil {
+			sctx.RestoredSurvivedWork, err = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
+		} else {
 			// Restored work a shutdown left in the worktree goes back into a
 			// ref before a round that is not a repair can see it.
-			return false, "", settleErr
+			err = e.settleSurvivedWork(run.ID, sctx.WorkDir, false, writeLog)
 		}
-		outcome, err := step.Execute(sctx)
-		timedOut := fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout))
-		// A timed-out repair's leftovers, and restored work a round did not
-		// commit, go back where nothing can publish them. Not while the round
-		// was cancelled (shutdown or abort) or a repair it dispatched may still
-		// be running: an independent repair wrapper may still be editing the
-		// worktree, the handoff stays restored, and cleanup keeps the worktree.
-		if (timedOut || sctx.RestoredSurvivedWork != nil) && e.mayTouchRepairWorktree(sctx, run.ID, err) {
-			if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
-				return false, "", settleErr
+		if err == nil {
+			outcome, err = step.Execute(sctx)
+			timedOut := fixRound && (errors.Is(err, ErrAgentTimeout) || errors.Is(err, ErrReviewAgentTimeout))
+			// A timed-out repair's leftovers, and restored work a round did
+			// not commit, go back where nothing can publish them. Not while the
+			// round was cancelled (shutdown or abort) or a repair it dispatched
+			// may still be running: an independent repair wrapper may still be
+			// editing the worktree, the handoff stays restored, and cleanup
+			// keeps the worktree.
+			if (timedOut || sctx.RestoredSurvivedWork != nil) && e.mayTouchRepairWorktree(sctx, run.ID, err) {
+				if settleErr := e.settleSurvivedWork(run.ID, sctx.WorkDir, timedOut, writeLog); settleErr != nil {
+					outcome, err = nil, errors.Join(err, settleErr)
+				}
 			}
 		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
