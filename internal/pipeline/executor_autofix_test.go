@@ -251,13 +251,6 @@ func TestExecutor_AutoFixRespectsMaxAttempts(t *testing.T) {
 		t.Errorf("expected 3 calls (1 initial + 2 auto-fix), got %d", callCount)
 	}
 
-	if err := exec.Respond(types.StepLint, types.ActionFix, []string{"style"}); err == nil {
-		t.Fatal("configured hard ceiling accepted another repair")
-	}
-	if callCount != 3 {
-		t.Fatalf("configured hard ceiling launched %d extra rounds", callCount-3)
-	}
-
 	// Now approve manually to finish
 	if err := exec.Respond(types.StepLint, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)
@@ -553,21 +546,25 @@ func TestExecutor_AutoFixMixedFindings(t *testing.T) {
 	waitExecutorDone(t, done)
 }
 
-func TestExecutor_ConfiguredZeroRejectsExplicitRepair(t *testing.T) {
+func TestExecutor_ConfiguredZeroGrantsOneExplicitRepair(t *testing.T) {
 	database, p, run, repo := setupTest(t)
 	calls := 0
 	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		calls++
-		return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"ask-user"}]}`}, nil
+		return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"question","severity":"warning","description":"needs authority","action":"auto-fix"}]}`}, nil
 	}}
 	exec := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Review: 0}}, nil, []Step{step}, nil)
 	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
 	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
-	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err == nil {
-		t.Fatal("configured zero accepted an explicit repair")
-	}
 	if calls != 1 {
-		t.Fatalf("configured zero launched %d repair rounds", calls-1)
+		t.Fatalf("configured zero launched %d automatic repair rounds", calls-1)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"question"}); err != nil {
+		t.Fatal(err)
+	}
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
+	if calls != 2 {
+		t.Fatalf("explicit response launched %d repair rounds, want one", calls-1)
 	}
 	if err := exec.Respond(types.StepReview, types.ActionApprove, nil); err != nil {
 		t.Fatal(err)

@@ -339,10 +339,13 @@ owns the staging guard's scope and limitations.
 A repair-budget exhaustion gate also requires a new explicit authority-bearing
 response, even under `--yes`. Relay the failed findings, consumed limit,
 and requested additional round; do not automatically fix, approve, or skip it.
-For a configured core step, an explicit `--action fix` extends authority by
-one repair without exceeding the configured maximum. A repository gate has no
-automatic allowance and requires a separate explicit response for each repair.
-Preserve any already-started repair until it returns.
+An explicit `--action fix` authorizes exactly one repair, even when the
+configured automatic maximum is zero or exhausted; it does not raise that
+maximum. Replaying a response for the same round cannot grant another repair.
+A repository gate has no automatic allowance and requires a separate explicit
+response for each repair. The [auto-fix reference](https://kunchenguid.github.io/no-mistakes/concepts/auto-fix/#how-it-works)
+owns durable counting and authorization. Preserve any already-started repair
+until it returns.
 
 After a daemon restart, follow the gate's version-matched `help`. A repair
 reconciliation gate permits retry only when no repair process identity was

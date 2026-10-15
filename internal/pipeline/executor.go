@@ -237,7 +237,7 @@ func (e *Executor) RespondWithOverrides(step types.StepName, action types.Approv
 		}
 		if !repairDecision.Granted {
 			e.mu.Unlock()
-			return fmt.Errorf("cannot authorize another %s repair: consumed %d of configured maximum %d", step, repairDecision.Consumed, repairDecision.Limit)
+			return fmt.Errorf("cannot authorize another %s repair: this round already has a repair reservation", step)
 		}
 	}
 	e.waiting = false

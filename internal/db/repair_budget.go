@@ -120,7 +120,7 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit bool,
 			return result, nil
 		}
 		if !explicit {
-			result.ExplicitRepairAvailable = !policyConfigured || result.Consumed < limit
+			result.ExplicitRepairAvailable = true
 			return result, nil
 		}
 	}
@@ -142,15 +142,14 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit bool,
 		result.AuthorityLimit = int(recordedAuthority.Int64)
 	}
 	if explicit {
+		// A response grants one repair, independently of the automatic ceiling.
+		// The round key above prevents replay from minting another grant.
 		result.AuthorityLimit = result.Consumed + 1
-		if policyConfigured {
-			result.AuthorityLimit = min(limit, result.AuthorityLimit)
-		}
 	}
-	result.ExplicitRepairAvailable = !policyConfigured || result.Consumed < limit
+	result.ExplicitRepairAvailable = true
 	source = "exhausted"
 	authorizedLimit := result.AuthorityLimit
-	if policyConfigured {
+	if policyConfigured && !explicit {
 		authorizedLimit = min(limit, authorizedLimit)
 	}
 	if result.Consumed < authorizedLimit {
@@ -180,9 +179,6 @@ func (d *DB) reserveStepRepair(stepID, roundID string, limit int, explicit bool,
 	}
 	if result.Granted && explicit {
 		if _, err := tx.Exec(`UPDATE step_rounds SET selected_finding_ids = ?, selection_source = ?, user_findings_json = ? WHERE id = ?`, selectedFindingIDs, RoundSelectionSourceUser, userFindingsJSON, roundID); err != nil {
-			return result, err
-		}
-		if _, err := tx.Exec(`UPDATE step_results SET auto_fix_limit_provenance = CASE WHEN auto_fix_limit_provenance = 'legacy_normalized' THEN 'initialized' ELSE auto_fix_limit_provenance END WHERE id = ?`, stepID); err != nil {
 			return result, err
 		}
 	}
