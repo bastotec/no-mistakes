@@ -1275,7 +1275,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 				if fixRound && sctx.DeferredFindings != "" {
 					// Preserve the held finding's classification and authorized
 					// instructions if the reviewer also reports the same issue.
-					outcome.Findings = mergeFindingsJSON(removeMatchingReviewHeldFindingsJSON(outcome.Findings, sctx.DeferredFindings), sctx.DeferredFindings)
+					fresh := outcome.Findings
+					outcome.Findings = withReviewRoundMetadata(mergeFindingsJSON(removeMatchingReviewHeldFindingsJSON(fresh, sctx.DeferredFindings), sctx.DeferredFindings), fresh)
 					outcome.NeedsApproval = true
 				}
 				reviewApprovedHeadSHA = outcome.ReviewApprovedHeadSHA
@@ -2521,4 +2522,29 @@ func selectedFindingCount(raw string, ids []string) int {
 		return len(ids)
 	}
 	return findingsCount(raw)
+}
+
+// withReviewRoundMetadata stamps the fresh rereview's own review metadata -
+// its level and the angles it went on without - onto the payload merged with
+// the held findings. The merge can fall back to the held round's payload
+// whole, which describes an earlier review.
+func withReviewRoundMetadata(merged, fresh string) string {
+	if merged == "" || fresh == "" {
+		return merged
+	}
+	freshFindings, err := types.ParseFindingsJSON(fresh)
+	if err != nil {
+		return merged
+	}
+	findings, err := types.ParseFindingsJSON(merged)
+	if err != nil {
+		return merged
+	}
+	findings.ReviewEffort, findings.ReviewEffortReason = freshFindings.ReviewEffort, freshFindings.ReviewEffortReason
+	findings.ReviewUnreviewed = freshFindings.ReviewUnreviewed
+	raw, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return merged
+	}
+	return raw
 }

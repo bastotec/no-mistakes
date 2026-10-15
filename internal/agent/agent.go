@@ -91,6 +91,10 @@ type InvocationTuning struct {
 	DeadlineSecs int
 }
 
+// ErrRunDeadline marks a run its InvocationTuning.DeadlineSecs cut short, as
+// the adapter itself reports it.
+var ErrRunDeadline = errors.New("agent run exceeded its deadline")
+
 // IsStructuredOutputRejected reports whether an invocation completed but its
 // final structured response was absent, malformed, or rejected by the requested
 // schema. Callers may use this distinction to ask the same agent to correct its

@@ -84,7 +84,23 @@ func planReview(sizing config.ReviewSizing, routes config.ReviewRoutesRaw, workl
 		plan.VerifyTuning = agent.InvocationTuning{Effort: "high", MaxTurns: 100, DeadlineSecs: 1200}
 	}
 	plan.VerifyTuning.Model = strings.TrimSpace(routes.Verify)
+	if plan.multiAngle() {
+		plan.FinderTuning.DeadlineSecs = finderDeadlineSecs(workload, plan.FinderTuning.DeadlineSecs)
+	}
 	return plan
+}
+
+// finderDeadlineSecs scales a finder's deadline with the diff, between a
+// floor and the level's ceiling. A finder that answers takes a few minutes
+// even on a large change (about 150s for 1300 lines on chain/review), so the
+// ceiling only ever caught hung runs, at the cost of holding the whole review
+// for it. An unknown diff size keeps the ceiling.
+func finderDeadlineSecs(workload *agent.InvocationWorkload, ceiling int) int {
+	const floor, perLine = 600, 0.4
+	if workload == nil || workload.Lines <= 0 {
+		return ceiling
+	}
+	return min(ceiling, max(floor, floor+int(float64(workload.Lines)*perLine)))
 }
 
 // finderRoute spreads the configured finder routes round-robin, so different

@@ -377,6 +377,9 @@ Risk assessment (after listing all findings):
 	} else {
 		opts.Tuning = plan.Tuning
 		findings, err = s.reviewWithSchemaRetry(sctx, "agent review", opts, sctx.Log)
+		// Only the multi-angle review records unreviewed angles; agent
+		// JSON cannot claim any.
+		findings.ReviewUnreviewed = nil
 	}
 	if err != nil {
 		return nil, err
