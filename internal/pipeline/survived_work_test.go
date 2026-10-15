@@ -910,3 +910,34 @@ func TestExecutor_RefusalOutcomeLeavesRestoredWork(t *testing.T) {
 		t.Fatalf("handoff after refusal = %+v", left)
 	}
 }
+
+// A resumed fix round whose restored work was already committed does not
+// apply the capture again: the handoff is consumed.
+func TestExecutor_ResumedRoundDoesNotReapplyCommittedWork(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	writeFile(t, dir, "partial.txt", "survived\n")
+	work, _ := CaptureSurvivedWork(dir, run.ID, recordSurvivedWork(database, run.ID))
+	if err := RestoreSurvivedWork(dir, work); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, dir, "add", "-A")
+	gitRun(t, dir, "commit", "-qm", "repair committed before the cut")
+	restored := *work
+	restored.State = types.SurvivedWorkRestored
+	if err := database.SetRunSurvivedWork(run.ID, &restored); err != nil {
+		t.Fatal(err)
+	}
+	exec := NewExecutor(database, p, &config.Config{}, nil, nil, nil)
+	got, err := exec.restoreSurvivedWork(run.ID, dir, func(string) {})
+	if err != nil || got != nil {
+		t.Fatalf("restore = %+v, %v; want nothing restored", got, err)
+	}
+	if left, _ := database.GetRunSurvivedWork(run.ID); left != nil {
+		t.Fatalf("consumed handoff kept: %+v", left)
+	}
+	if status := gitRun(t, dir, "status", "--porcelain"); status != "" {
+		t.Fatalf("capture reapplied: %q", status)
+	}
+	_ = repo
+}

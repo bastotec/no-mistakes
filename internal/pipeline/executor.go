@@ -1639,6 +1639,14 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	if work.State == types.SurvivedWorkInPlace && unclean {
 		return nil, fmt.Errorf("interrupted repair work is split between %s and the worktree %s; recover it by hand (git diff %s %s) and clean the worktree before another repair", work.Ref, workDir, work.BaseSHA, work.Ref)
 	}
+	// Restored is recorded only once a restore completed, so a clean
+	// worktree under it means the repair committed the work before the
+	// round was cut off (a resumed round): it is consumed, not restored
+	// again onto the head that already holds it.
+	if work.State == types.SurvivedWorkRestored && !unclean {
+		writeLog("interrupted repair work from " + work.Ref + " was already committed")
+		return nil, ClearSurvivedWork(e.db, runID, workDir)
+	}
 	if work.State == types.SurvivedWorkRestored && unclean {
 		writeLog("continuing interrupted repair work restored from " + work.Ref)
 		return work, nil
