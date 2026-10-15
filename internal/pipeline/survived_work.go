@@ -180,7 +180,13 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	// A nested repository (an untracked directory with its own .git) is
 	// snapshotted only as a gitlink, and HEAD's ignore rules can hide it
 	// once the worktree is reset, so it is caught here, before anything moves.
-	if nested := nestedRepository(status); nested != "" {
+	statusZ, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
+	if err != nil {
+		work.InspectionError = "worktree status unreadable"
+		work.Next = survivedWorkInPlaceNext
+		return work
+	}
+	if nested := nestedRepository(string(statusZ)); nested != "" {
 		work.InspectionError = "nested repository " + nested + " holds changes the capture cannot hold"
 		work.Next = survivedWorkInPlaceNext
 		return work
@@ -211,9 +217,10 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		inPlace.Next = survivedWorkInPlaceNext
 		return &inPlace
 	}
-	// The captured untracked files go first, by path: once reset restores
-	// HEAD's ignore rules, git clean would skip one the repair un-ignored.
-	if err := removeCapturedUntracked(ctx, workDir); err != nil {
+	// Untracked files go first, under the repair's own ignore rules - the
+	// rules the snapshot was taken under. After the reset, HEAD's rules could
+	// hide one the repair un-ignored. git clean never follows symlinks.
+	if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
 		work.InspectionError = "captured, but its untracked files could not be removed: " + err.Error()
 	} else if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err == nil {
 		if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
@@ -409,43 +416,44 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, entry := range strings.Split(string(status), "\x00") {
-		if len(entry) > 3 && gitlinks[entry[3:]] {
-			return entry[3:], nil
+	for _, e := range porcelainZPaths(string(status)) {
+		if gitlinks[e[1]] {
+			return e[1], nil
 		}
 	}
 	return "", nil
 }
 
-// nestedRepository returns the first untracked directory in a porcelain
-// status (--untracked-files=all lists files, so a directory entry is a
-// nested repository), or "".
-func nestedRepository(status string) string {
-	for _, line := range strings.Split(status, "\n") {
-		if path, ok := strings.CutPrefix(line, "?? "); ok && strings.HasSuffix(path, "/") {
-			return strings.Trim(path, "\"/")
+// porcelainZPaths returns the paths of a `status --porcelain -z` listing,
+// each with its two-letter status. A rename or copy record carries its
+// source as the next field, which is skipped, never read as an entry.
+func porcelainZPaths(raw string) [][2]string {
+	var out [][2]string
+	fields := strings.Split(raw, "\x00")
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(f) < 4 {
+			continue
+		}
+		xy, path := f[:2], f[3:]
+		out = append(out, [2]string{xy, path})
+		if xy[0] == 'R' || xy[0] == 'C' {
+			i++
+		}
+	}
+	return out
+}
+
+// nestedRepository returns the first untracked directory in a porcelain -z
+// listing taken with --untracked-files=all, which lists files, so a
+// directory entry is a nested repository; or "".
+func nestedRepository(statusZ string) string {
+	for _, e := range porcelainZPaths(statusZ) {
+		if e[0] == "??" && strings.HasSuffix(e[1], "/") {
+			return strings.TrimSuffix(e[1], "/")
 		}
 	}
 	return ""
-}
-
-// removeCapturedUntracked deletes the untracked, unignored files the capture
-// just snapshotted, as listed under the worktree's current ignore rules.
-func removeCapturedUntracked(ctx context.Context, workDir string) error {
-	status, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
-	if err != nil {
-		return err
-	}
-	for _, entry := range strings.Split(string(status), "\x00") {
-		// A directory entry is a nested repository, which the capture does
-		// not hold; it stays for the post-clean check to report.
-		if path, ok := strings.CutPrefix(entry, "?? "); ok && path != "" && !strings.HasSuffix(path, "/") {
-			if err := os.Remove(filepath.Join(workDir, filepath.FromSlash(path))); err != nil && !os.IsNotExist(err) {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 // applySurvivedLayer applies the change from one captured commit to another.

@@ -803,3 +803,19 @@ func TestExecutor_RebaseTimeoutKeepsTheHandoff(t *testing.T) {
 		t.Fatalf("rebase timeout changed the handoff: %+v %v", left, err)
 	}
 }
+
+// A nested repository whose path is quoted in plain porcelain (a space) is
+// still caught.
+func TestNestedRepositoryReadsNULDelimitedPaths(t *testing.T) {
+	if got := nestedRepository("?? fixture repo/\x00?? a.txt\x00"); got != "fixture repo" {
+		t.Fatalf("nestedRepository = %q", got)
+	}
+}
+
+// A rename's source field is skipped, never read as its own entry.
+func TestPorcelainZPathsSkipsRenameSources(t *testing.T) {
+	got := porcelainZPaths("R  moved.sqlite\x00?? link/state.sqlite\x00?? real.txt\x00")
+	if len(got) != 2 || got[0][1] != "moved.sqlite" || got[1][1] != "real.txt" {
+		t.Fatalf("entries = %v", got)
+	}
+}
