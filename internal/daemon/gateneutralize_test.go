@@ -2,6 +2,9 @@ package daemon
 
 import (
 	"context"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -91,5 +94,43 @@ func TestNewPipelineAgent_OptOut_FallbackRefusesAnyUnverifiedMember(t *testing.T
 		t.Fatalf("a fallback list of only verified harnesses must pass under opt-out, got: %v", err)
 	} else {
 		_ = ag.Close()
+	}
+}
+
+// TestNewPipelineAgent_OptOut_DeckFollowsItsFeatureProbe proves the daemon gate
+// admits Deck under the opt-out exactly when the configured binary's
+// `deck run --help` lists --no-project-context, and refuses an older build.
+func TestNewPipelineAgent_OptOut_DeckFollowsItsFeatureProbe(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell fixture")
+	}
+	for _, tc := range []struct {
+		help  string
+		admit bool
+	}{
+		{"      --no-project-context  Ignore the project context", true},
+		{"      --ephemeral", false},
+	} {
+		bin := filepath.Join(t.TempDir(), "deck")
+		if err := os.WriteFile(bin, []byte("#!/bin/sh\necho '"+tc.help+"'\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+		cfg := &config.Config{
+			Agent:                  types.AgentDeck,
+			DisableProjectSettings: true,
+			AgentPathOverride:      map[string]string{"deck": bin},
+		}
+		ag, err := newPipelineAgent(context.Background(), cfg, t.TempDir(), fakeLookPath, runenv.Overlay{})
+		if tc.admit {
+			if err != nil {
+				t.Fatalf("a Deck build with the flag must pass under opt-out, got: %v", err)
+			}
+			if !agent.NeutralizesGateInstructions(ag) {
+				t.Error("deck pipeline agent must report neutralized under opt-out")
+			}
+			_ = ag.Close()
+		} else if err == nil || !strings.Contains(err.Error(), "does not neutralize") {
+			t.Fatalf("a Deck build without the flag must be refused, got: %v", err)
+		}
 	}
 }

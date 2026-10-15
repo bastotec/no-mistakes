@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 
@@ -230,5 +231,14 @@ func assertOrder(t *testing.T, value string, ordered ...string) {
 			t.Fatalf("%q appeared out of order in:\n%s", item, value)
 		}
 		last = idx
+	}
+}
+
+func TestStatsDashboardReportsCoalescedAndSupersededPushes(t *testing.T) {
+	out := renderStatsDashboard(&db.Stats{TotalRuns: 5, CoalescedRuns: 3, SupersededRuns: 1})
+	coalesced := regexp.MustCompile(`Coalesced\s+3\s+restarts avoided`)
+	superseded := regexp.MustCompile(`Superseded\s+1\s+runs replaced`)
+	if !coalesced.MatchString(out) || !superseded.MatchString(out) {
+		t.Fatalf("stats output missing push coalescing lines:\n%s", out)
 	}
 }

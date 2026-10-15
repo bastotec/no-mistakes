@@ -232,6 +232,8 @@ Approve the finding only when you have confirmed the local default-branch work b
 
 Symptom: push succeeds but `no-mistakes` shows no active run.
 
+If a run is visible as `pending` but has no active steps yet, first check the configured [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window). That intentional delay is not a receive-hook failure.
+
 ### Check the remote
 
 ```sh

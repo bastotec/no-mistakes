@@ -56,7 +56,7 @@ That is a core design choice, not an implementation detail.
 2. The gate repo's `pre-receive` hook asks the daemon to admit the update before Git changes any gate ref. An active validation-step descendant is refused, including a direct push that bypasses the CLI.
 3. Git writes an admitted push into the local bare gate repo.
 4. The gate repo's `post-receive` hook notifies the daemon.
-5. The daemon creates a detached worktree for this run.
+5. The daemon creates a detached worktree for this run, then waits out [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window) before starting steps.
 6. The ten core steps run in order: `intent -> rebase -> review -> jev* -> test -> document -> lint -> push -> pr -> ci` (`jev*` is the advisory-only evaluation signal, disabled by default). Repository gates, when configured, run immediately after their anchors.
 7. If a step pauses, you can attach with the TUI or use `no-mistakes axi respond` to approve, fix, or skip.
    Use `no-mistakes axi abort` only when you mean to cancel the whole run.
@@ -120,7 +120,20 @@ same patch-identity comparison backs
 the custody decisions that used to require SHA containment (rerun head
 selection and terminal-run supersession). If neither proof holds, the
 unaccounted private-only range is reported
-as at risk.
+as at risk, not asserted to be lost: a conflict or context drift can also make
+retention unprovable. The refusal includes a bounded excerpt of recent
+live-only commits and hunks on private paths, marks a truncated excerpt, and
+provides a full head-to-head diff command. These edits are diagnostic
+candidates, not automatically classified as reversals. An operator must
+explicitly decide whether to restore private changes or authorize a
+content-changing history join before retrying; fresh submission cannot borrow
+another run's ownership exception. A clean replay across a moved base satisfies
+the ordinary survival proof even when patch identities drift. If the replay
+required conflict resolution and a later edit superseded the private wording,
+content alone cannot distinguish that intent from loss. Fresh submission does
+not reconcile that ambiguous shape or remove its strand automatically: it
+keeps the mirror, reports the conflict-resolved private commits and the live
+edits on their exact paths, and requires the operator decision above.
 
 **Accepted Decision 41-A (issue #983):** pipeline publication may replace a
 private mirror head that is **exactly equal to `Run.SubmittedHeadSHA`** without
@@ -215,7 +228,7 @@ A long-running background process that manages pipeline runs. It:
 - Listens on a Unix socket at `~/.no-mistakes/socket`
 - Writes its identity record to `~/.no-mistakes/daemon.pid`
 - Holds an exclusive OS lock on `~/.no-mistakes/daemon.lock` for its whole lifetime, so only one live daemon can own an `NM_HOME` at a time
-- Serializes concurrent pushes to the same branch (new push cancels the in-progress run)
+- Coordinates [same-branch push replacement](/no-mistakes/concepts/daemon/#concurrent-push-handling)
 - Creates and cleans up worktrees
 - Scopes configured commands and one-shot agent subprocesses to the step lifetime by terminating remaining child processes on completion, failure, or cancellation
 - Persists state to SQLite

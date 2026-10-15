@@ -40,6 +40,8 @@ ci_timeout: "168h"
 
 step_quiet_warning: "10m"
 
+push_quiet_window: "90s"
+
 agent_timeout: "30m"
 
 review_agent_timeout: "30m"
@@ -138,7 +140,9 @@ The effective agent configuration must resolve to a runnable runner before a new
 If an explicit agent is unavailable, `auto` finds no native agent or ACP alias, or no fallback-list entry is available, the gate fails before its first pipeline step rather than reporting a partial command-only validation as passed.
 `no-mistakes doctor` checks the global configuration, while every run repeats resolution after applying any trusted repository-level `agent` override.
 
-This fork configures `agent: deck` in its repository config; other agents remain available. Deck runs `deck run --ephemeral -`, feeds the prompt and output schema on stdin, and validates the terminal JSONL `run_finished.output`. A missing terminal event or `run_failed` is an error, even with exit status zero. Review, fix, and Test use the same adapter with fresh sessions. Deck model selection uses `agent_config.deck.model`; effort and `disable_project_settings: true` are unsupported and fail closed. Native Deck turn/deadline limits still apply and can be configured through `agent_args_override.deck`.
+This fork configures `agent: deck` in its repository config; other agents remain available. Deck runs `deck run --ephemeral -`, feeds the prompt and output schema on stdin, and validates the terminal JSONL `run_finished.output`. A missing terminal event or `run_failed` is an error, even with exit status zero, subject to the gateway retry policy below. Review, fix, and Test use the same adapter with fresh sessions. Deck model selection uses `agent_config.deck.model`; `agent_config.deck.effort` remains unsupported and fails closed (Review's per-invocation tuning is separate; see [Review](/no-mistakes/reference/pipeline-steps/#review)). Deck supports [`disable_project_settings: true`](/no-mistakes/reference/repo-config/#disable_project_settings) subject to the feature-probe requirement documented there. Native Deck turn/deadline limits still apply and can be configured through `agent_args_override.deck`.
+
+The Deck adapter retries an agent turn in place up to **two times** (three attempts total) when a native `run_failed` event reports `model gateway request failed` with no HTTP status (for example a dropped `codex_stream_failed` stream), HTTP 5xx, or HTTP 429. Retries use exponential backoff with jitter within the invocation's existing time budget; cancellation or deadline expiry stops them. Each attempt replays the prompt in a fresh ephemeral session against the **same worktree**, retaining any changes the failed attempt left on disk rather than rolling them back. This is not a restart of the pipeline or earlier steps. Other HTTP 4xx, refusals, bad configuration, output-validation failures, and gateway text merely quoted in stderr or other diagnostics do not trigger this adapter retry. Retry lifecycle messages appear in the step log; an eligible gateway failure that exhausts the retries remains an error.
 
 You can also set an ordered fallback list:
 
@@ -266,7 +270,7 @@ How each field maps:
 
 `agent_config` is global-only. Like `agent_args_override`, it decides which model runs with your credentials, so an `agent_config` block in a repository's `.no-mistakes.yaml` is ignored.
 
-**Precedence.** `agent_args_override` always wins. If a raw flag already pins a knob natively - for example, `-m`, `--model`, or a `-c`/`--config` assignment whose exact key is `model` or `model_reasoning_effort` for Codex, plus the other harnesses' `--effort`, `--reasoning-effort`, or `--thinking` forms - then `agent_config` does not emit its value for that knob. Text such as `model=` nested inside an unrelated option's value is not a pin. Any knob the raw flags leave alone still comes from `agent_config`, so adding `agent_config` to an existing configuration never changes the arguments that configuration already supplied:
+**Precedence.** `agent_args_override` wins over `agent_config`; Review's supported [per-invocation tuning](/no-mistakes/reference/pipeline-steps/#review) is a separate override that can replace either. If a raw flag already pins a knob natively - for example, `-m`, `--model`, or a `-c`/`--config` assignment whose exact key is `model` or `model_reasoning_effort` for Codex, plus the other harnesses' `--effort`, `--reasoning-effort`, or `--thinking` forms - then `agent_config` does not emit its value for that knob. Text such as `model=` nested inside an unrelated option's value is not a pin. Any knob the raw flags leave alone still comes from `agent_config`, so adding `agent_config` to an existing configuration never changes the arguments that configuration already supplied:
 
 ```yaml
 agent_config:
@@ -301,7 +305,7 @@ The only role keys are `reviewer` and `fixer`. Each configured role requires one
 explicit `agent` (the same harness names as `agent_config`; no `auto` or lists).
 Model and effort are optional and inherit `agent_config` for that harness when
 empty. Nonempty role values override that profile, but native
-`agent_args_override` flags still win. Model availability, credentials, and
+`agent_args_override` flags still win over role values. Review's [per-invocation tuning](/no-mistakes/reference/pipeline-steps/#review) applies after this profile selection. Model availability, credentials, and
 supported effort levels remain the harness/provider's responsibility.
 
 Both roles can use the same harness with different models. Reviews and rereviews
@@ -321,7 +325,7 @@ Use this for anything [`agent_config`](#agent_config) does not cover - service t
 | Keys    | `claude`, `codex`, `grok`, `rovodev`, `opencode`, `pi`, `deck`, `copilot`, `antigravity` |
 | Default | Empty (no extra flags)                                    |
 
-User-supplied flags are normally inserted ahead of no-mistakes' managed flags, so your choices usually take precedence. Security suppression selected by trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) may be placed first while preserving a compatible operator pin. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
+User-supplied flags are normally inserted ahead of no-mistakes' managed flags, so your choices usually take precedence, except for supported [Review per-invocation tuning](/no-mistakes/reference/pipeline-steps/#review). Security suppression selected by trusted [`disable_project_settings`](/no-mistakes/reference/repo-config/#disable_project_settings) may be placed first while preserving a compatible operator pin. A few flags are reserved because no-mistakes depends on them to communicate with the agent - setting any of these returns a config error on load:
 
 | Agent      | Reserved flags                                                                                              |
 | ---------- | ----------------------------------------------------------------------------------------------------------- |
@@ -450,6 +454,27 @@ It does not cancel the step, change auto-fix behavior, or mark the run failed.
 AXI renders the quiet signal in the `active_steps` table as part of `last_activity`, for example `quiet 12m3s ago: codex started pid=4242`.
 For older active runs that do not yet have activity rows, AXI falls back to the step log file's modification time.
 
+### push_quiet_window
+
+How long a run started by a push to the gate waits for the branch to go quiet before its first step starts.
+
+|         |                        |
+| ------- | ---------------------- |
+| Type    | `string` (Go duration) |
+| Default | `90s`                  |
+
+The window begins after run setup finishes, not at the Git push timestamp. While waiting, the run is `pending` with no active steps; worktree creation, trusted-config loading, and agent availability checks have already happened.
+A further push to the same branch inside the window replaces the waiting run before any step, and so any agent work, ran on it.
+The replaced run ends `cancelled: coalesced into a newer push`, and the new run waits out its own window, so each push resets the clock.
+If a same-branch launch is still setting up when the timer expires, the waiting run cannot start steps until that launch releases the branch lock; replacement by that push still counts as coalesced.
+Once the run leaves its window, a newer push keeps the usual semantics: the running run is cancelled as `cancelled: superseded by new push`.
+[`no-mistakes stats`](/no-mistakes/reference/cli/#no-mistakes-stats) reports the replacement counts.
+When a coalesced run's own push rewrote history and the replacing push only appends, the replacement keeps that pre-rewrite base, so a force push followed by a quick follow-up is still integrated as a force push rather than having the dropped commits rebased back in.
+
+Only push-triggered runs wait. `no-mistakes axi run` against a head the gate already has and reruns start without this delay; reattaching to a waiting run does not bypass it. Recovery does not reapply the window, and waiting runs remain subject to the ordinary [crash-recovery rules](/no-mistakes/concepts/daemon/#crash-recovery).
+`0s` starts every pushed run immediately; a negative value fails the config.
+It is global-only: repository config cannot override it.
+
 ### agent_timeout
 
 Maximum wall-clock time for one pipeline agent invocation that does not already have a more specific deadline.
@@ -481,8 +506,8 @@ It is global-only: repository config and environment variables cannot override i
 ### review_agent_timeout
 
 Maximum wall-clock time for **one** Review-step agent invocation.
-The optional fixer gets the full configured limit, and its fresh, session-free independent rereviewer gets a new full limit of its own. Every later fixer and rereviewer does the same; no invocation inherits time spent by an earlier turn.
-When an invocation reaches this absolute deadline, the review agent is cancelled and the run fails with a diagnostic naming the wall-clock limit instead of remaining active indefinitely.
+Each reviewer, finder, verifier and optional fixer gets a new full configured limit, including schema-validation retries and later rereviews; no invocation inherits time spent by an earlier turn.
+When an invocation reaches this absolute deadline, the agent is cancelled with a diagnostic naming the wall-clock limit. A reviewer, finder or fixer timeout fails the step; a verifier timeout keeps its claim plausible under the [Review failure policy](/no-mistakes/reference/pipeline-steps/#review).
 That diagnostic carries the same measured evidence and adapter report described under [`agent_timeout`](#agent_timeout).
 
 |         |                        |
@@ -492,7 +517,7 @@ That diagnostic carries the same measured evidence and adapter report described 
 
 Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
-Raise it for repositories whose reviews legitimately run long; it bounds only the Review step, and no other step or environment variable overrides it.
+Raise it for repositories whose reviews legitimately run long; it bounds only Review-step invocations. Deck's native per-level deadline from [review sizing](/no-mistakes/reference/pipeline-steps/#review) also applies and may end an invocation earlier.
 
 ### test_agent_timeout
 
@@ -660,6 +685,28 @@ When round N reaches the cap and still has findings:
 
 The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
 
+### review.routes
+
+Model routes the Review step's agents run on. Every field is optional; an unset route keeps the configured agent model.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `finders` | `string[]` | Spread round-robin across a multi-angle review's parallel finders, so different models look at the change |
+| `light` | `string` | The single light reviewer of a small change |
+| `verify` | `string` | The per-finding verify agents |
+
+```yaml
+review:
+  routes:
+    finders: [chain/review, claude/sonnet-5-5, zai/glm-5.3]
+    light: zai/glm-5.3
+    verify: chain/review
+```
+
+A route is passed as the agent's model for that one invocation, so it must be a model id the review agent accepts and support the reasoning effort used for its role and review level (see [Review](/no-mistakes/reference/pipeline-steps/#review)). Only adapters that take a model per invocation apply it (Deck, Pi and Claude); others ignore it.
+For route failures and verification outcomes, see [Review](/no-mistakes/reference/pipeline-steps/#review).
+A repository's trusted [`review.routes`](/no-mistakes/reference/repo-config/#reviewroutes) overrides these field by field. How much review a change gets is the repository's [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing).
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single provider-attributed check before that check reaches an approval gate.
@@ -715,7 +762,7 @@ A value in the trusted repository config overrides this global value in both dir
 
 ### commit.fix_message
 
-Template for the subject of commits created by the Review, Test, Document, Lint, and CI repair paths, plus operator-authorized repository gate repairs.
+Template for the subject of commits created by the Review, Test, Document, Lint, and CI repair paths, operator-authorized repository gate repairs, and the Push step's catch-all commit of remaining changes.
 
 | | |
 | --- | --- |
@@ -726,7 +773,7 @@ The template supports literal text and three Go-style placeholders:
 
 | Variable | Value |
 | --- | --- |
-| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `ci`, or `gate.test.mutation-budget` |
+| `{{.Step}}` | Pipeline step name, such as `review`, `test`, `document`, `lint`, `push`, `ci`, or `gate.test.mutation-budget` |
 | `{{.Summary}}` | Sanitized one-line summary returned by the fix agent, or the step's deterministic fallback summary |
 | `{{.Branch}}` | Normalized branch name, or the identifier captured and optionally transformed by [`commit.branch_pattern`](#commitbranch_pattern) and [`commit.branch_replacement`](#commitbranch_replacement) |
 
@@ -738,7 +785,7 @@ Template functions, control actions, named templates, unknown placeholders, malf
 The blocked format set includes every Unicode `Bidi_Control` code point plus `U+00AD`, `U+180E`, `U+200B`, `U+2060` through `U+2064`, the deprecated bidi controls `U+206A` through `U+206F`, `U+FEFF`, `U+FFF9` through `U+FFFB`, and Unicode tag characters in `U+E0000` through `U+E007F`.
 Legitimate `U+200C` zero-width non-joiner and `U+200D` zero-width joiner text shaping remains allowed.
 The final rendered subject is validated again, so unsafe characters in an agent-provided summary are also rejected.
-The setting does not change commit subjects created by the Rebase or Push steps.
+The setting does not change commit subjects created by the Rebase step.
 A per-repo [`commit.fix_message`](/no-mistakes/reference/repo-config/#commitfix_message) value overrides this global setting.
 
 ### commit.branch_pattern

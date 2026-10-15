@@ -50,6 +50,9 @@ review:
       instructions: |
         Prose changes only. Do not request test coverage.
   # max_rounds: 2
+  # How much review a change gets (see review.sizing below).
+  # sizing:
+  #   risky_paths: ["internal/gate/**", "*auth*"]
 
 # For orchestration repos whose project instructions would misidentify gate agents.
 # Read only from the trusted default branch. Defaults to false.
@@ -173,7 +176,9 @@ Suppress project-level agent settings and instructions for every gate-agent star
 
 This opt-in is intended for agent-orchestration repositories whose `AGENTS.md`, `CLAUDE.md`, or harness-specific project settings would give a validation agent an operator identity and authority that it must not adopt.
 When enabled, no-mistakes suppresses the target checkout's project settings for every agent-driven gate step while preserving user-level agent configuration.
-Codex, Claude, and Pi are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, and Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling).
+Codex, Claude, Pi, and Deck are the currently verified agents: Codex receives `project_doc_max_bytes=0` and `--ignore-rules`, Claude loads only its user setting source, Pi runs with `--no-context-files` (preserving a pinned `--no-context-files` or `-nc` spelling), and Deck runs with `--no-project-context`, which drops the checkout's `AGENTS.md` chain, `.agents/skills`, `.agents/deck.hooks.json`, and chat launcher while keeping `~/.agents`.
+Deck receives the flag immediately after `run`, unless it is already pinned in `agent_args_override.deck`; a pinned flag is preserved without duplication. Deck has no flag that re-enables project context.
+Deck is admitted only when the configured binary's `deck run --help` lists `--no-project-context`, because its crate version does not identify feature support. The probe runs only under this opt-out, with a 10-second timeout; a missing binary, failed probe, or older build fails closed before agent launch. Probe results are cached in-process by binary path, size, and modification time, so a redeployment with changed size or modification time is re-probed when the adapter is next constructed. Without the opt-out, no probe runs and Deck's arguments remain unchanged.
 Grok 1.0.5 still discovers native project instructions and `.grok` project surfaces, so it is not a verified agent for this boundary. A configuration that resolves Grok while this option is enabled therefore fails closed before launch.
 The setting applies to both new and resumed sessions.
 
@@ -457,6 +462,45 @@ Overrides the global [`review.max_rounds`](/no-mistakes/reference/global-config/
 | Default | Inherits from global (default `0`, unlimited) |
 
 Like the rest of the `review` block it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of `allow_repo_commands`, so a pushed branch cannot shorten its own review.
+
+### review.sizing
+
+Sizes the Review step to the change. Every field is optional.
+
+| Field | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `min_effort` | `string` | `low` | The lightest level any change gets: `low`, `medium`, `high`, `xhigh` or `max`. Sizing can raise a change above it, never below; `xhigh` and `max` are only reachable through it |
+| `small_max_lines` | `int` | `80` | A change at or under both small limits gets `low` |
+| `small_max_files` | `int` | `3` | |
+| `large_min_lines` | `int` | `800` | A change at or over either large limit gets `high` |
+| `large_min_files` | `int` | `20` | |
+| `risky_paths` | `string[]` | see below | A change touching any of these gets `high` whatever its size |
+
+Lines are added plus deleted lines in the branch diff, before `ignore_patterns` filtering. Risky paths and large limits take precedence over small limits; the numeric limits must be non-negative. Anything between small and large gets `medium`. An unreadable diff size gets `medium` unless a risky path raises it to `high`; `min_effort` still applies.
+A `risky_paths` glob containing `/` matches like `ignore_patterns` (a trailing `/**` is a subtree); one without `/` matches any single path segment, case-insensitively, so `*auth*` matches both `internal/auth/session.go` and `oauth.go`.
+Risky paths are matched against every changed file, including ignored ones. Unset, the defaults are `*auth*`, `*secur*`, `*secret*`, `*credential*`, `*password*`, `*crypto*`, `*permission*` and `*migration*`; an empty list turns path risk off.
+What each level runs is described under [Review](/no-mistakes/reference/pipeline-steps/#review).
+
+```yaml
+review:
+  sizing:
+    large_min_lines: 600
+    risky_paths: ["internal/gate/**", "internal/branchsync/**", "*auth*"]
+```
+
+Like the rest of the `review` block it is honored **only from the trusted default-branch copy**, so a pushed branch cannot lighten its own review.
+
+### review.routes
+
+Overrides the global [`review.routes`](/no-mistakes/reference/global-config/#reviewroutes) for this repository, field by field: a nonempty `finders` list and nonblank `light` or `verify` strings replace their global values. Empty values inherit rather than clearing a global route.
+
+```yaml
+review:
+  routes:
+    finders: [chain/review, zai/glm-5.3, claude/sonnet-5-5]
+```
+
+Honored **only from the trusted default-branch copy**, like the rest of the `review` block, so a pushed branch cannot pick the models that review it.
 
 ### gates
 
@@ -755,7 +799,7 @@ Override the auto-fix commit subject template for this repository.
 
 The value follows the [global `commit.fix_message` template syntax and validation rules](/no-mistakes/reference/global-config/#commitfix_message).
 That includes the 1,024-byte template limit, 16-placeholder limit, 4,096-byte summary and rendered-subject limits, and rejection of bidi and invisible Unicode format characters.
-The setting applies to the Review, Test, Document, Lint, and CI repair paths, plus operator-authorized repository gate repairs. It does not apply to commits created by the Rebase or Push steps.
+The setting applies to the Review, Test, Document, Lint, and CI repair paths, operator-authorized repository gate repairs, and the Push step's catch-all commit of remaining changes. It does not apply to commits created by the Rebase step.
 
 This non-executing field is read from the pushed branch, so a branch can adopt its own commit-subject convention without enabling `allow_repo_commands`.
 

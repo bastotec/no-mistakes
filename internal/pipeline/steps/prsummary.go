@@ -61,6 +61,15 @@ type pipelineAttestation struct {
 	// has not opted in. Additive: older attestations without the field are
 	// read as not opted in.
 	AllowTestCommandOverride string `json:"allow_test_command_override,omitempty"`
+	// Review is the review level the Review step chose for this change and
+	// why, so a consumer can tell a light single-reviewer pass from a
+	// multi-angle one. Omitted when the review recorded none.
+	Review *pipelineAttestationReview `json:"review,omitempty"`
+}
+
+type pipelineAttestationReview struct {
+	Effort string `json:"effort"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type pipelineAttestationStep struct {
@@ -227,7 +236,24 @@ func newPipelineAttestation(steps []*db.StepResult, rounds map[string][]*db.Step
 		return false
 	})
 	attestation.LiveValidation = attestedLiveValidation(steps, rounds, headSHA)
+	attestation.Review = attestedReview(steps, rounds)
 	return attestation
+}
+
+// attestedReview reads the chosen review level from the review step's
+// findings, the same record the risk line comes from.
+func attestedReview(steps []*db.StepResult, rounds map[string][]*db.StepRound) *pipelineAttestationReview {
+	for _, sr := range steps {
+		if sr == nil || sr.StepName != types.StepReview {
+			continue
+		}
+		findings := reviewStepFindings(sr, rounds[sr.ID])
+		if findings == nil || findings.ReviewEffort == "" {
+			return nil
+		}
+		return &pipelineAttestationReview{Effort: findings.ReviewEffort, Reason: findings.ReviewEffortReason}
+	}
+	return nil
 }
 
 // attestedLiveValidation derives the live-validation payload from the test
@@ -304,6 +330,7 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 	if err := json.Unmarshal([]byte(body[payloadStart:end]), &attestation); err != nil {
 		return body, false
 	}
+	carriesSteps := steps == nil
 	if steps == nil {
 		// A CI repair that did not re-run Test keeps the prior Test result,
 		// including an approved-over-failure override_reason. The caller's
@@ -320,7 +347,13 @@ func rebindPipelineAttestationWithSteps(body, newHeadSHA string, steps []*db.Ste
 			steps = append(steps, sr)
 		}
 	}
+	previousReview := attestation.Review
 	rebound := newPipelineAttestation(steps, nil, newHeadSHA, policy)
+	if carriesSteps {
+		// A restamp that carries the old step statuses carries the review
+		// level they were earned at too.
+		rebound.Review = previousReview
+	}
 	// Step statuses may be republished for a head the pipeline did not
 	// re-validate. Live validation is a factual claim about one commit's
 	// behavior, so it is derived only from current step findings and never
@@ -1289,35 +1322,34 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 	return buildDetail(line)
 }
 
+// reviewStepFindings is the review step's final findings, or its last
+// round's when the step recorded none. An unreadable final record yields nil
+// rather than falling back to an older round.
+func reviewStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) *types.Findings {
+	if sr.FindingsJSON != nil {
+		if f, err := types.ParseFindingsJSON(*sr.FindingsJSON); err == nil {
+			return &f
+		}
+		return nil
+	}
+	if len(stepRounds) > 0 {
+		last := stepRounds[len(stepRounds)-1]
+		if last.FindingsJSON != nil {
+			if f, err := types.ParseFindingsJSON(*last.FindingsJSON); err == nil {
+				return &f
+			}
+		}
+	}
+	return nil
+}
+
 func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepReview {
 			continue
 		}
 
-		var finalFindings *types.Findings
-		hasUnreadableFinal := false
-		if sr.FindingsJSON != nil {
-			if f, err := types.ParseFindingsJSON(*sr.FindingsJSON); err == nil {
-				finalFindings = &f
-			} else {
-				hasUnreadableFinal = true
-			}
-		}
-
-		src := finalFindings
-		if src == nil && !hasUnreadableFinal {
-			stepRounds := rounds[sr.ID]
-			if len(stepRounds) > 0 {
-				last := stepRounds[len(stepRounds)-1]
-				if last.FindingsJSON != nil {
-					if f, err := types.ParseFindingsJSON(*last.FindingsJSON); err == nil {
-						src = &f
-					}
-				}
-			}
-		}
-
+		src := reviewStepFindings(sr, rounds[sr.ID])
 		if src == nil || src.RiskLevel == "" {
 			return ""
 		}

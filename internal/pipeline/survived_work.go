@@ -21,6 +21,12 @@ type WorktreeSnapshot map[string]string
 func SnapshotWorktree(workDir string) (WorktreeSnapshot, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
+	// A step directory that is not a git work tree has no worktree state to
+	// protect, so there is nothing to snapshot. Any other git failure still
+	// fails the step.
+	if inside, err := git.Run(ctx, workDir, "rev-parse", "--is-inside-work-tree"); err != nil || strings.TrimSpace(inside) != "true" {
+		return nil, nil
+	}
 	statusRaw, err := git.RunRaw(ctx, workDir, "status", "--porcelain=v1", "-z", "--untracked-files=all", "--no-renames", "--ignore-submodules=none")
 	if err != nil {
 		return nil, err

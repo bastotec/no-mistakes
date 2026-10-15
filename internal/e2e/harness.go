@@ -223,6 +223,7 @@ func (h *Harness) writeGlobalConfig() {
 	}
 	cfg := fmt.Sprintf(`agent: %s
 log_level: debug
+push_quiet_window: "0s"
 agent_path_override:
   %s: %s
 auto_fix:

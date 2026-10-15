@@ -41,6 +41,15 @@ event payload: evaluating compliance against that cached payload is the exact
 staleness hole described above, so a lookup failure must never itself become
 a route to a passing verdict on stale data.
 
+## Ordered publication
+
+This legacy action returns a verdict through its runner-owned job. Live reads
+avoid archived-payload replay, but do not serialize concurrent check publication
+or preserve each original event's verdict separately. For ordering-safe current
+verdicts, migrate to the [trusted publisher](../require-no-mistakes-publish/README.md).
+Its caller contract and two-phase immutable-pin rollout are owned there; do not
+change a fork workflow to a privileged trigger without following that boundary.
+
 ## Usage
 
 Consumers pin a release tag or a commit SHA. Never `@main`: `main` is editable

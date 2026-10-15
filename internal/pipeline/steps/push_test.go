@@ -499,7 +499,12 @@ func TestPushStep_RedactsForkURLInGitErrors(t *testing.T) {
 	}
 }
 
-func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
+// TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate pins the
+// Push step's catch-all correction commit to commit.fix_message: it is a
+// pipeline-authored commit like the Review/Test/Document/Lint/CI correction
+// commits, so its subject must honor the configured template instead of the
+// historical "no-mistakes: apply agent fixes" literal.
+func TestPushStep_CommitsLeftoverChangesWithConfiguredFixMessageTemplate(t *testing.T) {
 	upstream := t.TempDir()
 	gitCmd(t, upstream, "init", "--bare")
 
@@ -508,69 +513,72 @@ func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
 	gitCmd(t, dir, "push", "origin", "main")
 	gitCmd(t, dir, "push", "origin", "feature")
 
+	// Leftover worktree change the Push step must commit before pushing.
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("formatted feature code\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Repo.UpstreamURL = upstream
 	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.Commit = config.Commit{FixMessage: "fix({{.Step}}): {{.Summary}}"}
 	setupGateMirror(t, sctx)
 	recordReviewApproval(t, sctx, headSHA)
 
-	deferred := filepath.Join(dir, "deferred.txt")
-	if err := os.WriteFile(deferred, []byte("survived but unselected\n"), 0o644); err != nil {
-		t.Fatal(err)
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatalf("push failed: %v", err)
 	}
-	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
-	if err != nil {
-		t.Fatal(err)
+
+	pushedHead := gitCmd(t, dir, "rev-parse", "HEAD")
+	if pushedHead == headSHA {
+		t.Fatal("expected a correction commit carrying the leftover change")
 	}
-	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
-	if err != nil {
-		t.Fatal(err)
+	subject := gitCmd(t, dir, "log", "-1", "--format=%s", pushedHead)
+	if subject != "fix(push): apply agent fixes" {
+		t.Fatalf("correction commit subject = %q, want the configured commit.fix_message rendering %q", subject, "fix(push): apply agent fixes")
 	}
-	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: pipeline.InspectSurvivedWork(dir)})
-	if err != nil {
-		t.Fatal(err)
+	if strings.HasPrefix(subject, "no-mistakes") {
+		t.Fatalf("correction commit subject %q still carries the hardcoded no-mistakes prefix", subject)
 	}
-	if err := sctx.DB.SetStepFindings(step.ID, raw); err != nil {
-		t.Fatal(err)
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != pushedHead {
+		t.Fatalf("remote head = %s, want pushed correction commit %s", got, pushedHead)
 	}
-	if err := sctx.DB.ResetStepsFrom(sctx.Run.ID, types.StepReview.Order()); err != nil {
-		t.Fatal(err)
-	}
-	resetReview, err := sctx.DB.GetStepResult(reviewStep.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if resetReview.FindingsJSON == nil {
-		t.Fatal("CI restart erased survived-work evidence")
-	}
-	resetFindings, err := types.ParseFindingsJSON(*resetReview.FindingsJSON)
-	if err != nil || resetFindings.SurvivedWork == nil {
-		t.Fatalf("CI restart did not preserve survived work: %+v, %v", resetFindings, err)
-	}
-	survived, err := pipeline.HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
-	if err != nil || !survived {
-		t.Fatalf("survived-work evidence after restart = %v, %v", survived, err)
-	}
-	sctx.RoundStartWorktree, err = pipeline.SnapshotWorktree(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected repair\n"), 0o644); err != nil {
+}
+
+func TestPushStep_RenderFixMessageErrorLeavesChangesUnstaged(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	if err := os.WriteFile(filepath.Join(dir, "feature.txt"), []byte("formatted feature code\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := (&PushStep{}).Execute(sctx); err != nil {
-		t.Fatal(err)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	sctx.Config.Commit = config.Commit{
+		FixMessage:        "{{.Branch}}: {{.Summary}}",
+		BranchPattern:     `^PROJ/([0-9]+)$`,
+		BranchReplacement: "PROJ-${1}",
 	}
-	pushedHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
-	if !fileAtRef(t, upstream, pushedHead, "selected.txt") {
-		t.Fatal("selected repair was not published")
+
+	_, err := (&PushStep{}).Execute(sctx)
+	if err == nil || !strings.Contains(err.Error(), "render correction commit subject") {
+		t.Fatalf("push error = %v, want correction subject rendering error", err)
 	}
-	if fileAtRef(t, upstream, pushedHead, "deferred.txt") {
-		t.Fatal("deferred survived work was published")
+	if got := gitCmd(t, dir, "diff", "--cached", "--name-only"); got != "" {
+		t.Fatalf("staged files after template error = %q, want none", got)
 	}
-	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "deferred.txt") {
-		t.Fatalf("deferred survived work was not retained: %q", got)
+	if got := gitCmd(t, dir, "rev-parse", "HEAD"); got != headSHA {
+		t.Fatalf("head after template error = %s, want %s", got, headSHA)
+	}
+	if got := gitCmd(t, upstream, "rev-parse", "refs/heads/feature"); got != headSHA {
+		t.Fatalf("remote head after template error = %s, want %s", got, headSHA)
 	}
 }
 
@@ -1581,5 +1589,80 @@ func TestPushStep_DetachedGateWorktreePreservesDescendantAfterEmptyIndex(t *test
 	persisted, err := sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil || persisted == nil || persisted.HeadSHA != reviewedHead || persisted.LastPushedSHA == nil || *persisted.LastPushedSHA != reviewedHead {
 		t.Fatalf("publication binding = %+v, err = %v, want reviewed head %s", persisted, err, reviewedHead)
+	}
+}
+
+func TestPushStep_RestartLeavesDeferredSurvivedWorkUnpublished(t *testing.T) {
+	upstream := t.TempDir()
+	gitCmd(t, upstream, "init", "--bare")
+
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	gitCmd(t, dir, "remote", "add", "origin", upstream)
+	gitCmd(t, dir, "push", "origin", "main")
+	gitCmd(t, dir, "push", "origin", "feature")
+
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Repo.UpstreamURL = upstream
+	sctx.Run.Branch = "refs/heads/feature"
+	setupGateMirror(t, sctx)
+	recordReviewApproval(t, sctx, headSHA)
+
+	deferred := filepath.Join(dir, "deferred.txt")
+	if err := os.WriteFile(deferred, []byte("survived but unselected\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	reviewStep, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := types.MarshalFindingsJSON(types.Findings{SurvivedWork: pipeline.InspectSurvivedWork(dir)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.SetStepFindings(step.ID, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.ResetStepsFrom(sctx.Run.ID, types.StepReview.Order()); err != nil {
+		t.Fatal(err)
+	}
+	resetReview, err := sctx.DB.GetStepResult(reviewStep.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resetReview.FindingsJSON == nil {
+		t.Fatal("CI restart erased survived-work evidence")
+	}
+	resetFindings, err := types.ParseFindingsJSON(*resetReview.FindingsJSON)
+	if err != nil || resetFindings.SurvivedWork == nil {
+		t.Fatalf("CI restart did not preserve survived work: %+v, %v", resetFindings, err)
+	}
+	survived, err := pipeline.HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
+	if err != nil || !survived {
+		t.Fatalf("survived-work evidence after restart = %v, %v", survived, err)
+	}
+	sctx.RoundStartWorktree, err = pipeline.SnapshotWorktree(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "selected.txt"), []byte("selected repair\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := (&PushStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	pushedHead := gitCmd(t, upstream, "rev-parse", "refs/heads/feature")
+	if !fileAtRef(t, upstream, pushedHead, "selected.txt") {
+		t.Fatal("selected repair was not published")
+	}
+	if fileAtRef(t, upstream, pushedHead, "deferred.txt") {
+		t.Fatal("deferred survived work was published")
+	}
+	if got := gitStatusPorcelain(t, dir); !strings.Contains(got, "deferred.txt") {
+		t.Fatalf("deferred survived work was not retained: %q", got)
 	}
 }

@@ -1026,7 +1026,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 	}
+	// The review step runs several agents at once, so the log writers and the
+	// lifecycle hook that calls them serialize on one lock.
+	var logMu sync.Mutex
 	writeLog := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if text != "" {
 			prefix := ""
 			if !lastChunkNewline {
@@ -1040,6 +1045,8 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		touchLogActivity(text, true)
 	}
 	writeLogChunk := func(text string) {
+		logMu.Lock()
+		defer logMu.Unlock()
 		if text != "" {
 			lastChunkNewline = strings.HasSuffix(text, "\n")
 		}
@@ -1197,15 +1204,15 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		fixRound := sctx.Fixing
 		var outcome *StepOutcome
 		var err error
+		// Only a run carrying survived work from an interrupted repair scopes
+		// its commits to the paths a round changed. Any other round keeps
+		// staging the whole worktree, which is what lets a protected-path
+		// retry publish the repair its refused round left behind.
 		sctx.RoundStartWorktree = nil
-		if fixRound {
+		var survived bool
+		survived, err = HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
+		if err == nil && survived {
 			sctx.RoundStartWorktree, err = SnapshotWorktree(sctx.WorkDir)
-		} else {
-			var survived bool
-			survived, err = HasSurvivedWorkEvidence(sctx.DB, sctx.Run.ID)
-			if err == nil && survived {
-				sctx.RoundStartWorktree, err = SnapshotWorktree(sctx.WorkDir)
-			}
 		}
 		if err == nil {
 			outcome, err = step.Execute(sctx)
@@ -1931,7 +1938,7 @@ func (a *repairInvocationAgent) NeutralizesGateInstructions() bool {
 }
 func (a *repairInvocationAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	roundID := a.roundID()
-	if roundID == "" {
+	if roundID == "" || opts.Parallel {
 		return a.inner.Run(ctx, opts)
 	}
 	a.mu.Lock()
@@ -2165,7 +2172,7 @@ func (e *Executor) failRun(run *db.Run, repo *db.Repo, err error, ctxs ...contex
 		}
 	}
 	runStatus := types.RunFailed
-	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded {
+	if errMsg == types.RunCancelReasonAbortedByUser || errMsg == types.RunCancelReasonSuperseded || errMsg == types.RunCancelReasonCoalesced {
 		runStatus = types.RunCancelled
 	}
 	verifiedHead, verified := e.reconcileTerminalRunHead(run)

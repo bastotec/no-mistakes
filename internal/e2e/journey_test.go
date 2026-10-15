@@ -1162,8 +1162,11 @@ func assertAgentEditCommitRun(t *testing.T, h *Harness) {
 	if err != nil {
 		t.Fatalf("read agent-edits upstream commit message: %v\n%s", err, message)
 	}
-	if strings.TrimSpace(string(message)) != "no-mistakes: apply agent fixes" {
-		t.Fatalf("agent-edits upstream commit message = %q", strings.TrimSpace(string(message)))
+	// The Push step's catch-all correction commit honors commit.fix_message
+	// (default template "no-mistakes({{.Step}}): {{.Summary}}"), so the subject
+	// is the default rendering with the Push step name, not a hardcoded literal.
+	if want := "no-mistakes(push): apply agent fixes"; strings.TrimSpace(string(message)) != want {
+		t.Fatalf("agent-edits upstream commit message = %q, want %q", strings.TrimSpace(string(message)), want)
 	}
 	contents, err := h.runGit(ctx, h.UpstreamDir, "show", "refs/heads/agent-edits:agent-edit.txt")
 	if err != nil {

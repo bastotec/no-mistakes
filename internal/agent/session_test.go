@@ -39,7 +39,7 @@ func TestSupportsSessionResume_PerAdapter(t *testing.T) {
 
 func TestClaudeAgent_BuildArgs_Resume(t *testing.T) {
 	ca := &claudeAgent{bin: "claude"}
-	args := ca.buildArgs(nil, "sess-1234")
+	args := ca.buildArgs(nil, "sess-1234", nil)
 
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--resume sess-1234") {
@@ -58,7 +58,7 @@ func TestClaudeAgent_BuildArgs_Resume(t *testing.T) {
 
 func TestClaudeAgent_BuildArgs_NoResumeByDefault(t *testing.T) {
 	ca := &claudeAgent{bin: "claude"}
-	args := ca.buildArgs(nil, "")
+	args := ca.buildArgs(nil, "", nil)
 	for _, a := range args {
 		if a == "--resume" {
 			t.Fatalf("cold invocation must not pass --resume: %v", args)

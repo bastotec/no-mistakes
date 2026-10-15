@@ -369,10 +369,21 @@ A narrower archive-backed path handles a divergent later validation head that mu
 
 Status uses the same `recoverySourceAvailable` classification as recovery and accepts this path only when exactly one record matches the selected terminal run, the clean checked-out branch remains at an exact submitted, reviewed, or successfully pushed required head, the later recorded head genuinely diverges, the raw archive ref is a non-symbolic commit at that exact later head, and the gate's run-specific recovery ref independently still pins it. The gate branch itself must be at either the required head or the preserved head. It revalidates the repository, run, branch, both full SHAs, archive ref, gate branch, and every existing recovery anchor before each action. Missing, moved, replaced, symbolic, malformed, cross-repository, wrong-run, wrong-branch, stale, hash-mismatched, or multiple records fail closed with `next_action.code: inspect_and_reconcile_manually`; similarly named branches, reflogs, loose objects, remote-tracking refs, and tags are never scanned or inferred as proof.
 
-A verified archive plan reports its evidence in `branch_sync.recovery`, keeps `next_action.code: recover_custody`, and sets the command to exactly `no-mistakes axi sync --recover --keep-local`. That action leaves the worktree and local branch at `recovery.required_head`, leaves the divergent archive at `recovery.preserved_head`, and never merges, replays, fast-forwards, resets to, or otherwise selects the archived history. Running plain `--recover` against this plan refuses without adding an anchor or moving a ref.
+A verified archive plan reports its evidence in `branch_sync.recovery`, keeps `next_action.code: recover_custody`, and sets the command to exactly `no-mistakes axi sync --recover --keep-local`. That action leaves the worktree and local branch at `recovery.required_head`, leaves the divergent archive at `recovery.preserved_head`, and never merges, replays, fast-forwards, resets to, or otherwise selects the archived history. It also pins both exact heads locally at `refs/no-mistakes/recover-local/<run>` (required) and `refs/no-mistakes/recover/<run>` (preserved), without replacing any conflicting anchor. Running plain `--recover` against this plan refuses without adding an anchor or moving a ref.
+
+The same bound-archive path supports one published terminal-divergence shape: a **failed**, terminally verified run whose clean caller remains at its exact submitted head, diverging from the run's exact final, successfully published head. The recorded branch and push-target binding must still match; the existing archive and run-specific gate recovery ref must both retain that published head. Bind the already-preserved archive, then follow the verified status command:
+
+```sh
+no-mistakes axi sync --bind-archive-ref refs/heads/archive/<existing-preservation-anchor>
+no-mistakes axi status
+# Only when branch_sync.next_action offers this exact command:
+no-mistakes axi sync --recover --keep-local
+```
+
+This is custody return, not content adoption: both histories and all pipeline review/documentation fixes stay reachable, but neither is selected into the other. The caller's branch and clean worktree remain unchanged, the private gate branch is compare-and-swapped to the submitted head, and the external published branch is untouched. No merge, replay, reset, force-push, run restart, PR modification, or validation waiver is part of this action. A successful return reports `custody_returned`; any later validation or delivery is a separate action. Active or unknown runs, successful published runs, an unauthorized target, non-submitted caller heads, dirty worktrees, missing/moved/symbolic refs, and multiple archive records retain their existing refusal guidance. Without an explicit bound archive, this published divergence still requires manual reconciliation; ordinary synchronization is unchanged.
 
 For the alternative validation path and its refusal conditions, see [`no-mistakes rerun`](#no-mistakes-rerun); it is not offered for the archive-backed keep-local plan.
-A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run reports its ordinary classification against the last push binding, typically `local_ahead`.
+A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run ordinarily reports its classification against the last push binding, typically `local_ahead`. The failed published-divergence archive exception above instead reports `custody_returned` at the exact kept submitted head.
 On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
 
 ## no-mistakes axi logs
@@ -567,6 +578,7 @@ no-mistakes stats
 ```
 
 Displays total changes, rescued changes, rescue rate, reported and fixed mistakes, fixes by pipeline step, and the top repos by rescue activity.
+The Pushes section reports `Coalesced` (runs replaced by a newer push while still waiting under [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window), each a mid-pipeline restart avoided) and `Superseded` (all other replacements, including reruns and explicit launches).
 
 Use `--agents` for local, per-purpose agent performance aggregates: duration and the subprocess-vs-model time split, session mode, errors, the token totals (input, output, cache-read, cache-creation, fresh input, reasoning), and the model round-trip and tool-category activity histogram, with a `METRICS` coverage count that tells a real zero apart from missing instrumentation.
 Use `--run <id>` to inspect the individual agent invocations for one run - including each invocation's per-round token deltas next to the raw counters (cumulative across a resumed session for codex; per-invocation for pi), tool-category breakdown, workload size, finding count, and fallback reason - plus the total time parked at approval gates; it implies `--agents`.

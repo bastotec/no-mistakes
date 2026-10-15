@@ -16,8 +16,15 @@ type Stats struct {
 	RescueRuns       int
 	ReportedFindings int
 	FixedFindings    int
-	StepStats        []StepStats
-	RepoStats        []RepoStats
+	// CoalescedRuns counts runs a newer push replaced while they were still
+	// waiting out their push quiet window: each one is a mid-pipeline
+	// cancellation and restart the window avoided. SupersededRuns counts the
+	// other replaced runs: a newer push after a run's window, or a rerun or
+	// explicit launch at any point.
+	CoalescedRuns  int
+	SupersededRuns int
+	StepStats      []StepStats
+	RepoStats      []RepoStats
 }
 
 // StepStats summarizes reported and fixed findings for one pipeline step.
@@ -68,6 +75,14 @@ func (d *DB) GetStats() (*Stats, error) {
 		for _, run := range runs {
 			if run.PRURL != nil && *run.PRURL != "" {
 				stats.PullRequests++
+			}
+			if run.Error != nil {
+				switch *run.Error {
+				case types.RunCancelReasonCoalesced:
+					stats.CoalescedRuns++
+				case types.RunCancelReasonSuperseded:
+					stats.SupersededRuns++
+				}
 			}
 
 			runReported, runFixed, err := d.aggregateRunStats(run.ID, stepStats)

@@ -17,7 +17,7 @@ import (
 
 func TestPiAgent_BuildArgs(t *testing.T) {
 	pa := &piAgent{bin: "pi"}
-	args := pa.buildArgs(nil)
+	args := pa.buildArgs(nil, nil)
 
 	expected := []string{"--mode", "json", "--no-session"}
 
@@ -33,13 +33,13 @@ func TestPiAgent_BuildArgs(t *testing.T) {
 
 func TestPiAgent_BuildArgs_DurableSession(t *testing.T) {
 	pa := &piAgent{bin: "pi"}
-	started := pa.buildArgs(&SessionRef{})
+	started := pa.buildArgs(&SessionRef{}, nil)
 	if got, want := strings.Join(started, " "), "--mode json"; got != want {
 		t.Fatalf("durable-session args = %q, want %q", got, want)
 	}
 
 	const sessionID = "019ff2f3-5f31-744b-90b8-679074ff7686"
-	resumed := pa.buildArgs(&SessionRef{ID: sessionID})
+	resumed := pa.buildArgs(&SessionRef{ID: sessionID}, nil)
 	if got, want := strings.Join(resumed, " "), "--mode json --session "+sessionID; got != want {
 		t.Fatalf("resume args = %q, want %q", got, want)
 	}
@@ -47,7 +47,7 @@ func TestPiAgent_BuildArgs_DurableSession(t *testing.T) {
 
 func TestPiAgent_BuildArgs_PrependsExtraArgs(t *testing.T) {
 	pa := &piAgent{bin: "pi", extraArgs: []string{"--provider", "google"}}
-	args := pa.buildArgs(nil)
+	args := pa.buildArgs(nil, nil)
 
 	expected := []string{"--provider", "google", "--mode", "json", "--no-session"}
 
@@ -63,7 +63,7 @@ func TestPiAgent_BuildArgs_PrependsExtraArgs(t *testing.T) {
 
 func TestPiAgent_BuildArgs_OptOutAddsNoContextFiles(t *testing.T) {
 	pa := &piAgent{bin: "pi", extraArgs: []string{"--system-prompt"}, disableProjectSettings: true}
-	args := pa.buildArgs(nil)
+	args := pa.buildArgs(nil, nil)
 	expected := []string{"--no-context-files", "--system-prompt", "--mode", "json", "--no-session"}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
@@ -77,7 +77,7 @@ func TestPiAgent_BuildArgs_OptOutAddsNoContextFiles(t *testing.T) {
 
 func TestPiAgent_BuildArgs_OptOutDoesNotDuplicateNoContextFiles(t *testing.T) {
 	pa := &piAgent{bin: "pi", extraArgs: []string{"--provider", "google", "-nc"}, disableProjectSettings: true}
-	args := pa.buildArgs(nil)
+	args := pa.buildArgs(nil, nil)
 	expected := []string{"-nc", "--provider", "google", "--mode", "json", "--no-session"}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
@@ -91,7 +91,7 @@ func TestPiAgent_BuildArgs_OptOutDoesNotDuplicateNoContextFiles(t *testing.T) {
 
 func TestPiAgent_BuildArgs_OptOutPreservesNoContextFilesOptionValue(t *testing.T) {
 	pa := &piAgent{bin: "pi", extraArgs: []string{"--system-prompt", "-nc"}, disableProjectSettings: true}
-	args := pa.buildArgs(nil)
+	args := pa.buildArgs(nil, nil)
 	expected := []string{"--no-context-files", "--system-prompt", "-nc", "--mode", "json", "--no-session"}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
