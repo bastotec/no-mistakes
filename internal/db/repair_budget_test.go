@@ -1,6 +1,7 @@
 package db
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -10,6 +11,66 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestExplicitRepairGrantsDoNotRaiseAutomaticCeiling(t *testing.T) {
+	for _, limit := range []int{0, 2} {
+		t.Run(fmt.Sprintf("limit-%d", limit), func(t *testing.T) {
+			d := openTestDB(t)
+			repo, _ := d.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+			run, _ := d.InsertRun(repo.ID, "feature", "head", "base")
+			step, _ := d.InsertStepResult(run.ID, types.StepReview)
+			if err := d.StartStepWithAutoFixLimit(step.ID, limit); err != nil {
+				t.Fatal(err)
+			}
+			// Spend the existing automatic policy, then grant two separate responses.
+			for n := 1; n <= limit+3; n++ {
+				trigger := "auto_fix"
+				if n == 1 {
+					trigger = "initial"
+				} else if n > limit+1 {
+					trigger = "user_fix"
+				}
+				round, err := d.InsertStepRound(step.ID, n, trigger, nil, nil, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				auto, err := d.ReserveStepRepairWithSelection(step.ID, round.ID, limit, nil)
+				if err != nil || auto.Granted != (n <= limit) || auto.Limit != limit {
+					t.Fatalf("automatic round %d = %+v, %v", n, auto, err)
+				}
+				if n <= limit || n == limit+3 {
+					continue
+				}
+				if !auto.ExplicitRepairAvailable {
+					t.Fatalf("exhausted round hid explicit repair: %+v", auto)
+				}
+				ids := `["review-1"]`
+				grant, err := d.AuthorizeStepRepair(step.ID, round.ID, limit, &ids, nil)
+				if err != nil || !grant.Granted || grant.Consumed != n || grant.AuthorityLimit != n || grant.Limit != limit {
+					t.Fatalf("explicit round %d = %+v, %v", n, grant, err)
+				}
+				replay, err := d.AuthorizeStepRepair(step.ID, round.ID, limit, &ids, nil)
+				if err != nil || replay.Granted || !replay.Duplicate || replay.Consumed != n {
+					t.Fatalf("replayed response = %+v, %v", replay, err)
+				}
+				var source, dispatch, provenance string
+				var automaticLimit, repairLimit int
+				if err := d.sql.QueryRow(`SELECT d.source, d.dispatch_state, d.repair_limit, s.auto_fix_limit, s.auto_fix_limit_provenance FROM repair_budget_decisions d JOIN step_results s ON s.id = d.step_result_id WHERE d.round_id = ?`, round.ID).Scan(&source, &dispatch, &repairLimit, &automaticLimit, &provenance); err != nil {
+					t.Fatal(err)
+				}
+				if source != RoundSelectionSourceUser || dispatch != "fix_authorized" || repairLimit != limit || automaticLimit != limit || provenance != "initialized" {
+					t.Fatalf("incoherent grant: source=%s dispatch=%s limits=%d/%d provenance=%s", source, dispatch, repairLimit, automaticLimit, provenance)
+				}
+				if err := d.ClaimStepRepair(step.ID, round.ID); err != nil {
+					t.Fatal(err)
+				}
+				if err := d.CompleteStepRepair(step.ID, round.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+		})
+	}
+}
 
 func TestAutomaticRepairReservationIsRecoverableUntilCompletion(t *testing.T) {
 	d := openTestDB(t)
@@ -238,7 +299,7 @@ func TestRepairBudgetUsesPersistedStepLimitBeforeFirstReservation(t *testing.T) 
 				t.Fatal(err)
 			}
 			observation, _ := d.InsertStepRound(step.ID, 1, "initial", nil, nil, 0)
-			got, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+			got, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 			if err != nil || got.Granted != tc.grant || got.Limit != tc.limit || got.AuthorityLimit != tc.limit {
 				t.Fatalf("reservation ignored persisted lifecycle limit: %+v %v", got, err)
 			}
@@ -357,7 +418,7 @@ func TestRepairBudgetResetNormalizesLegacyExecutedSteps(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			denied, err := d.AuthorizeStepRepair(step.ID, next.ID, 3, nil, nil)
+			denied, err := d.ReserveStepRepairWithSelection(step.ID, next.ID, 3, nil)
 			if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 {
 				t.Fatalf("reset legacy step regained authority: %+v, %v", denied, err)
 			}
@@ -415,11 +476,11 @@ func TestRepairBudgetLoweredLimitCannotBeRestoredByExhaustedDecision(t *testing.
 		t.Fatalf("expected exhaustion decision: %+v %v", got, err)
 	}
 	lowered, err := d.AuthorizeStepRepair(step.ID, observation.ID, 1, nil, nil)
-	if err != nil || lowered.Granted || lowered.Limit != 1 || lowered.AuthorityLimit != 1 {
-		t.Fatalf("exhausted decision restored larger limit: %+v %v", lowered, err)
+	if err != nil || !lowered.Granted || lowered.Limit != 1 || lowered.AuthorityLimit != 4 {
+		t.Fatalf("explicit grant changed automatic limit: %+v %v", lowered, err)
 	}
 	retried, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
-	if err != nil || retried.Granted || retried.Limit != 1 || retried.AuthorityLimit != 1 {
+	if err != nil || retried.Granted || !retried.Duplicate || retried.Limit != 1 || retried.AuthorityLimit != 4 {
 		t.Fatalf("retry widened lowered limit: %+v %v", retried, err)
 	}
 }
@@ -510,7 +571,7 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	denied, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
-	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.ExplicitRepairAvailable {
+	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || !denied.ExplicitRepairAvailable {
 		t.Fatalf("legacy NULL gained repair authority: %+v %v", denied, err)
 	}
 	persisted, err := d.GetStepResult(step.ID)
@@ -527,13 +588,16 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 		t.Fatal(err)
 	}
 	retried, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
-	if err != nil || retried.Granted || retried.ExplicitRepairAvailable {
+	if err != nil || retried.Granted || !retried.ExplicitRepairAvailable {
 		t.Fatalf("legacy zero advertised repair authority: %+v %v", retried, err)
 	}
 	ids := `["ci-red"]`
 	denied, err = d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
-	if err != nil || denied.Granted || denied.Consumed != 0 || denied.Limit != 0 || denied.AuthorityLimit != 0 {
-		t.Fatalf("legacy zero accepted explicit repair: %+v %v", denied, err)
+	if err != nil || !denied.Granted || denied.Consumed != 1 || denied.Limit != 0 || denied.AuthorityLimit != 1 {
+		t.Fatalf("legacy zero refused explicit repair: %+v %v", denied, err)
+	}
+	if err := d.sql.QueryRow(`SELECT auto_fix_limit_provenance FROM step_results WHERE id = ?`, step.ID).Scan(&provenance); err != nil || provenance != "legacy_normalized" {
+		t.Fatalf("manual grant changed legacy automatic provenance = %q, %v", provenance, err)
 	}
 	d.Close()
 
@@ -543,8 +607,8 @@ func TestRepairBudgetLegacyNullActiveLimitStaysAutomaticZero(t *testing.T) {
 	}
 	defer d.Close()
 	denied, err = d.AuthorizeStepRepair(step.ID, observation.ID, 3, &ids, nil)
-	if err != nil || denied.Granted || denied.Consumed != 0 || denied.Limit != 0 || denied.AuthorityLimit != 0 {
-		t.Fatalf("restart reopened legacy zero authority: %+v %v", denied, err)
+	if err != nil || denied.Granted || !denied.Duplicate || denied.Consumed != 1 || denied.Limit != 0 || denied.AuthorityLimit != 1 {
+		t.Fatalf("restart replayed legacy zero authority: %+v %v", denied, err)
 	}
 }
 
@@ -569,7 +633,7 @@ func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	observation, _ := d.InsertStepRound(step.ID, 2, "auto_fix", nil, nil, 0)
-	denied, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+	denied, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 	if err != nil || denied.Granted || denied.Limit != 0 || denied.AuthorityLimit != 0 || denied.Consumed != 1 {
 		t.Fatalf("initialized zero reopened prior authority: %+v %v", denied, err)
 	}
@@ -592,7 +656,7 @@ func TestRepairBudgetInitializedZeroCannotReopenPriorAuthority(t *testing.T) {
 	}
 	defer d.Close()
 	for range 2 {
-		retried, err := d.AuthorizeStepRepair(step.ID, observation.ID, 3, nil, nil)
+		retried, err := d.ReserveStepRepairWithSelection(step.ID, observation.ID, 3, nil)
 		if err != nil || retried.Granted || retried.Limit != 0 || retried.AuthorityLimit != 0 || retried.Consumed != 1 {
 			t.Fatalf("resume or retry reopened initialized zero: %+v %v", retried, err)
 		}
