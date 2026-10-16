@@ -23,9 +23,41 @@ type DB struct {
 	sql *sql.DB
 }
 
+// readWriteDSN configures every read-write handle. Several processes write
+// this database - the daemon, independent repair wrappers, and CLI commands -
+// so a transaction must take the write lock when it begins (_txlock=immediate)
+// and wait for it under busy_timeout. A deferred transaction that reads first
+// cannot wait when another process commits before its write: SQLite fails
+// that write with SQLITE_BUSY at once, which used to fail runs outright.
+const readWriteDSN = "_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(30000)&_txlock=immediate"
+
+// busyRetryDelays bounds execRetryBusy: attempts after the first, each after
+// busy_timeout has already been waited out once.
+var busyRetryDelays = []time.Duration{time.Second, 3 * time.Second, 10 * time.Second}
+
+// execRetryBusy runs a lifecycle write - a run's status, a step's terminal
+// state - retrying while the database stays locked past busy_timeout. Losing
+// one of these writes to a lock left runs stuck pending or failed with green
+// work; a short retry is cheaper than either.
+func (d *DB) execRetryBusy(query string, args ...any) (sql.Result, error) {
+	result, err := d.sql.Exec(query, args...)
+	for _, delay := range busyRetryDelays {
+		if !isBusyErr(err) {
+			break
+		}
+		time.Sleep(delay)
+		result, err = d.sql.Exec(query, args...)
+	}
+	return result, err
+}
+
+func isBusyErr(err error) bool {
+	return err != nil && (strings.Contains(err.Error(), "SQLITE_BUSY") || strings.Contains(err.Error(), "database is locked"))
+}
+
 // Open opens (or creates) the SQLite database at path and runs migrations.
 func Open(path string) (*DB, error) {
-	sqlDB, err := sql.Open("sqlite", path+"?_pragma=journal_mode(wal)&_pragma=foreign_keys(on)&_pragma=busy_timeout(5000)")
+	sqlDB, err := sql.Open("sqlite", path+"?"+readWriteDSN)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}

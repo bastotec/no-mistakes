@@ -210,6 +210,10 @@ The rationale lives in the `resolveRun` doc comment and the status-rendering com
 - When `commands.lint` is empty, the document step performs both duties in one agent invocation and stashes the lint half on `RunShared` (consume-once); the lint step consumes it instead of paying a second cold pass. Neither duty is ever silently dropped: a skipped pass, untrusted structured output, or a lint fix round falls back to lint's own agent pass. Configured `commands.lint` stays a first-class deterministic gate. Uncategorized findings fail safe to the stricter documentation gate.
 - The document prompt enforces the placement policy (one owner per fact, stale duplicates become pointers, no AGENTS.md postmortems, scope limited to docs the change made stale). Do not reintroduce exhaustive-corpus-sweep language; it caused doc commits in 90 of 121 audited PRs. Contract test: `TestDocumentStep_PromptAppliesPlacementPolicy`; behavior tests: `internal/pipeline/steps/housekeeping_test.go`.
 
+**SQLite Write Locking (`internal/db/db.go`)**
+
+- Preserve immediate transaction reservation across read-write handles and bounded busy retries for lifecycle writes. `readWriteDSN`, `execRetryBusy`, and `UpdateRunPRState` own the implementation and rationale; user-facing behavior lives in `docs/src/content/docs/concepts/gate-model.md` (Database). Regressions: `internal/db/busy_test.go`.
+
 **Pipeline step tests (CI latency)**
 
 - Fake `gh`/`glab`/`git` on PATH must be the tiny helper at `internal/pipeline/fakecli`, compiled once per test process without `-race` (`stepstest.Init` / `LinkFakeCLI`). Tests that need the underlying Git binary use `internal/testgit.RealGit`, which resolves fixed absolute locations without consulting PATH. Do not re-exec the race-instrumented test binary as those names: that was ~0.8-1.1s per spawn and pushed `internal/pipeline/steps` into the 10-minute package timeout.
