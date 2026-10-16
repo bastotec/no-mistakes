@@ -681,7 +681,7 @@ review:
 When round N reaches the cap and still has findings:
 
 - non-blocking findings (`warning`, `info`) are moved off the gate into the step's unresolved review notes; they are rendered on the pull request and the pipeline continues;
-- blocking findings (`error`) still park at the Review approval gate. `fix` there runs the fix agent once on the selected findings and commits its change, and the review then completes without another rereview: the fixed findings are recorded as resolved by that fix, every finding left unfixed (unselected, or selected when the fix changed nothing) becomes an unresolved review note, and the pipeline continues. Approve continues with the findings recorded; skip and abort work as at any gate.
+- blocking findings (`error`) get one more round first: at the cap round they park at an ordinary gate (or auto-fix when `auto_fix.review` allows), and a fix there is reviewed again; the notes ride along to that review. Only if errors remain after that extra round do they park at the capped gate, where `fix` runs the fix agent once on the selected findings and commits its change, and the review then completes without another rereview: the fixed findings are recorded as resolved by that fix, every finding left unfixed (unselected, or selected when the fix changed nothing) becomes an unresolved review note, and the pipeline continues. Approve continues with the findings recorded; skip and abort work as at any gate.
 
 The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
 
