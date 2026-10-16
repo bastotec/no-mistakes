@@ -35,6 +35,34 @@ func TestBuildPipelineSummary_ReviewRoundCapRendersUnresolvedNotes(t *testing.T)
 	}
 }
 
+// A clean error-round rereview carries the stopped notes but no round_cap.
+// The generated PR Markdown must still disclose them without inventing cap 0.
+func TestBuildPipelineSummary_ReviewRoundCapNotesSurviveCleanRereview(t *testing.T) {
+	t.Parallel()
+	round1 := `{"findings":[{"id":"review-1","severity":"error","description":"real bug"},{"id":"review-2","severity":"warning","description":"rename this helper"},{"id":"review-3","severity":"info","description":"style suggestion"}],"summary":"3 issues","risk_level":"high","risk_rationale":"r"}`
+	final := `{"findings":[],"summary":"clean rereview","risk_level":"low","risk_rationale":"fixed","unresolved_notes":[{"id":"review-2","severity":"warning","description":"rename this helper"},{"id":"review-3","severity":"info","description":"style suggestion"}]}`
+	steps := []*db.StepResult{
+		{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted, FindingsJSON: &final},
+	}
+	rounds := map[string][]*db.StepRound{
+		"s1": {
+			{Round: 1, Trigger: "initial", FindingsJSON: &round1, DurationMS: 800},
+			{Round: 2, Trigger: "auto_fix", FindingsJSON: &final, DurationMS: 600},
+		},
+	}
+
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	if !strings.Contains(md, "⚠️ **Review** - 2 unresolved review notes (round cap reached)") ||
+		!strings.Contains(md, "Unresolved review notes (review.max_rounds reached, not fixed):") ||
+		!strings.Contains(md, "rename this helper") || !strings.Contains(md, "style suggestion") {
+		t.Fatalf("clean rereview lost the carried notes:\n%s", md)
+	}
+	if strings.Contains(md, "round cap 0") || strings.Contains(md, "review.max_rounds 0") || strings.Contains(md, "**Review** - passed") {
+		t.Fatalf("clean rereview misrepresents the stopped notes:\n%s", md)
+	}
+	t.Logf("Generated PR Markdown:\n%s", md)
+}
+
 func TestBuildPipelineSummary_ReviewRoundCapApprovedOverBlockingFinding(t *testing.T) {
 	t.Parallel()
 	round1 := `{"findings":[{"id":"review-1","severity":"error","description":"real bug"},{"id":"review-2","severity":"info","description":"nit"}],"summary":"2 issues","risk_level":"high","risk_rationale":"r"}`

@@ -159,8 +159,9 @@ func TestExecutor_ReviewRoundCapCarriesNonBlockingFindingsAsNotes(t *testing.T) 
 }
 
 // cappedFixStep parks at review.max_rounds 1 with two blocking findings and a
-// nit, then plays the fixer on the fix round: it records what it was handed
-// and advances HEAD only when commit is true.
+// nit. The errors' extra round (fix and rereview) leaves them standing, so the
+// review parks capped at round 2; it then plays the fixer on the fix round:
+// it records what it was handed and advances HEAD only when commit is true.
 type cappedFixStep struct {
 	commit        bool
 	calls         int
@@ -178,6 +179,15 @@ func (c *cappedFixStep) step() Step {
 		fn: func(sctx *StepContext) (*StepOutcome, error) {
 			c.calls++
 			if !sctx.Fixing {
+				return &StepOutcome{
+					NeedsApproval:         true,
+					AutoFixable:           true,
+					Findings:              cappedFixGateFindings,
+					ReviewApprovedHeadSHA: cappedFixReviewedHead,
+				}, nil
+			}
+			if !sctx.FixWithoutRereview {
+				// The errors' extra round: fixed and reviewed again, still there.
 				return &StepOutcome{
 					NeedsApproval:         true,
 					AutoFixable:           true,
@@ -240,7 +250,9 @@ func TestExecutor_ReviewRoundCapFixRunsOnceWithoutRereview(t *testing.T) {
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{capped.step()}, nil)
 	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	// The errors' extra round was an auto-fix, so the capped round parks at
+	// its fix review.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
 
 	sr := stepResultByName(t, database, run.ID, types.StepReview)
 	gate, err := types.ParseFindingsJSON(*sr.FindingsJSON)
@@ -256,8 +268,8 @@ func TestExecutor_ReviewRoundCapFixRunsOnceWithoutRereview(t *testing.T) {
 	}
 	waitExecutorDone(t, done)
 
-	if capped.calls != 2 || !capped.fixOnly {
-		t.Fatalf("calls = %d, fix without rereview = %v; want the initial review plus one fix-only round", capped.calls, capped.fixOnly)
+	if capped.calls != 3 || !capped.fixOnly {
+		t.Fatalf("calls = %d, fix without rereview = %v; want the initial review, the errors' extra round, and one fix-only round", capped.calls, capped.fixOnly)
 	}
 	if strings.Contains(capped.fixerFindings, "unresolved_notes") || !strings.Contains(capped.fixerFindings, `"r1"`) || strings.Contains(capped.fixerFindings, `"r4"`) {
 		t.Fatalf("fixer was handed %s, want only the accepted r1", capped.fixerFindings)
@@ -268,7 +280,7 @@ func TestExecutor_ReviewRoundCapFixRunsOnceWithoutRereview(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rounds) != 2 || rounds[1].ReviewedHeadSHA != nil {
+	if len(rounds) != 3 || rounds[2].ReviewedHeadSHA != nil {
 		t.Fatalf("rounds = %d, fix round reviewed head = %v; want a second round that reviewed nothing", len(rounds), rounds[len(rounds)-1].ReviewedHeadSHA)
 	}
 }
@@ -280,14 +292,16 @@ func TestExecutor_ReviewRoundCapFixThatChangesNothingLeavesNotes(t *testing.T) {
 
 	exec := NewExecutor(database, p, cfg, nil, []Step{capped.step()}, nil)
 	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
-	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+	// The errors' extra round was an auto-fix, so the capped round parks at
+	// its fix review.
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusFixReview)
 	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1", "r4"}); err != nil {
 		t.Fatalf("fix at a capped gate: %v", err)
 	}
 	waitExecutorDone(t, done)
 
-	if capped.calls != 2 {
-		t.Fatalf("calls = %d, want 2", capped.calls)
+	if capped.calls != 3 {
+		t.Fatalf("calls = %d, want 3", capped.calls)
 	}
 	assertCappedFixCompleted(t, database, run.ID, nil, []string{"r2", "r1", "r4"})
 }
@@ -307,7 +321,7 @@ func TestExecutor_ResumedCappedReviewGateRunsFixWithoutRereview(t *testing.T) {
 	round := cappedFixGateFindings
 	// The gate is parked exactly as applyReviewRoundCap leaves it: the step
 	// carries the capped findings while the round keeps the full review.
-	gate, _, _, ok := capReviewFindingsJSON(round, 1)
+	gate, _, _, ok := capReviewFindingsJSON(round, 1, false)
 	if !ok {
 		t.Fatal("cap the round findings")
 	}
@@ -356,11 +370,163 @@ func TestExecutor_ResumedCappedReviewGateRunsFixWithoutRereview(t *testing.T) {
 	assertCappedFixCompleted(t, database, run.ID, []string{"r1"}, []string{"r2", "r4"})
 }
 
+// Restarting at the cap's error gate must preserve the ordinary fix/rereview
+// path and the notes, rather than treating its round_cap as a fix-only gate.
+func TestExecutor_ResumedErrorRoundRereviewsAndCarriesNotes(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	sr, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStepWithoutAutoFixPolicy(sr.ID); err != nil {
+		t.Fatal(err)
+	}
+	round := cappedFixGateFindings
+	gate, _, _, ok := capReviewFindingsJSON(round, 1, true)
+	if !ok {
+		t.Fatal("cap error round")
+	}
+	if err := database.SetStepFindings(sr.ID, gate); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := database.InsertReviewStepRound(sr.ID, 1, "initial", &round, nil, cappedFixReviewedHead, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(sr.ID, types.StepStatusAwaitingApproval, 10); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.SetRunAwaitingAgent(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const fixedHead = "3333333333333333333333333333333333333333"
+	calls := 0
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if !sctx.Fixing || sctx.FixWithoutRereview || sctx.DeferredFindings != "" {
+			t.Errorf("recovered error round: Fixing=%v FixWithoutRereview=%v DeferredFindings=%q", sctx.Fixing, sctx.FixWithoutRereview, sctx.DeferredFindings)
+		}
+		selected, err := types.ParseFindingsJSON(sctx.PreviousFindings)
+		if err != nil || len(selected.Items) != 2 || len(selected.UnresolvedNotes) != 0 || selected.RoundCap != 0 {
+			t.Errorf("fixer findings = %+v, %v; want only the selected errors", selected, err)
+		}
+		sctx.Run.HeadSHA = fixedHead
+		return &StepOutcome{Findings: `{"findings":[],"summary":"clean rereview"}`, ReviewApprovedHeadSHA: fixedHead}, nil
+	}}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	exec := NewExecutor(database, p, &config.Config{Review: config.Review{MaxRounds: 1}}, nil, []Step{step}, nil)
+	done := make(chan error, 1)
+	go func() { done <- exec.Resume(ctx, run, repo, t.TempDir()) }()
+	for {
+		if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1", "r4"}); err == nil {
+			break
+		}
+		select {
+		case err := <-done:
+			t.Fatalf("resume returned before accepting fix: %v", err)
+		case <-ctx.Done():
+			t.Fatal("recovered error round never accepted fix")
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	waitExecutorDone(t, done)
+	finalStep := stepResultByName(t, database, run.ID, types.StepReview)
+	final, err := types.ParseFindingsJSON(*finalStep.FindingsJSON)
+	if err != nil || calls != 1 || finalStep.Status != types.StepStatusCompleted || len(final.Items) != 0 || len(final.UnresolvedNotes) != 1 || final.UnresolvedNotes[0].ID != "r2" {
+		t.Fatalf("recovered result: calls=%d status=%s findings=%+v err=%v", calls, finalStep.Status, final, err)
+	}
+	updated, err := database.GetRun(run.ID)
+	if err != nil || updated.ReviewApprovedHeadSHA == nil || *updated.ReviewApprovedHeadSHA != fixedHead {
+		t.Fatalf("recovered approval = %+v, %v; want rereviewed head", updated, err)
+	}
+}
+
 func TestReviewRoundCapOf(t *testing.T) {
 	if got := reviewRoundCapOf(`{"findings":[],"round_cap":3}`); got != 3 {
 		t.Fatalf("reviewRoundCapOf = %d, want 3", got)
 	}
 	if got := reviewRoundCapOf(`{"findings":[]}`); got != 0 {
 		t.Fatalf("reviewRoundCapOf(uncapped) = %d, want 0", got)
+	}
+}
+
+// At review.max_rounds, error findings get one more real round - a fix and a
+// rereview, started like any earlier round's (an operator fix here, with
+// auto_fix.review 0) - while the warning stops at the cap and rides along.
+func TestExecutor_ReviewRoundCapGivesErrorsOneMoreRound(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	cfg := &config.Config{Review: config.Review{MaxRounds: 1}}
+	var calls int
+	var fixWithoutRereview bool
+	var fixerFindings string
+	step := &adaptiveCallStep{name: types.StepReview, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		calls++
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: cappedFixGateFindings, ReviewApprovedHeadSHA: cappedFixReviewedHead}, nil
+		}
+		fixWithoutRereview = sctx.FixWithoutRereview
+		fixerFindings = sctx.PreviousFindings
+		sctx.Run.HeadSHA = "3333333333333333333333333333333333333333"
+		return &StepOutcome{Findings: `{"findings":[],"summary":"clean","risk_level":"low","risk_rationale":"fixed"}`, ReviewApprovedHeadSHA: sctx.Run.HeadSHA}, nil
+	}}
+	exec := NewExecutor(database, p, cfg, nil, []Step{step}, nil)
+	done, _ := startExecutor(t, exec, run, repo, t.TempDir())
+	waitForStepStatus(t, database, run.ID, types.StepReview, types.StepStatusAwaitingApproval)
+
+	sr := stepResultByName(t, database, run.ID, types.StepReview)
+	gate, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	errors := 0
+	for _, item := range gate.Items {
+		if item.Severity == "error" {
+			errors++
+		}
+	}
+	// The gate also carries the repair-budget notice: auto_fix.review is 0.
+	if errors != 2 || len(gate.UnresolvedNotes) != 1 || gate.RoundCap != 1 || !gate.RoundCapErrorRound {
+		t.Fatalf("gate = %+v, want the two errors on an error round with the warning as a note", gate)
+	}
+	if err := exec.Respond(types.StepReview, types.ActionFix, []string{"r1", "r4"}); err != nil {
+		t.Fatalf("fix at the error round: %v", err)
+	}
+	waitExecutorDone(t, done)
+
+	if calls != 2 || fixWithoutRereview {
+		t.Fatalf("calls = %d, fix without rereview = %v; want a fix that is reviewed again", calls, fixWithoutRereview)
+	}
+	if strings.Contains(fixerFindings, "unresolved_notes") || strings.Contains(fixerFindings, `"r2"`) {
+		t.Fatalf("fixer was handed %s, want only the errors", fixerFindings)
+	}
+	sr = stepResultByName(t, database, run.ID, types.StepReview)
+	final, err := types.ParseFindingsJSON(*sr.FindingsJSON)
+	if err != nil || sr.Status != types.StepStatusCompleted || len(final.Items) != 0 || len(final.UnresolvedNotes) != 1 || final.UnresolvedNotes[0].ID != "r2" {
+		t.Fatalf("final = %s %+v %v, want completed with the warning carried as a note", sr.Status, final, err)
+	}
+	r, err := database.GetRun(run.ID)
+	if err != nil || r.ReviewApprovedHeadSHA == nil || *r.ReviewApprovedHeadSHA != "3333333333333333333333333333333333333333" {
+		t.Fatalf("review approval = %v, want the rereviewed head", r.ReviewApprovedHeadSHA)
+	}
+}
+
+// Only the round after the error round fixes without a rereview, and a
+// recovered error-round gate is recognized as the cap's own form.
+func TestReviewFixSkipsRereviewOnlyAfterTheErrorRound(t *testing.T) {
+	errorRound, _, _, ok := capReviewFindingsJSON(cappedFixGateFindings, 2, true)
+	if !ok || reviewFixSkipsRereview(errorRound) || !isRoundCappedForm(cappedFixGateFindings, errorRound) {
+		t.Fatalf("error round gate %s: skips rereview or not recognized", errorRound)
+	}
+	capped, _, _, ok := capReviewFindingsJSON(cappedFixGateFindings, 2, false)
+	if !ok || !reviewFixSkipsRereview(capped) || !isRoundCappedForm(cappedFixGateFindings, capped) {
+		t.Fatalf("capped gate %s: should fix without a rereview", capped)
 	}
 }

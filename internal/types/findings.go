@@ -283,13 +283,18 @@ type Findings struct {
 	// UnresolvedNotes, ResolvedByFix and RoundCap are written only by the
 	// executor once a review reaches review.max_rounds. Findings that will not
 	// be fixed leave Items (so they neither park nor get fixed) and are
-	// carried in UnresolvedNotes; findings a fix accepted at the cap committed
-	// a change for are carried in ResolvedByFix, since no rereview follows
-	// that fix to confirm them. RoundCap records the cap. All three are
-	// omitempty, so every other payload is unchanged.
+	// carried in UnresolvedNotes; findings a fix without rereview committed
+	// a change for are carried in ResolvedByFix, without reviewer confirmation.
+	// RoundCap records the cap. All three are omitempty, so every other
+	// payload is unchanged.
 	UnresolvedNotes []Finding `json:"unresolved_notes,omitempty"`
 	ResolvedByFix   []Finding `json:"resolved_by_fix,omitempty"`
 	RoundCap        int       `json:"round_cap,omitempty"`
+	// RoundCapErrorRound marks a gate at review.max_rounds whose error
+	// findings still get one real round, a fix and a rereview: the cap moved
+	// only the warnings and info into UnresolvedNotes. Only the round after
+	// it fixes without a rereview.
+	RoundCapErrorRound bool `json:"round_cap_error_round,omitempty"`
 	// ReviewEffort and ReviewEffortReason record the review level the review
 	// step chose for the change (low through max) and why. Written only by
 	// the review step; the PR attestation publishes them.
@@ -317,6 +322,7 @@ type findingsWire struct {
 	UnresolvedNotes    []Finding      `json:"unresolved_notes"`
 	ResolvedByFix      []Finding      `json:"resolved_by_fix"`
 	RoundCap           int            `json:"round_cap"`
+	RoundCapErrorRound bool           `json:"round_cap_error_round"`
 	ReviewEffort       string         `json:"review_effort"`
 	ReviewEffortReason string         `json:"review_effort_reason"`
 	ReviewUnreviewed   []string       `json:"review_unreviewed"`
@@ -348,6 +354,7 @@ func ParseFindingsJSON(raw string) (Findings, error) {
 		UnresolvedNotes:    wire.UnresolvedNotes,
 		ResolvedByFix:      wire.ResolvedByFix,
 		RoundCap:           wire.RoundCap,
+		RoundCapErrorRound: wire.RoundCapErrorRound,
 		ReviewEffort:       wire.ReviewEffort,
 		ReviewEffortReason: wire.ReviewEffortReason,
 		ReviewUnreviewed:   wire.ReviewUnreviewed,

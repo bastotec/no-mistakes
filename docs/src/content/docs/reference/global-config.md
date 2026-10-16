@@ -666,7 +666,7 @@ A fix round that leaves the branch head where it was - the agent committed nothi
 
 ### review.max_rounds
 
-Maximum review rounds - the initial review plus each fix-and-rereview round - before the review stops rereviewing. The cap limits rereviews, not fixes.
+Review-round threshold for stopping rereviews, counting the initial review and each fix-and-rereview round. Errors at the threshold allow one extra fix-and-rereview round as described below. The cap limits rereviews, not fixes.
 
 | | |
 |---|---|
@@ -678,10 +678,13 @@ review:
   max_rounds: 2
 ```
 
-When round N reaches the cap and still has findings:
+For a nonzero cap N, when round N still has findings:
 
-- non-blocking findings (`warning`, `info`) are moved off the gate into the step's unresolved review notes; they are rendered on the pull request and the pipeline continues;
-- blocking findings (`error`) still park at the Review approval gate. `fix` there runs the fix agent once on the selected findings and commits its change, and the review then completes without another rereview: the fixed findings are recorded as resolved by that fix, every finding left unfixed (unselected, or selected when the fix changed nothing) becomes an unresolved review note, and the pipeline continues. Approve continues with the findings recorded; skip and abort work as at any gate.
+- non-blocking findings (`warning`, `info`) leave the gate and become unresolved review notes rendered on the pull request. If no errors remain, Review completes and the pipeline continues;
+- blocking findings (`error`) keep the ordinary approval gate and fix-and-rereview behavior. With `auto_fix.review: 0` (the default), they wait for an operator decision; the cap does not authorize an automatic fix. Eligible findings may be auto-fixed only when the configured budget allows it. A fix is reviewed again in round N+1, with the stopped notes carried onto that review rather than handed to the fixer;
+- if errors remain at round N+1, they park regardless of the remaining auto-fix budget. At this capped gate, `fix` runs once on the selected findings and commits its change, then Review completes without another rereview. Findings the fix committed a change for are recorded as resolved by that fix; unselected findings, or selected findings when the fix changed nothing, become unresolved review notes. Approve continues with the findings recorded; skip and abort work as at any gate.
+
+The round record keeps the reviewer's full findings. After a fix without rereview, the review's approval stays on the head the capped round reviewed; the fix commits remain uncertified for the next run's review. The PR distinguishes unresolved notes (`N unresolved review notes`) from fixes without rereview (`N findings fixed without rereview`), rather than presenting either as a clean review pass. A clean extra rereview still discloses carried notes, with `round cap reached` rather than an invented cap of `0` when its payload has no cap number.
 
 The per-repo [`review.max_rounds`](/no-mistakes/reference/repo-config/#reviewmax_rounds) overrides this value.
 

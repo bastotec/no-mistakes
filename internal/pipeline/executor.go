@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -372,13 +373,16 @@ type stepExecutionState struct {
 	roundNum         int
 	executionMS      int64
 	currentRoundID   string
-	// cappedGateFindings is set when a recovered review gate parked at
-	// review.max_rounds is answered with fix: the fix runs without a
-	// rereview, and these are the gate findings it was chosen from.
+	// cappedGateFindings is set when a recovered review gate for which
+	// reviewFixSkipsRereview is true is answered with fix: the fix runs
+	// without a rereview, and these are the findings it was chosen from.
 	// reviewApprovedHeadSHA is the head the capped round reviewed, which
 	// stays the review's approval since nothing reviews the fix.
 	cappedGateFindings    string
 	reviewApprovedHeadSHA string
+	// carriedReviewNotes are the notes a review error round (see
+	// applyReviewRoundCap) carries onto the next round's findings.
+	carriedReviewNotes []types.Finding
 }
 
 func (e *Executor) durableExecutionState(stepResultID string) (stepExecutionState, error) {
@@ -731,10 +735,18 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 			executionMS:      duration,
 			currentRoundID:   gate.lastRoundID,
 		}
-		if gate.step.Name() == types.StepReview && reviewRoundCapOf(gate.findings) > 0 {
+		if gate.step.Name() == types.StepReview && reviewFixSkipsRereview(gate.findings) {
 			state.previousFindings = withoutRoundCapRecord(merged)
 			state.cappedGateFindings = gate.findings
 			state.reviewApprovedHeadSHA = gate.reviewedHeadSHA
+		} else if gate.step.Name() == types.StepReview && reviewRoundCapOf(gate.findings) > 0 {
+			// The error round's gate: an ordinary fix and rereview, carrying
+			// the notes the cap already stopped.
+			state.previousFindings = withoutRoundCapRecord(merged)
+			state.deferredFindings = heldWithoutCarriedNotes(state.deferredFindings)
+			if gateFindings, err := types.ParseFindingsJSON(gate.findings); err == nil {
+				state.carriedReviewNotes = gateFindings.UnresolvedNotes
+			}
 		}
 		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, state)
 		if err != nil {
@@ -1194,6 +1206,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	currentRoundID := state.currentRoundID
 	reviewApprovedHeadSHA := state.reviewApprovedHeadSHA
 	cappedGateFindings := state.cappedGateFindings
+	carriedReviewNotes := state.carriedReviewNotes
 	var restartFrom types.StepName
 
 	// Execute with possible fix loop
@@ -1275,10 +1288,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		restartFrom = outcome.RestartFrom
 
-		// A fix accepted at review.max_rounds reviews nothing: the round
-		// records no reviewed head and the approval stays on the head the
-		// capped round reviewed. The fixer's commits descend from it and stay
-		// recorded as an uncertified range for the next review.
+		// A fix with FixWithoutRereview records no reviewed head; approval
+		// stays on the head the capped round reviewed. The fixer's commits
+		// descend from it and stay recorded as an uncertified range for the
+		// next review. The threshold's error round still gets a rereview.
 		roundReviewedHeadSHA := ""
 		if stepName == types.StepReview {
 			if sctx.FixWithoutRereview {
@@ -1302,6 +1315,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		outcome.Findings = normalizeFindingsJSON(outcome.Findings, string(stepName))
+		// The notes an error round carried ride on the review that follows it
+		// (see applyReviewRoundCap), before anything records its findings.
+		if stepName == types.StepReview && len(carriedReviewNotes) > 0 {
+			outcome.Findings = withCarriedReviewNotes(outcome.Findings, carriedReviewNotes)
+			carriedReviewNotes = nil
+		}
 		finalExitCode = outcome.ExitCode
 		durationOverrideMS += outcome.DurationOverrideMS
 
@@ -1365,7 +1384,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 
 		if stepName == types.StepReview {
-			e.applyReviewRoundCap(sr.ID, outcome, roundNum, writeLog)
+			if notes := e.applyReviewRoundCap(sr.ID, outcome, roundNum, writeLog); len(notes) > 0 {
+				carriedReviewNotes = notes
+			}
 		}
 
 		// A fix round that changed nothing will not fare better on the next
@@ -1419,6 +1440,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 					sctx.Fixing = true
 					sctx.PreviousFindings = fixableFindings
 					sctx.DeferredFindings = removeMatchingFindingsJSON(outcome.Findings, fixableFindings)
+					if stepName == types.StepReview && len(carriedReviewNotes) > 0 {
+						// An error round's notes stay carried, not handed to the fixer.
+						sctx.PreviousFindings = withoutRoundCapRecord(sctx.PreviousFindings)
+						sctx.DeferredFindings = heldWithoutCarriedNotes(sctx.DeferredFindings)
+					}
 					nextTrigger = "auto_fix"
 					continue
 				}
@@ -1561,7 +1587,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			sctx.DeferredFindings = repairWorkFindings(removeMatchingFindingsJSON(outcome.Findings, selectedFindings))
 			// review.max_rounds caps rereviews, not fixes: at a capped gate
 			// the accepted fix still runs once, and the review then ends.
-			if roundCap := reviewRoundCapOf(outcome.Findings); stepName == types.StepReview && roundCap > 0 {
+			if stepName == types.StepReview && reviewRoundCapOf(outcome.Findings) > 0 && !reviewFixSkipsRereview(outcome.Findings) {
+				// The error round: an ordinary fix and rereview; its gate's
+				// notes stay carried, not handed to the fixer.
+				sctx.PreviousFindings = withoutRoundCapRecord(mergedFindings)
+				sctx.DeferredFindings = heldWithoutCarriedNotes(sctx.DeferredFindings)
+			}
+			if roundCap := reviewRoundCapOf(outcome.Findings); stepName == types.StepReview && reviewFixSkipsRereview(outcome.Findings) {
 				writeLog(fmt.Sprintf("review.max_rounds (%d) reached: running the accepted fix once, without another rereview", roundCap))
 				sctx.FixWithoutRereview = true
 				cappedGateFindings = outcome.Findings
@@ -1740,50 +1772,122 @@ func (e *Executor) mayTouchRepairWorktree(sctx *StepContext, runID string, err e
 	return dispatchErr == nil && !active
 }
 
-// applyReviewRoundCap enforces review.max_rounds on one review outcome. Once
-// round roundNum has reached the cap and still has findings, the review stops
-// rereviewing: blocking findings (severity error) stay in the outcome and park
-// at the approval gate, and every other finding moves to UnresolvedNotes so it
-// neither parks nor gets fixed but is still recorded on the step and rendered
-// on the pull request. With no blocking finding left the review completes and
-// the pipeline continues. A fix accepted at the capped gate still runs once,
-// without a rereview (see resolveReviewFixWithoutRereview).
+// applyReviewRoundCap enforces review.max_rounds on one review outcome. From
+// the cap round onward, non-blocking findings leave the gate for UnresolvedNotes
+// so they neither park nor get fixed but still render on the pull request.
+// With no blocking findings left, the review completes.
+//
+// At the cap round itself, errors retain the ordinary fix-and-rereview gate
+// (RoundCapErrorRound), including its existing auto-fix eligibility and budget.
+// This returns the stopped notes for the executor to carry onto the next
+// round's findings before recording them. From cap+1, errors park and an
+// accepted fix runs once without rereview (resolveReviewFixWithoutRereview).
 //
 // The round record keeps the reviewer's full findings; only the step's own
 // findings - what the gate, axi and the PR summary read - are rewritten.
-func (e *Executor) applyReviewRoundCap(stepResultID string, outcome *StepOutcome, roundNum int, log func(string)) {
+func (e *Executor) applyReviewRoundCap(stepResultID string, outcome *StepOutcome, roundNum int, log func(string)) []types.Finding {
 	if e.config == nil || e.config.Review.MaxRounds <= 0 || roundNum < e.config.Review.MaxRounds || outcome.Findings == "" {
-		return
+		return nil
 	}
-	capped, blocking, notes, ok := capReviewFindingsJSON(outcome.Findings, e.config.Review.MaxRounds)
+	roundCap := e.config.Review.MaxRounds
+	_, blockingNow := splitFindingsJSON(outcome.Findings)
+	errorRound := roundNum == roundCap && blockingNow
+	capped, blocking, notes, ok := capReviewFindingsJSON(outcome.Findings, roundCap, errorRound)
 	if !ok {
-		return
+		return nil
 	}
 	outcome.Findings = capped
-	outcome.AutoFixable = false
 	outcome.NeedsApproval = len(blocking) > 0
 	if dbErr := e.db.SetStepFindings(stepResultID, capped); dbErr != nil {
 		slog.Warn("failed to set capped review findings in db", "round", roundNum, "error", dbErr)
 	}
+	if errorRound {
+		log(fmt.Sprintf("review.max_rounds (%d) reached at round %d: %d non-blocking %s carried as unresolved review notes; %d blocking %s get one more fix and rereview", roundCap, roundNum, len(notes), pluralize(len(notes), "finding", "findings"), len(blocking), pluralize(len(blocking), "finding", "findings")))
+		return notes
+	}
+	outcome.AutoFixable = false
 	next := "review completes"
 	if len(blocking) > 0 {
 		next = fmt.Sprintf("%d blocking %s park for approve, skip, abort, or one fix without rereview", len(blocking), pluralize(len(blocking), "finding", "findings"))
 	}
-	log(fmt.Sprintf("review.max_rounds (%d) reached at round %d: %d non-blocking %s carried as unresolved review notes; %s", e.config.Review.MaxRounds, roundNum, len(notes), pluralize(len(notes), "finding", "findings"), next))
+	log(fmt.Sprintf("review.max_rounds (%d) reached at round %d: %d non-blocking %s carried as unresolved review notes; %s", roundCap, roundNum, len(notes), pluralize(len(notes), "finding", "findings"), next))
+	return nil
+}
+
+// splitFindingsJSON reports whether a findings payload parses and holds any
+// blocking finding.
+func splitFindingsJSON(raw string) (bool, bool) {
+	findings, err := types.ParseFindingsJSON(raw)
+	if err != nil {
+		return false, false
+	}
+	blocking, _ := types.SplitBlockingFindings(findings.Items)
+	return true, len(blocking) > 0
+}
+
+// withCarriedReviewNotes adds the notes an error round carried from the cap
+// round to a later review payload's UnresolvedNotes, so they still reach the
+// PR when that round's own findings replace the step's.
+func withCarriedReviewNotes(raw string, notes []types.Finding) string {
+	if len(notes) == 0 {
+		return raw
+	}
+	findings := types.Findings{}
+	if raw != "" {
+		parsed, err := types.ParseFindingsJSON(raw)
+		if err != nil {
+			return raw
+		}
+		findings = parsed
+	}
+	findings.UnresolvedNotes = append(append([]types.Finding(nil), notes...), findings.UnresolvedNotes...)
+	merged, err := types.MarshalFindingsJSON(findings)
+	if err != nil {
+		return raw
+	}
+	return merged
+}
+
+// heldWithoutCarriedNotes strips an error round's carried notes from the
+// findings a fix held back; with no finding left, nothing is held.
+func heldWithoutCarriedNotes(raw string) string {
+	stripped := withoutRoundCapRecord(raw)
+	if findings, err := types.ParseFindingsJSON(stripped); err == nil && len(findings.Items) == 0 {
+		return ""
+	}
+	return stripped
+}
+
+// reviewFixSkipsRereview reports whether a fix accepted at a review gate runs
+// without a rereview: the gate was capped by review.max_rounds, and was not
+// the error round that still gets one.
+func reviewFixSkipsRereview(findingsJSON string) bool {
+	if findingsJSON == "" {
+		return false
+	}
+	findings, err := types.ParseFindingsJSON(findingsJSON)
+	return err == nil && findings.RoundCap > 0 && !findings.RoundCapErrorRound
 }
 
 // capReviewFindingsJSON splits one review round's findings at review.max_rounds:
 // blocking findings stay in Items and the rest move to UnresolvedNotes. ok is
 // false when there is nothing to cap.
-func capReviewFindingsJSON(raw string, roundCap int) (capped string, blocking, notes []types.Finding, ok bool) {
+func capReviewFindingsJSON(raw string, roundCap int, errorRound bool) (capped string, blocking, notes []types.Finding, ok bool) {
 	findings, err := types.ParseFindingsJSON(raw)
 	if err != nil || len(findings.Items) == 0 {
 		return "", nil, nil, false
 	}
 	blocking, notes = types.SplitBlockingFindings(findings.Items)
 	findings.Items = blocking
-	findings.UnresolvedNotes = append(findings.UnresolvedNotes, notes...)
+	// A note an error round already carried is not listed twice when the
+	// next review raises it again.
+	for _, note := range notes {
+		if !slices.ContainsFunc(findings.UnresolvedNotes, func(f types.Finding) bool { return f.ID == note.ID && f.Description == note.Description }) {
+			findings.UnresolvedNotes = append(findings.UnresolvedNotes, note)
+		}
+	}
 	findings.RoundCap = roundCap
+	findings.RoundCapErrorRound = errorRound
 	capped, err = types.MarshalFindingsJSON(findings)
 	if err != nil {
 		slog.Warn("failed to apply review round cap", "error", err)
@@ -1797,11 +1901,11 @@ func capReviewFindingsJSON(raw string, roundCap int) (capped string, blocking, n
 // the reviewer's full findings, so a capped gate never matches it byte for
 // byte, and recovery would otherwise refuse every capped gate after a restart.
 func isRoundCappedForm(roundFindings, stepFindings string) bool {
-	roundCap := reviewRoundCapOf(stepFindings)
-	if roundCap <= 0 {
+	step, err := types.ParseFindingsJSON(stepFindings)
+	if err != nil || step.RoundCap <= 0 {
 		return false
 	}
-	capped, _, _, ok := capReviewFindingsJSON(roundFindings, roundCap)
+	capped, _, _, ok := capReviewFindingsJSON(roundFindings, step.RoundCap, step.RoundCapErrorRound)
 	return ok && capped == stepFindings
 }
 
@@ -1859,6 +1963,7 @@ func withoutRoundCapRecord(raw string) string {
 	findings.UnresolvedNotes = nil
 	findings.ResolvedByFix = nil
 	findings.RoundCap = 0
+	findings.RoundCapErrorRound = false
 	stripped, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
 		return raw

@@ -1315,7 +1315,7 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		if n := len(finalFindings.UnresolvedNotes); n > 0 {
 			parts = append(parts, unresolvedNotesLabel(n))
 		}
-		return buildDetail(fmt.Sprintf("⚠️ **%s** - %s (round cap %d reached)", name, strings.Join(parts, ", "), finalFindings.RoundCap))
+		return buildDetail(fmt.Sprintf("⚠️ **%s** - %s (%s)", name, strings.Join(parts, ", "), roundCapReachedLabel(finalFindings.RoundCap)))
 	}
 
 	if findingsCleared {
@@ -1558,6 +1558,23 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	return foldPRBlock(summaryLine, inner.String(), flavor)
 }
 
+// roundCapReachedLabel and reviewMaxRoundsReachedLabel name the cap. Notes
+// an error round carried onto a later review that found nothing record no
+// cap number of their own.
+func roundCapReachedLabel(roundCap int) string {
+	if roundCap > 0 {
+		return fmt.Sprintf("round cap %d reached", roundCap)
+	}
+	return "round cap reached"
+}
+
+func reviewMaxRoundsReachedLabel(roundCap int) string {
+	if roundCap > 0 {
+		return fmt.Sprintf("review.max_rounds %d reached", roundCap)
+	}
+	return "review.max_rounds reached"
+}
+
 func unresolvedNotesLabel(n int) string {
 	if n == 1 {
 		return "1 unresolved review note"
@@ -1576,7 +1593,7 @@ func writeUnresolvedNotes(b *strings.Builder, sr *db.StepResult, flavor prBodyFl
 	if err != nil || len(final.UnresolvedNotes) == 0 {
 		return
 	}
-	b.WriteString(fmt.Sprintf("Unresolved review notes (review.max_rounds %d reached, not fixed):\n\n", final.RoundCap))
+	b.WriteString(fmt.Sprintf("Unresolved review notes (%s, not fixed):\n\n", reviewMaxRoundsReachedLabel(final.RoundCap)))
 	writeFindingItems(b, sr, &types.Findings{Items: final.UnresolvedNotes}, flavor)
 	b.WriteString("\n")
 }
