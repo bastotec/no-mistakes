@@ -283,10 +283,10 @@ type Findings struct {
 	// UnresolvedNotes, ResolvedByFix and RoundCap are written only by the
 	// executor once a review reaches review.max_rounds. Findings that will not
 	// be fixed leave Items (so they neither park nor get fixed) and are
-	// carried in UnresolvedNotes; findings a fix accepted at the cap committed
-	// a change for are carried in ResolvedByFix, since no rereview follows
-	// that fix to confirm them. RoundCap records the cap. All three are
-	// omitempty, so every other payload is unchanged.
+	// carried in UnresolvedNotes; findings a fix without rereview committed
+	// a change for are carried in ResolvedByFix, without reviewer confirmation.
+	// RoundCap records the cap. All three are omitempty, so every other
+	// payload is unchanged.
 	UnresolvedNotes []Finding `json:"unresolved_notes,omitempty"`
 	ResolvedByFix   []Finding `json:"resolved_by_fix,omitempty"`
 	RoundCap        int       `json:"round_cap,omitempty"`

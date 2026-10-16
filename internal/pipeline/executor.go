@@ -373,9 +373,9 @@ type stepExecutionState struct {
 	roundNum         int
 	executionMS      int64
 	currentRoundID   string
-	// cappedGateFindings is set when a recovered review gate parked at
-	// review.max_rounds is answered with fix: the fix runs without a
-	// rereview, and these are the gate findings it was chosen from.
+	// cappedGateFindings is set when a recovered review gate for which
+	// reviewFixSkipsRereview is true is answered with fix: the fix runs
+	// without a rereview, and these are the findings it was chosen from.
 	// reviewApprovedHeadSHA is the head the capped round reviewed, which
 	// stays the review's approval since nothing reviews the fix.
 	cappedGateFindings    string
@@ -1288,10 +1288,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		restartFrom = outcome.RestartFrom
 
-		// A fix accepted at review.max_rounds reviews nothing: the round
-		// records no reviewed head and the approval stays on the head the
-		// capped round reviewed. The fixer's commits descend from it and stay
-		// recorded as an uncertified range for the next review.
+		// A fix with FixWithoutRereview records no reviewed head; approval
+		// stays on the head the capped round reviewed. The fixer's commits
+		// descend from it and stay recorded as an uncertified range for the
+		// next review. The threshold's error round still gets a rereview.
 		roundReviewedHeadSHA := ""
 		if stepName == types.StepReview {
 			if sctx.FixWithoutRereview {
@@ -1772,21 +1772,16 @@ func (e *Executor) mayTouchRepairWorktree(sctx *StepContext, runID string, err e
 	return dispatchErr == nil && !active
 }
 
-// applyReviewRoundCap enforces review.max_rounds on one review outcome. Once
-// round roundNum has reached the cap and still has findings, the review stops
-// rereviewing: blocking findings (severity error) stay in the outcome and park
-// at the approval gate, and every other finding moves to UnresolvedNotes so it
-// neither parks nor gets fixed but is still recorded on the step and rendered
-// on the pull request. With no blocking finding left the review completes and
-// the pipeline continues. A fix accepted at the capped gate still runs once,
-// without a rereview (see resolveReviewFixWithoutRereview).
+// applyReviewRoundCap enforces review.max_rounds on one review outcome. From
+// the cap round onward, non-blocking findings leave the gate for UnresolvedNotes
+// so they neither park nor get fixed but still render on the pull request.
+// With no blocking findings left, the review completes.
 //
-// Error findings get one real round more: at the cap round itself, blocking
-// findings keep the gate an ordinary one (RoundCapErrorRound) - a fix there
-// is reviewed again and started the same way as any earlier round's - and
-// only the warnings and info stop. It returns those notes, which the
-// executor carries onto the next round's findings, where the cap applies
-// in full.
+// At the cap round itself, errors retain the ordinary fix-and-rereview gate
+// (RoundCapErrorRound), including its existing auto-fix eligibility and budget.
+// This returns the stopped notes for the executor to carry onto the next
+// round's findings before recording them. From cap+1, errors park and an
+// accepted fix runs once without rereview (resolveReviewFixWithoutRereview).
 //
 // The round record keeps the reviewer's full findings; only the step's own
 // findings - what the gate, axi and the PR summary read - are rewritten.
