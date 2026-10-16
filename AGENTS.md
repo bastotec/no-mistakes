@@ -212,7 +212,7 @@ The rationale lives in the `resolveRun` doc comment and the status-rendering com
 
 **SQLite Write Locking (`internal/db/db.go`)**
 
-- The daemon, independent repair wrappers and CLI commands each open the state database read-write, so every handle uses `readWriteDSN`: WAL, `busy_timeout(30000)` and `_txlock=immediate`. A deferred transaction that reads before it writes cannot wait out another process's commit - SQLite fails the write with SQLITE_BUSY at once - and that used to fail runs at the CI step (`update run PR state`) and leave runs stuck pending. Do not drop `_txlock=immediate`. Lifecycle writes (run status/error, `FailStep`, `UpdateRunPRState`) also retry on SQLITE_BUSY (`execRetryBusy`, `busyRetryDelays`). Regressions: `internal/db/busy_test.go`.
+- Preserve immediate transaction reservation across read-write handles and bounded busy retries for lifecycle writes. `readWriteDSN`, `execRetryBusy`, and `UpdateRunPRState` own the implementation and rationale; user-facing behavior lives in `docs/src/content/docs/concepts/gate-model.md` (Database). Regressions: `internal/db/busy_test.go`.
 
 **Pipeline step tests (CI latency)**
 

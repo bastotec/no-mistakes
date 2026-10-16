@@ -272,6 +272,9 @@ Communication between the CLI and daemon uses JSON-RPC 2.0 over the Unix socket.
 ### Database
 
 SQLite at `~/.no-mistakes/state.sqlite` tracks repos, runs, step results, step rounds, durable repair reservations and invocation recovery state, derived intent summaries, local agent invocation performance, and the minimum session metadata needed to resume review-loop roles.
+
+The daemon, independent repair wrappers, and CLI commands can write this database concurrently. Read-write handles use WAL and a 30-second busy timeout, and transactions reserve write access when they begin rather than after reading a snapshot. Run status/error writes, step-failure writes, and PR-state transactions retry busy errors up to three additional times after the initial attempt. Persisting lifecycle state can therefore take longer than one busy timeout under contention; exhausted retries still return an error.
+
 Step rounds record each completed execution attempt (initial, auto-fix) with its own findings and duration, plus selected finding IDs, whether the selection came from the user or auto-fix filtering, the merged finding payload actually sent to the fix agent for that round, and the one-line fix summary for fix rounds. A separate pre-launch reservation counts a repair before its fixer starts, so an interrupted invocation cannot evade the ceiling merely because no completed round exists.
 Step results also store the last active timestamp, last activity text, native agent PID while a subprocess is active, and the effective auto-fix limit used by AXI status.
 That merged payload can include per-finding user notes and user-authored findings from the TUI or AXI interface.
