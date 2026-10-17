@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.77.1](https://github.com/bastotec/no-mistakes/compare/v1.77.0...v1.77.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* allow one explicit repair beyond automatic limits ([#34](https://github.com/bastotec/no-mistakes/issues/34)) ([12739f4](https://github.com/bastotec/no-mistakes/commit/12739f405ca73dc757db518b245d1cededd48b4c))
+* **db:** handle SQLite write contention without stranding runs ([#36](https://github.com/bastotec/no-mistakes/issues/36)) ([4c5f06d](https://github.com/bastotec/no-mistakes/commit/4c5f06d79437f173aee3a035f5d2203caaa2d35d))
+* **pipeline:** give review errors one extra round at the cap ([4f7970c](https://github.com/bastotec/no-mistakes/commit/4f7970c0faa33e9a11b6dd6c88b34376d5458107))
+* **pipeline:** preserve interrupted repair work across fix rounds ([#20](https://github.com/bastotec/no-mistakes/issues/20)) ([6751307](https://github.com/bastotec/no-mistakes/commit/67513079ad2f06cd282f9ffd53895dc46613e1c1))
+* **pipeline:** tolerate non-correctness finder timeouts ([#32](https://github.com/bastotec/no-mistakes/issues/32)) ([7f036a0](https://github.com/bastotec/no-mistakes/commit/7f036a0158b0e3fefc80c61435f6a2ed50bdf521))
+
 ## [1.77.0](https://github.com/bastotec/no-mistakes/compare/v1.76.0...v1.77.0) (2026-10-14)
 
 
