@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -34,16 +33,7 @@ func (s *previewParkStep) Execute(ctx *pipeline.StepContext) (*pipeline.StepOutc
 // executor custody and publication together. Only the forge is a tiny fake CLI;
 // no ambient database, service, daemon socket or network is used.
 func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
-	bin := t.TempDir()
-	gh := filepath.Join(bin, "gh")
-	if os.PathSeparator == '\\' {
-		gh += ".exe"
-	}
-	build := exec.Command("go", "build", "-o", gh, "../pipeline/fakecli")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build fake forge: %v %s", err, out)
-	}
-	body := filepath.Join(t.TempDir(), "body")
+	body := installTestPreviewForge(t)
 	parked := &previewParkStep{}
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&previewReviewStep{}, parked} })
 	repo, head := setupTestGitRepo(t, p, database, "test-preview-rpc")
@@ -52,7 +42,7 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 	gitCmd(t, "", "clone", "--bare", gate, remote)
 	gitCmd(t, gate, "remote", "set-url", "origin", remote)
 	gitCmd(t, gate, "update-ref", "refs/heads/feature", head)
-	parked.env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "FAKE_CLI_MODE=test-preview-gh", "FAKE_CLI_PR_BODY_FILE=" + body, "FAKE_CLI_PR_HEAD_SHA=" + head}
+	parked.env = []string{"PATH=" + os.Getenv("PATH"), "FAKE_CLI_MODE=test-preview-gh", "FAKE_CLI_PR_BODY_FILE=" + body, "FAKE_CLI_PR_HEAD_SHA=" + head}
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +111,7 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 }
 
 func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
+	installTestPreviewForge(t)
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
 	})

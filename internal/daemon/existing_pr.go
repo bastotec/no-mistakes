@@ -48,7 +48,7 @@ func (m *RunManager) HandleStartExistingPRRun(ctx context.Context, p *ipc.StartE
 		}
 		// This entrypoint binds the private branch before shared run creation.
 		// Check ownership before that mutation as well as at the shared boundary.
-		if err := m.refuseManagedTestPreviewReplacement(repo.ID, p.Branch); err != nil {
+		if err := m.refuseManagedTestPreviewReplacement(ctx, repo.ID, p.Branch); err != nil {
 			return "", err
 		}
 		if _, err := git.Run(ctx, repo.WorkingPath, "check-ref-format", "refs/heads/"+p.Branch); err != nil {

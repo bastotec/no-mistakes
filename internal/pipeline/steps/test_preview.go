@@ -16,6 +16,60 @@ func testPreviewMarker(runID string) string {
 	return "<!-- no-mistakes:pr-validation:" + runID + " -->"
 }
 
+func TestPreviewReplacementOwner(sctx *pipeline.StepContext) (string, error) {
+	runs, err := sctx.DB.BranchTestPreviewRuns(sctx.Repo.ID, sctx.Run.Branch)
+	if err != nil || len(runs) == 0 {
+		return "", err
+	}
+	if resolvedHost(sctx, sctx.Repo.UpstreamURL) != "github.com" {
+		for _, run := range runs {
+			if run.PRURL != "" {
+				return "", fmt.Errorf("cannot resolve managed Test preview outside github.com")
+			}
+		}
+		return "", nil
+	}
+	host, reason := buildHost(sctx, scm.ProviderGitHub)
+	if host == nil {
+		return "", fmt.Errorf("preview host unavailable: %s", reason)
+	}
+	unbound := false
+	for _, run := range runs {
+		if run.PRURL == "" {
+			unbound = true
+			continue
+		}
+		state, err := host.GetPRState(sctx.Ctx, &scm.PR{URL: run.PRURL})
+		if err != nil {
+			return "", err
+		}
+		switch state {
+		case scm.PRStateOpen:
+			return run.RunID, nil
+		case scm.PRStateClosed, scm.PRStateMerged:
+		default:
+			return "", fmt.Errorf("unknown managed Test preview lifecycle")
+		}
+	}
+	if !unbound {
+		return "", nil
+	}
+	pr, err := host.FindPR(sctx.Ctx, sctx.Run.Branch, "")
+	if err != nil || pr == nil {
+		return "", err
+	}
+	content, err := host.(scm.PRContentReader).GetPRContent(sctx.Ctx, pr)
+	if err != nil {
+		return "", err
+	}
+	for _, run := range runs {
+		if strings.Contains(content.Body, testPreviewMarker(run.RunID)) {
+			return run.RunID, nil
+		}
+	}
+	return "", nil
+}
+
 func PublishTestPreview(sctx *pipeline.StepContext) (*ipc.PublishTestPreviewResult, error) {
 	if resolvedProvider(sctx) != scm.ProviderGitHub || resolvedHost(sctx, sctx.Repo.UpstreamURL) != "github.com" || existingPRURL(sctx) != "" {
 		return nil, fmt.Errorf("Test previews currently require a run-owned github.com PR, not an explicit existing PR")

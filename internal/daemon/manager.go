@@ -926,7 +926,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			baseSHA = headSHA
 			if len(runs) > 0 {
 				baseSHA = runs[0].BaseSHA
-				inheritedPRURL, err = m.inheritablePRURL(runs[0])
+				inheritedPRURL, err = m.inheritablePRURL(ctx, runs[0])
 				if err != nil {
 					return "", err
 				}
@@ -1132,7 +1132,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if selectedRun.PreserveHistoryBaseSHA != nil {
 		return "", fmt.Errorf("preserve-history run cannot be implicitly repinned by rerun; recover custody if needed, then use axi run --preserve-history <exact-base-sha> --base-branch <branch> for a new explicit integration")
 	}
-	inheritedPRURL, err := m.inheritablePRURL(selectedRun)
+	inheritedPRURL, err := m.inheritablePRURL(ctx, selectedRun)
 	if err != nil {
 		return "", err
 	}
@@ -1172,8 +1172,28 @@ func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree st
 	return m.db.CopyRunSurvivedWork(fromRunID, toRunID, worktree)
 }
 
-func (m *RunManager) refuseManagedTestPreviewReplacement(repoID, branch string) error {
-	owner, err := m.db.BranchTestPreviewOwner(repoID, branch)
+func (m *RunManager) refuseManagedTestPreviewReplacement(ctx context.Context, repoID, branch string) error {
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	repo, err := m.db.GetRepo(repoID)
+	if err != nil {
+		return err
+	}
+	if repo == nil {
+		return fmt.Errorf("unknown preview repository")
+	}
+	cfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return err
+	}
+	forge, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		return err
+	}
+	owner, err := steps.TestPreviewReplacementOwner(&pipeline.StepContext{
+		Ctx: ctx, DB: m.db, Repo: repo, Run: &db.Run{Branch: branch},
+		WorkDir: m.paths.RepoDir(repoID), ForgeContext: forge,
+	})
 	if err != nil {
 		return fmt.Errorf("read branch preview ownership: %w", err)
 	}
@@ -1183,7 +1203,7 @@ func (m *RunManager) refuseManagedTestPreviewReplacement(repoID, branch string) 
 	return nil
 }
 
-func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
+func (m *RunManager) inheritablePRURL(ctx context.Context, run *db.Run) (string, error) {
 	// An explicit cross-repository URL must never escape into a legacy host
 	// selected from origin. Rerun carries its complete constraint separately;
 	// independent launches without --existing-pr retain ordinary discovery.
@@ -1193,6 +1213,16 @@ func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
 	if run.PRURL == nil {
 		return "", nil
 	}
+	preview, err := m.db.TestPreviewPR(run.ID)
+	if err != nil {
+		return "", fmt.Errorf("read run preview ownership: %w", err)
+	}
+	if preview != "" {
+		if err := m.refuseManagedTestPreviewReplacement(ctx, run.RepoID, run.Branch); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
 	state := ""
 	if run.PRState != nil {
 		state = strings.ToLower(strings.TrimSpace(*run.PRState))
@@ -1200,17 +1230,7 @@ func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
 	if state == "merged" || state == "closed" {
 		return "", nil
 	}
-	url := strings.TrimSpace(*run.PRURL)
-	if url != "" {
-		preview, err := m.db.TestPreviewPR(run.ID)
-		if err != nil {
-			return "", fmt.Errorf("read run preview ownership: %w", err)
-		}
-		if preview != "" {
-			return "", fmt.Errorf("cannot replace run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", run.ID)
-		}
-	}
-	return url, nil
+	return strings.TrimSpace(*run.PRURL), nil
 }
 
 func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, callerHeadSHA string) (string, error) {
@@ -1456,7 +1476,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// before cancelling the owner or inserting a run: branch discovery could
 	// otherwise adopt its draft without the run-owned preview binding. Receipt
 	// replay/reattachment returns above this creation path and stays available.
-	if err := m.refuseManagedTestPreviewReplacement(repo.ID, branch); err != nil {
+	if err := m.refuseManagedTestPreviewReplacement(ctx, repo.ID, branch); err != nil {
 		trackStartFailure("managed_test_preview")
 		return "", err
 	}

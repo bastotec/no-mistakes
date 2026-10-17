@@ -30,9 +30,21 @@ func fakeTestPreviewGH(args []string) {
 			os.Exit(2)
 		}
 		fakeGHStorePRBody(args)
+		if os.Getenv("FAKE_CLI_PREVIEW_CREATE_RESPONSE_LOST") == "1" {
+			os.Exit(1)
+		}
 		fmt.Print("https://github.com/test/repo/pull/99")
 	case strings.HasPrefix(joined, "pr ready"):
 		_ = os.WriteFile(path+".ready", []byte("ready"), 0600)
+	case strings.Contains(joined, "--json state"):
+		state := os.Getenv("FAKE_CLI_PR_STATE")
+		if state == "ERROR" {
+			os.Exit(1)
+		}
+		if state == "" {
+			state = "OPEN"
+		}
+		fmt.Print(state)
 	case strings.Contains(joined, "--json isDraft,state,headRefOid,autoMergeRequest"):
 		_, ready := os.Stat(path + ".ready")
 		head := os.Getenv("FAKE_CLI_PR_HEAD_SHA")
