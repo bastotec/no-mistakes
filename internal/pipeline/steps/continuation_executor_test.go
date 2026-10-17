@@ -15,7 +15,8 @@ import (
 
 func TestContinuation_ExecutorAcceptsTerminalCIOnlyWithPinnedGreenEvidence(t *testing.T) {
 	for _, state := range []string{"CLOSED", "MERGED"} {
-		for _, scenario := range []string{"green", "pending", "empty", "stale-checks-head", "retargeted", "moved-base", "moved-source"} {
+		for _, scenario := range []string{"green", "skip-only", "passing-plus-skipped", "pending", "empty", "stale-checks-head", "retargeted", "moved-base", "moved-source"} {
+			passes := scenario == "green" || scenario == "passing-plus-skipped"
 			t.Run(state+"/"+scenario, func(t *testing.T) {
 				f := newContinuationFixture(t)
 				f.publish(t)
@@ -27,6 +28,10 @@ func TestContinuation_ExecutorAcceptsTerminalCIOnlyWithPinnedGreenEvidence(t *te
 					checks = `[{"name":"build","state":"PENDING","bucket":"pending"}]`
 				} else if scenario == "empty" {
 					checks = `[]`
+				} else if scenario == "skip-only" {
+					checks = `[{"name":"build","state":"SKIPPED","bucket":"skip"}]`
+				} else if scenario == "passing-plus-skipped" {
+					checks = `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"optional","state":"SKIPPED","bucket":"skip"}]`
 				}
 				for _, entry := range continuationCIEnv(f, fakeCIGH(t, "OPEN", checks)) {
 					key, value, _ := strings.Cut(entry, "=")
@@ -66,7 +71,7 @@ func TestContinuation_ExecutorAcceptsTerminalCIOnlyWithPinnedGreenEvidence(t *te
 				ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 				defer cancel()
 				err := executor.Execute(ctx, f.s.Run, f.s.Repo, f.s.WorkDir)
-				if !enteredCI || (err == nil) != (scenario == "green") {
+				if !enteredCI || (err == nil) != passes {
 					t.Fatalf("entered CI = %v, execution error = %v", enteredCI, err)
 				}
 				stored, err := f.s.DB.GetRun(f.s.Run.ID)
@@ -77,7 +82,7 @@ func TestContinuation_ExecutorAcceptsTerminalCIOnlyWithPinnedGreenEvidence(t *te
 				if err != nil || len(steps) != 2 {
 					t.Fatalf("steps = %+v, err = %v", steps, err)
 				}
-				if scenario == "green" {
+				if passes {
 					if stored.Status != types.RunCompleted || steps[1].Status != types.StepStatusCompleted || stored.PRState == nil || *stored.PRState != strings.ToLower(state) {
 						t.Fatalf("terminal completion lost: run=%+v steps=%+v", stored, steps)
 					}

@@ -24,6 +24,14 @@ func TestCIStep_VerifyApprovalOverride(t *testing.T) {
 		wantContains   string
 	}{
 		{
+			name:       "skip-only",
+			checksJSON: `[{"name":"optional","state":"SKIPPED","bucket":"skipping"}]`,
+		},
+		{
+			name:       "passing-plus-skipped",
+			checksJSON: `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"optional","state":"SKIPPED","bucket":"skipping"}]`,
+		},
+		{
 			name:           "still failing",
 			checksJSON:     `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"PR must be raised via no-mistakes","state":"FAILURE","bucket":"fail"}]`,
 			wantUnresolved: true,

@@ -452,8 +452,59 @@ func TestContinuation_BaseResolutionUsesSingleStepEntryProbe(t *testing.T) {
 	}
 }
 
+func TestContinuation_CIMonitorPassingCheckPolicy(t *testing.T) {
+	for _, continuation := range []bool{false, true} {
+		for _, scenario := range []string{"skip-only", "passing-plus-skipped"} {
+			mode := "ordinary"
+			if continuation {
+				mode = "continuation"
+			}
+			t.Run(mode+"/"+scenario, func(t *testing.T) {
+				f := newContinuationFixture(t)
+				f.publish(t)
+				if !continuation {
+					f.s.Run.ContinuationJSON = nil
+				}
+				checks := `[{"name":"optional","state":"SKIPPED","bucket":"skip"}]`
+				if scenario == "passing-plus-skipped" {
+					checks = `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"optional","state":"SKIPPED","bucket":"skip"}]`
+				}
+				f.s.Env = continuationCIEnv(f, fakeCIGH(t, "OPEN", checks))
+				if err := f.s.DB.SetRunCIReadyWithReason(f.s.Run.ID, true, false); err != nil {
+					t.Fatal(err)
+				}
+				readyEvents, greenLogs := 0, 0
+				f.s.CIReadinessChanged = func(ready, _ bool) {
+					if ready {
+						readyEvents++
+					}
+				}
+				f.s.Log = func(line string) {
+					if line == ciChecksPassedMsg {
+						greenLogs++
+					}
+				}
+				stop := errors.New("stop after first CI observation")
+				step := (&CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return f.tip, true })
+				step.SetWaitForNextPoll(func(context.Context, time.Duration) error { return stop })
+				if _, err := step.Execute(f.s); !errors.Is(err, stop) {
+					t.Fatalf("monitor error = %v", err)
+				}
+				stored, err := f.s.DB.GetRun(f.s.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				wantReady := !continuation || scenario == "passing-plus-skipped"
+				if (stored.CIReadyAt != nil) != wantReady || (readyEvents == 1) != wantReady || (greenLogs == 1) != wantReady {
+					t.Fatalf("ready=%v events=%d green logs=%d, want ready=%v", stored.CIReadyAt, readyEvents, greenLogs, wantReady)
+				}
+			})
+		}
+	}
+}
+
 func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testing.T) {
-	for _, scenario := range []string{"green", "jobless-workflow-fails", "workflow-discovery-fails", "pending", "empty", "different-pr-head", "unpublished-repair", "later-worktree-head"} {
+	for _, scenario := range []string{"green", "skip-only", "passing-plus-skipped", "jobless-workflow-fails", "workflow-discovery-fails", "pending", "empty", "different-pr-head", "unpublished-repair", "later-worktree-head"} {
 		t.Run(scenario, func(t *testing.T) {
 			f := newContinuationFixture(t)
 			f.publish(t)
@@ -462,6 +513,10 @@ func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testin
 				checks = `[{"name":"build","state":"PENDING","bucket":"pending"}]`
 			} else if scenario == "empty" {
 				checks = `[]`
+			} else if scenario == "skip-only" {
+				checks = `[{"name":"build","state":"SKIPPED","bucket":"skip"}]`
+			} else if scenario == "passing-plus-skipped" {
+				checks = `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"optional","state":"SKIPPED","bucket":"skip"}]`
 			}
 			f.s.Env = continuationCIEnv(f, fakeCIGH(t, "OPEN", checks))
 			switch scenario {
@@ -480,8 +535,11 @@ func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testin
 			if err != nil {
 				t.Fatal(err)
 			}
-			if (reason == "") != (scenario == "green") {
+			if (reason == "") != (scenario == "green" || scenario == "passing-plus-skipped") {
 				t.Fatalf("approval reason = %q", reason)
+			}
+			if scenario == "skip-only" && !strings.Contains(reason, "at least one passing CI check") {
+				t.Fatalf("missing passing-check requirement: %s", reason)
 			}
 			if scenario == "jobless-workflow-fails" && !strings.Contains(reason, "workflow-validation") {
 				t.Fatalf("jobless workflow missing from refusal: %s", reason)
@@ -493,8 +551,9 @@ func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testin
 func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.T) {
 	for _, state := range []string{"CLOSED", "MERGED"} {
 		for _, entry := range []string{"monitor", "reconcile", "terminal-monitor", "repair-reconcile"} {
-			for _, scenario := range []string{"pending", "failure", "empty", "jobless-workflow-fails", "workflow-discovery-fails", "different-pr-head", "later-worktree-head", "pr-base-moves", "base-tip-moves", "source-moves", "identity-head-moves", "green"} {
-				if (entry == "terminal-monitor" || entry == "repair-reconcile") && scenario != "green" {
+			for _, scenario := range []string{"pending", "failure", "empty", "skip-only", "passing-plus-skipped", "jobless-workflow-fails", "workflow-discovery-fails", "different-pr-head", "later-worktree-head", "pr-base-moves", "base-tip-moves", "source-moves", "identity-head-moves", "green"} {
+				passes := scenario == "green" || scenario == "passing-plus-skipped"
+				if (entry == "terminal-monitor" || entry == "repair-reconcile") && !passes && scenario != "skip-only" {
 					continue
 				}
 				t.Run(state+"/"+entry+"/"+scenario, func(t *testing.T) {
@@ -527,6 +586,10 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 						checks = `[{"name":"build","state":"FAILURE","bucket":"fail"}]`
 					case "empty":
 						checks = `[]`
+					case "skip-only":
+						checks = `[{"name":"build","state":"SKIPPED","bucket":"skip"}]`
+					case "passing-plus-skipped":
+						checks = `[{"name":"build","state":"SUCCESS","bucket":"pass"},{"name":"optional","state":"SKIPPED","bucket":"skip"}]`
 					}
 					step := (&CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return f.tip, true })
 					terminalIdentity := func() {
@@ -589,11 +652,11 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 					} else {
 						var resolved bool
 						resolved, err = step.ReconcileApprovalGate(f.s)
-						if resolved != (scenario == "green") {
+						if resolved != passes {
 							t.Fatalf("resolved = %v, err = %v", resolved, err)
 						}
 					}
-					if (err == nil) != (scenario == "green") {
+					if (err == nil) != passes {
 						t.Fatalf("terminal CI error = %v", err)
 					}
 					stored, err := f.s.DB.GetRun(f.s.Run.ID)
@@ -604,7 +667,7 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 					if err != nil {
 						t.Fatal(err)
 					}
-					if scenario == "green" {
+					if passes {
 						if stored.Status != types.RunCompleted || storedStep.Status != types.StepStatusCompleted || stored.PRState == nil || *stored.PRState != strings.ToLower(state) {
 							t.Fatalf("green terminal not completed: run=%+v step=%+v", stored, storedStep)
 						}

@@ -242,9 +242,11 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 	switch {
 	case err != nil:
 		reasons = append(reasons, fmt.Sprintf("could not verify live CI state: %v", err))
-	case allChecksPassed(checks):
+	case ciChecksPassed(sctx, checks):
 	case len(checks) == 0:
 		reasons = append(reasons, fmt.Sprintf("live checks for %s: no checks reported", prURL))
+	case allChecksPassed(checks):
+		reasons = append(reasons, "continuation requires at least one passing CI check")
 	default:
 		reasons = append(reasons, fmt.Sprintf("live checks for %s not all passed: %s", prURL, strings.Join(unresolvedCheckNames(checks), ", ")))
 	}
@@ -820,7 +822,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						lastMonitorLog = ""
 						sctx.Log("no CI checks reported yet, waiting for checks to register...")
 					}
-				case allChecksPassed(checks):
+				case ciChecksPassed(sctx, checks):
 					sctx.DeferredFindings = ""
 					lastMonitorLog = logCIMonitorStatus(sctx, pr, ciChecksPassedMsg, lastMonitorLog)
 				default:
@@ -891,7 +893,7 @@ func verifyContinuationTerminalCI(sctx *pipeline.StepContext, host scm.Host, pr 
 	if err := assertContinuationCIFinalHead(sctx, pr); err != nil {
 		return err
 	}
-	if !allChecksPassed(checks) {
+	if !ciChecksPassed(sctx, checks) {
 		return historyRefusal("continuation requires exact-final-head green CI before terminal completion")
 	}
 	return nil

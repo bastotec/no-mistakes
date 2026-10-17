@@ -71,6 +71,21 @@ func hasUnresolvedChecks(checks []scm.Check) bool {
 	return false
 }
 
+func ciChecksPassed(sctx *pipeline.StepContext, checks []scm.Check) bool {
+	if !allChecksPassed(checks) {
+		return false
+	}
+	if sctx.Run.ContinuationJSON == nil {
+		return true
+	}
+	for _, check := range checks {
+		if check.Bucket == scm.CheckBucketPass {
+			return true
+		}
+	}
+	return false
+}
+
 func allChecksPassed(checks []scm.Check) bool {
 	if len(checks) == 0 {
 		return false
