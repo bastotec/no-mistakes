@@ -25,6 +25,7 @@ const (
 	MethodRerun              = "rerun"
 	MethodSubscribe          = "subscribe"
 	MethodRespond            = "respond"
+	MethodPublishTestPreview = "publish_test_preview"
 	MethodCancelRun          = "cancel_run"
 	MethodGateContext        = "gate_context"
 	MethodAdmitPush          = "admit_push"

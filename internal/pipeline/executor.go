@@ -65,7 +65,9 @@ type Executor struct {
 	mu                          sync.Mutex
 	approvalCh                  chan approvalResponse // buffered channel for approval responses
 	waiting                     bool                  // true when blocked on approval
-	waitingStep                 types.StepName        // which step is currently awaiting approval
+	waitingContext              *StepContext          // valid only while waiting; guarded by mu
+	pendingTestPreview          *testPreviewRequest
+	waitingStep                 types.StepName // which step is currently awaiting approval
 	waitingStepResultID         string
 	waitingRoundID              string
 	waitingFindings             string
@@ -613,6 +615,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
+	e.waitingContext = reconcileCtx
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
 	e.waitingFindings = gate.findings
@@ -680,6 +683,15 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	}
 	telemetry.Track("approval", approvalFields)
 	switch response.action {
+	case actionRerunTestPreview:
+		skipRemaining, restartFrom, err := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{roundNum: gate.round, executionMS: duration})
+		if err != nil {
+			return e.failRun(run, repo, err, ctx)
+		}
+		if skipRemaining || restartFrom != "" {
+			return e.failRun(run, repo, fmt.Errorf("preview Test cannot skip validation or restart another step"), ctx)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	case types.ActionApprove:
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.applyApprovalOverride(gate.step, reconcileCtx, gate.stepResult.ID); err != nil {
@@ -978,19 +990,6 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 	finalExitCode := 0
 	autoFixLimit := e.autoFixLimit(stepName)
 
-	if !state.fixing && !state.resumeRunning {
-		var err error
-		if stepName.IsCustomGate() || !e.autoFixPolicyConfigured(stepName) {
-			err = e.db.StartStepWithoutAutoFixPolicy(sr.ID)
-		} else {
-			err = e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit)
-		}
-		if err != nil {
-			return false, "", fmt.Errorf("start step %s: %w", stepName, err)
-		}
-		e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
-	}
-
 	// Track execution-only time, excluding approval wait periods.
 	phaseStart := time.Now()
 	executionMS := state.executionMS
@@ -1187,6 +1186,35 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		CIReadinessChanged: ciReadinessChanged,
 		MarkRunning:        markRunning,
 		OnPRMerged:         e.onPRMerged,
+	}
+	if stepName == types.StepTest {
+		e.mu.Lock()
+		if request := e.pendingTestPreview; request != nil {
+			e.pendingTestPreview = nil
+			result, err := e.publishTestPreviewAt(sctx, request.ctx, request.params, request.publish)
+			request.done <- testPreviewResponse{result: result, err: err}
+		}
+	}
+	if !state.fixing && !state.resumeRunning {
+		var err error
+		if stepName.IsCustomGate() || !e.autoFixPolicyConfigured(stepName) {
+			err = e.db.StartStepWithoutAutoFixPolicy(sr.ID)
+		} else {
+			err = e.db.StartStepWithAutoFixLimit(sr.ID, autoFixLimit)
+		}
+		if err != nil {
+			if stepName == types.StepTest {
+				e.mu.Unlock()
+			}
+			return false, "", fmt.Errorf("start step %s: %w", stepName, err)
+		}
+	}
+
+	if stepName == types.StepTest {
+		e.mu.Unlock()
+	}
+	if !state.fixing && !state.resumeRunning {
+		e.emitStepEvent(ipc.EventStepStarted, run, repo, stepName, string(types.StepStatusRunning))
 	}
 	sctx.FixWithoutRereview = state.fixing && state.cappedGateFindings != ""
 	if stepName == types.StepReview {
@@ -1455,6 +1483,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			// Step completed without needing approval.
 			// Any remaining info-only or non-blocking findings
 			// are acceptable and don't block the pipeline.
+			if stepName == types.StepTest && !outcome.Skipped && !outcome.SkipRemaining && outcome.ExitCode == 0 {
+				if err := e.db.RecordTestPreviewValidation(run.ID, run.HeadSHA); err != nil {
+					return false, "", err
+				}
+			}
 			skipRemaining = outcome.SkipRemaining
 			stepSkipped = outcome.Skipped
 			skipReason = safeurl.RedactText(outcome.SkipReason)
@@ -1481,6 +1514,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.mu.Lock()
 		e.waiting = true
 		e.waitingStep = stepName
+		e.waitingContext = sctx
 		e.waitingStepResultID = sr.ID
 		e.waitingRoundID = currentRoundID
 		e.waitingFindings = outcome.Findings
@@ -1543,6 +1577,17 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		telemetry.Track("approval", approvalFields)
 
 		switch response.action {
+		case actionRerunTestPreview:
+			sctx.Fixing = false
+			sctx.PreviousFindings = ""
+			sctx.DeferredFindings = ""
+			activeRepairRoundID = ""
+			if err := markRunning(); err != nil {
+				return false, "", err
+			}
+			phaseStart = time.Now()
+			nextTrigger = "initial"
+			continue
 		case types.ActionApprove:
 			// Approved - execution already frozen in executionMS, reset phaseStart
 			// so the done label computes no additional elapsed.
@@ -2279,7 +2324,17 @@ func pluralize(n int, singular, plural string) string {
 // cancelled. Reconciliation runs synchronously under a bounded child context,
 // so no watcher goroutine can outlive approval, cancellation, or shutdown.
 // The caller must set e.waiting and e.waitingStep before calling this method.
-func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate bool) (approvalResponse, bool, error) {
+func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sctx *StepContext, findings string, immediate bool) (response approvalResponse, reconciled bool, err error) {
+	defer func() {
+		if err == nil && step.Name() == types.StepTest && (response.action == types.ActionApprove || reconciled) {
+			var needed bool
+			needed, err = e.db.TestPreviewNeedsValidation(sctx.Run.ID)
+			if needed && err == nil {
+				response = approvalResponse{action: actionRerunTestPreview}
+				reconciled = false
+			}
+		}
+	}()
 	defer func() {
 		e.mu.Lock()
 		e.waiting = false
@@ -2349,6 +2404,12 @@ func (e *Executor) claimGateReconciliation() bool {
 }
 
 func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (bool, error) {
+	if step.Name() == types.StepTest {
+		needed, err := e.db.TestPreviewNeedsValidation(sctx.Run.ID)
+		if err != nil || needed {
+			return false, err
+		}
+	}
 	reconciler, ok := step.(ApprovalGateReconciler)
 	if !ok {
 		return false, nil

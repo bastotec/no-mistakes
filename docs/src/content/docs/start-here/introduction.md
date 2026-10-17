@@ -22,7 +22,7 @@ ready.
 `no-mistakes` sits in that gap. It gives you a deliberate local gate before the
 branch reaches the configured push target:
 
-- **Before** the code is public, it rebases, runs a structured AI code review, runs baseline tests, gathers user-facing test evidence when intent is available, checks that docs are in sync, runs lint, and only then pushes to the configured target and opens the PR.
+- **Normally, before** the code is public, it rebases, runs a structured AI code review, runs baseline tests, gathers user-facing test evidence when intent is available, checks that docs are in sync, runs lint, and only then pushes to the configured target and opens the PR. [Explicit Test preview publication](/no-mistakes/reference/cli/#no-mistakes-axi-publish-test-preview) is the opt-in exception.
 - **After** the push, it watches CI and auto-fixes failures. On GitHub, GitLab, Forgejo, and Azure DevOps it also watches PR mergeability and fixes merge conflicts on the branch.
 - **Throughout**, every step can pause for your approval. You see the findings, pick what to fix, and decide when to ship.
 
@@ -66,7 +66,7 @@ When a branch passes the gate, it means:
 
 - it was checked against fresh upstream and the pushed-branch target
 - the fixed core pipeline and any repository gates ran in order
-- review, tests, user-facing test evidence when available, docs, and lint happened before the branch reached the configured push target
+- publication followed the [pipeline's validation-order rules](/no-mistakes/concepts/pipeline/#what-a-passed-gate-means)
 - you had a chance to approve, fix, skip, or abort any blocking step
 
 ## What you get

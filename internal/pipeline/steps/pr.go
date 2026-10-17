@@ -176,9 +176,11 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		// Removing pr.template must not switch an already owned body back to
 		// destructive drafting. Its live author narrative still wins.
 		if template != "" || hasPRAppendixMarkers(live.Body) || explicit != nil {
-			if _, err := parsePROwnedBody(live.Body); err != nil {
+			parts, err := parsePROwnedBody(live.Body)
+			if err != nil {
 				return nil, err
 			}
+			previewOnly := emptyTestPreviewBody(sctx, parts)
 			var emptyNarrative string
 			var title string
 			var headingTranslations []templateHeadingTranslation
@@ -186,7 +188,23 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// title and the description - including an empty one - belong to
 			// the pull request's author, not to this repository's template.
 			if explicit == nil {
-				if live.Body == "" && template != "" {
+				if previewOnly {
+					draft, err := s.buildPRContentWithPolicy(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider, bodyLimit)
+					if err != nil {
+						return nil, err
+					}
+					title = draft.Title
+					headingTranslations = draft.HeadingTranslations
+					if hasPRAppendixMarkers(draft.Body) {
+						drafted, err := parsePROwnedBody(draft.Body)
+						if err != nil {
+							return nil, err
+						}
+						emptyNarrative = drafted.before + drafted.after
+					} else {
+						emptyNarrative = stripGeneratedSections(draft.Body)
+					}
+				} else if live.Body == "" && template != "" {
 					draft, err := s.draftTemplateNarrative(sctx, branch, publicationBaseBranch, baseSHA, policySHA, template)
 					if err != nil {
 						return nil, err
@@ -241,6 +259,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, fmt.Errorf("update pull request: %w", err)
 			}
+		}
+		if err := readyTestPreview(sctx, host, existing); err != nil {
+			return nil, err
 		}
 		if updated != nil && updated.URL != "" {
 			if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, updated.URL); err != nil {
