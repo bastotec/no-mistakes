@@ -244,6 +244,25 @@ An explicit `--base-branch` is persisted on creation and must match the stored p
 A conflicting claim does not consume the first `created` disposition.
 Without the two proof flags, ordinary reattachment is unchanged, and historical runs without a nonce are not adopted into a proof binding.
 
+## no-mistakes axi publish-test-preview
+
+Publish the exact committed head of an active run parked at Test, without answering its gate:
+
+```sh
+no-mistakes axi status --run <run-id>
+no-mistakes axi publish-test-preview --run <run-id> --head <full-current-head-sha>
+```
+
+Both flags are required. The daemon checks repository, run, exact current head and the settled Test gate together, serializing publication against gate responses. Running/fixing, terminal, protected-path, interrupted-repair and shutdown gates are refused, as are dirty worktrees and unfinished integrations. The command does not commit files, run formatters, launch agents, spend repair rounds, approve Test, or complete Push/PR/CI. It uses the ordinary guarded publication path, including review-head continuity, history constraints, remote verification and durable custody binding. Branch custody stays with the run.
+
+Currently this operation supports run-owned github.com PRs only, not `--existing-pr` associations. It creates a **draft** PR labeled **`pr-validation`** and explicitly describes it as a PR validation preview. An existing PR is reusable only when bound to this run's preview (or recoverable from its run-specific creation marker); it must still be draft with auto-merge disabled and target the same base. Repeating the command reuses the same PR, including after a lost response. Missing, foreign, closed or already-ready PRs fail closed instead of opening a replacement. Existing author prose is preserved; pre-push attestation updates remain confined to pipeline-owned evidence.
+
+Preview provisioning remains repository-owned: configure preview automation to accept draft PRs and the `pr-validation` label, with an environment name containing `preview`. The command reports `pr_url`, the exact `head_sha`, `label`, the unchanged `test_status`, and `preview_url`. A URL is reported only for a successful GitHub deployment of **that exact SHA**, never a stale branch preview or production deployment. An empty URL means pending or not configured, **not successful live validation**; repeat the same command to discover a deployment later. This operation does not create a hosting account, change provider budgets, or supply a local container fallback.
+
+The PR attestation records Test's actual parked status, which does not satisfy `require-no-mistakes`. No scenario becomes passed, skipped or not applicable. Drive the original Test gate after collecting live evidence; all remaining gates still execute in their original order. Only the later normal PR step, after Test completes and ordinary publication succeeds, replaces the owned preview narrative and makes this run's draft ready (unless provider configuration deliberately keeps PRs draft). This prevents early auto-merge eligibility; manual external changes to draft/auto-merge state are refused on preview retries.
+
+Both CLI and daemon must support this distinct RPC. An older daemon rejects it; there is no publication fallback or automatic restart/update. Installing a new binary does not change the behavior of a daemon already running. Activate a new daemon version only through an explicitly authorized lifecycle window, never by restarting a shared daemon to make this command work.
+
 ## no-mistakes axi respond
 
 Answer the current approval gate and continue until the next gate, CI-ready decision point, or final outcome.

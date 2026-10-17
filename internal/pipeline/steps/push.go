@@ -93,9 +93,10 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	return &pipeline.StepOutcome{}, nil
 }
 
-// publishRunHead is the single guarded publication path for a run's head. Both
-// the Push step and a CI repair published without revalidation
-// (ci.revalidate_repairs: false) go through it, so the review-approved-head
+// publishRunHead is the single guarded publication path for a run's head. The
+// Push step, a CI repair published without revalidation
+// (ci.revalidate_repairs: false), and explicit parked-Test preview publication
+// go through it, so the review-approved-head
 // continuity check, the force-with-lease anchor, the remote verification, the
 // push binding, and the gate-mirror update are written once and can never
 // drift apart between the two callers.

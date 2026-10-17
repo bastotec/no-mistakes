@@ -1,0 +1,55 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"strings"
+)
+
+func fakeTestPreviewGH(args []string) {
+	joined := strings.Join(args, " ")
+	path := os.Getenv("FAKE_CLI_PR_BODY_FILE")
+	_, exists := os.Stat(path)
+	if title, ok := fakeCLIFlagValue(args, "--title"); ok {
+		_ = os.WriteFile(path+".title", []byte(title), 0600)
+	}
+	if title, err := os.ReadFile(path + ".title"); err == nil {
+		_ = os.Setenv("FAKE_CLI_PR_TITLE", string(title))
+	}
+	switch {
+	case strings.HasPrefix(joined, "auth status"):
+	case strings.HasPrefix(joined, "pr list"):
+		if exists != nil {
+			fmt.Print("[]")
+		} else {
+			fmt.Print(`[{"number":99,"url":"https://github.com/test/repo/pull/99","baseRefName":"main"}]`)
+		}
+	case strings.HasPrefix(joined, "pr create"):
+		if !strings.Contains(joined, "--draft") {
+			os.Exit(2)
+		}
+		fakeGHStorePRBody(args)
+		fmt.Print("https://github.com/test/repo/pull/99")
+	case strings.HasPrefix(joined, "pr ready"):
+		_ = os.WriteFile(path+".ready", []byte("ready"), 0600)
+	case strings.Contains(joined, "--json isDraft,state,headRefOid,autoMergeRequest"):
+		_, ready := os.Stat(path + ".ready")
+		head := os.Getenv("FAKE_CLI_PR_HEAD_SHA")
+		_ = json.NewEncoder(os.Stdout).Encode(map[string]interface{}{"isDraft": ready != nil, "state": "OPEN", "headRefOid": head, "autoMergeRequest": nil})
+	case strings.HasPrefix(joined, "pr view") || strings.HasPrefix(joined, "pr edit"):
+		fakeGHHandlePRContentCommands(args, joined)
+	case strings.HasPrefix(joined, "api"):
+		if strings.Contains(joined, "/deployments/") {
+			fmt.Print(`[{"state":"success","environment_url":"https://preview.example.test/current"}]`)
+		} else if strings.Contains(joined, "/deployments") {
+			fmt.Printf(`[{"id":1,"sha":%q,"environment":"PR preview"}]`, os.Getenv("FAKE_CLI_PR_HEAD_SHA"))
+		} else {
+			fmt.Print(`{}`)
+		}
+	default:
+		fmt.Fprintln(os.Stderr, "unsupported preview fake:", joined)
+		os.Exit(2)
+	}
+	os.Exit(0)
+}

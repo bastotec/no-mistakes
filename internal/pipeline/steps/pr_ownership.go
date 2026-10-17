@@ -171,8 +171,11 @@ func updateOwnedPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, initia
 			return err
 		}
 		appliedNarrative := ""
-		if current.Body == "" && !parts.managed {
+		if (current.Body == "" && !parts.managed) || emptyTestPreviewBody(sctx, parts) {
 			parts.before = emptyNarrative
+			if parts.managed && emptyNarrative != "" {
+				parts.before += "\n\n"
+			}
 			appliedNarrative = emptyNarrative
 		}
 		content, err := composeOwnedPRContent(parts, title, appendix, bodyLimit)

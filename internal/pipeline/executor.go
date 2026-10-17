@@ -65,6 +65,7 @@ type Executor struct {
 	mu                          sync.Mutex
 	approvalCh                  chan approvalResponse // buffered channel for approval responses
 	waiting                     bool                  // true when blocked on approval
+	waitingContext              *StepContext          // valid only while waiting; guarded by mu
 	waitingStep                 types.StepName        // which step is currently awaiting approval
 	waitingStepResultID         string
 	waitingRoundID              string
@@ -613,6 +614,7 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 	e.mu.Lock()
 	e.waiting = true
 	e.waitingStep = gate.step.Name()
+	e.waitingContext = reconcileCtx
 	e.waitingStepResultID = gate.stepResult.ID
 	e.waitingRoundID = gate.lastRoundID
 	e.waitingFindings = gate.findings
@@ -1481,6 +1483,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		e.mu.Lock()
 		e.waiting = true
 		e.waitingStep = stepName
+		e.waitingContext = sctx
 		e.waitingStepResultID = sr.ID
 		e.waitingRoundID = currentRoundID
 		e.waitingFindings = outcome.Findings
