@@ -3,7 +3,7 @@ title: Pipeline Steps
 description: Reference for each step in the validation pipeline.
 ---
 
-This is the per-step reference. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
+This is the per-step reference for ordinary runs. The [existing-PR continuation contract](/no-mistakes/reference/cli/#history-safe-existing-pr-continuation) owns that operation's exceptions to integration, step skipping, local Test, CI repair delivery and CI completion below. For the overview and rationale, see [Pipeline](/no-mistakes/concepts/pipeline/). For the fix loop, see [Auto-Fix Loop](/no-mistakes/concepts/auto-fix/).
 
 ```text
 intent → rebase → review → jev* → test → document → lint → push → pr → ci

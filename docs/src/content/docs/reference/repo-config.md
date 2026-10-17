@@ -199,7 +199,7 @@ Declare that this repository intentionally has no CI.
 | Type | `bool` |
 | Default | `false` |
 
-When `true` and the forge reports **zero** checks on the PR head, the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green.
+For ordinary runs, when `true` and the forge reports **zero** checks on the PR head, the CI monitor treats that empty result as all-checks-passed and `axi run` may return `outcome: checks-passed`. The monitor log names the declaration (`no_ci: true`) so the positive evidence stays inspectable rather than silently equating every empty forge response with green. [Existing-PR continuation](/no-mistakes/reference/cli/#history-safe-existing-pr-continuation) has a separate mandatory CI contract.
 
 Absence of this field means CI is expected. A zero-length check result then stays not-ready for as long as the forge reports no checks - elapsed time, grace periods, workflow-file presence or absence, prior check history, and branch names are not evidence.
 
@@ -709,7 +709,7 @@ ci:
   revalidate_repairs: true
 ```
 
-One rule decides how every CI repair is delivered, on every CI-fix path - automatic and manual, CI failure and merge conflict alike:
+The following rule applies to ordinary runs on every CI-fix path - automatic and manual, CI failure and merge conflict alike. For [existing-PR continuation](/no-mistakes/reference/cli/#history-safe-existing-pr-continuation), that operation's stricter repair-delivery contract takes precedence.
 
 > A repair is published without revalidating only when its continuity with the reviewed, published head can be **proven**. When that continuity cannot be proven, the repair revalidates from Review.
 
