@@ -704,6 +704,14 @@ func fakeCIGHSequenceHandler(args []string) {
 		os.Exit(0)
 	}
 	if strings.Contains(joined, "pr view") && strings.Contains(joined, "--json state") {
+		if path := os.Getenv("FAKE_CLI_STATE_PATH"); path != "" {
+			raw, err := os.ReadFile(path)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			state = strings.TrimSpace(string(raw))
+		}
 		fmt.Println(state)
 		os.Exit(0)
 	}

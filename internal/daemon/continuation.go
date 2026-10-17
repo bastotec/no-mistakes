@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -40,6 +41,11 @@ func (m *RunManager) HandleStartContinuationRun(ctx context.Context, p *ipc.Star
 			return "", err
 		}
 		gateDir := m.paths.RepoDir(repo.ID)
+		svc := branchsync.Service{DB: m.db, Repo: repo, WorkDir: p.WorkDir, GateDir: gateDir, Paths: m.paths}
+		state := svc.InspectCached(ctx)
+		if state.State == branchsync.StatePipelineOwned || state.State == branchsync.StatePushInProgress {
+			return "", fmt.Errorf("continuation: branch custody is not available: %s", state.Safety)
+		}
 		if err := git.ValidateBareRepository(ctx, gateDir); err != nil {
 			return "", err
 		}

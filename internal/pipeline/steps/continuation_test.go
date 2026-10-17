@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -347,5 +348,199 @@ func TestContinuation_ReadinessRefusalNeverLogsGreen(t *testing.T) {
 	run, _ := f.s.DB.GetRun(f.s.Run.ID)
 	if run.CIReadyAt != nil {
 		t.Fatal("unpublished head marked ready")
+	}
+}
+
+func (f *continuationFixture) publish(t *testing.T) {
+	t.Helper()
+	recordReviewApproval(t, f.s, f.submitted)
+	if err := publishRunHead(f.s, f.submitted, "", nil); err != nil {
+		t.Fatal(err)
+	}
+	f.setPR(f.submitted, "main")
+}
+
+func TestContinuation_PublishedPolicySettlesOnlyExactPRHead(t *testing.T) {
+	oldDelay := prHeadSettleDelay
+	prHeadSettleDelay = 0
+	t.Cleanup(func() { prHeadSettleDelay = oldDelay })
+	for _, scenario := range []string{"settles", "stays-stale", "source-moves", "base-moves", "pr-base-moves"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newContinuationFixture(t)
+			f.publish(t)
+			marker := filepath.Join(t.TempDir(), "first-read")
+			f.s.Env = append(f.s.Env, "FAKE_CLI_EXISTING_PR_JSON_FIRST="+existingPRFixture(f.published), "FAKE_CLI_EXISTING_PR_FIRST_MARKER="+marker)
+			switch scenario {
+			case "stays-stale":
+				f.setPR(f.published, "main")
+			case "source-moves":
+				gitCmd(t, f.fork, "update-ref", "refs/heads/feature", f.published)
+			case "base-moves":
+				gitCmd(t, f.upstream, "update-ref", "refs/heads/main", f.base)
+			case "pr-base-moves":
+				f.setPR(f.submitted, "other")
+			}
+			err := AssertContinuationPolicy(f.s)
+			if (err == nil) != (scenario == "settles") {
+				t.Fatalf("policy error = %v", err)
+			}
+			if scenario == "settles" {
+				if _, err := os.Stat(marker); err != nil {
+					t.Fatalf("stale response not exercised: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func continuationCIEnv(f *continuationFixture, env []string) []string {
+	return append(env,
+		"FAKE_CLI_PR_HEAD_SHA="+f.submitted,
+		"FAKE_CLI_PR_BASE=main",
+		"FAKE_CLI_EXISTING_PR_JSON="+existingPRFixture(f.submitted),
+		"FAKE_CLI_EXISTING_PR_ENDPOINT=repos/upstream/widgets/pulls/168",
+	)
+}
+
+func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testing.T) {
+	for _, scenario := range []string{"green", "jobless-workflow-fails", "workflow-discovery-fails", "pending", "empty", "different-pr-head", "unpublished-repair", "later-worktree-head"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newContinuationFixture(t)
+			f.publish(t)
+			checks := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
+			if scenario == "pending" {
+				checks = `[{"name":"build","state":"PENDING","bucket":"pending"}]`
+			} else if scenario == "empty" {
+				checks = `[]`
+			}
+			f.s.Env = continuationCIEnv(f, fakeCIGH(t, "OPEN", checks))
+			switch scenario {
+			case "jobless-workflow-fails":
+				f.s.Env = append(f.s.Env, `FAKE_CLI_WORKFLOW_RUNS=[{"id":101,"name":"workflow-validation","status":"completed","conclusion":"failure"}]`)
+			case "workflow-discovery-fails":
+				f.s.Env = append(f.s.Env, `FAKE_CLI_WORKFLOW_RUNS=not-json`)
+			case "different-pr-head":
+				f.s.Env = append(f.s.Env, "FAKE_CLI_PR_HEAD_SHA="+f.published)
+			case "unpublished-repair":
+				f.s.Run.LastPushedSHA = &f.published
+			case "later-worktree-head":
+				gitCmd(t, f.s.WorkDir, "commit", "--allow-empty", "-m", "unvalidated repair")
+			}
+			reason, err := (&CIStep{}).VerifyApprovalOverride(f.s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if (reason == "") != (scenario == "green") {
+				t.Fatalf("approval reason = %q", reason)
+			}
+			if scenario == "jobless-workflow-fails" && !strings.Contains(reason, "workflow-validation") {
+				t.Fatalf("jobless workflow missing from refusal: %s", reason)
+			}
+		})
+	}
+}
+
+func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.T) {
+	for _, state := range []string{"CLOSED", "MERGED"} {
+		for _, entry := range []string{"monitor", "reconcile"} {
+			for _, scenario := range []string{"pending", "failure", "empty", "jobless-workflow-fails", "workflow-discovery-fails", "different-pr-head", "later-worktree-head", "green"} {
+				t.Run(state+"/"+entry+"/"+scenario, func(t *testing.T) {
+					f := newContinuationFixture(t)
+					f.publish(t)
+					if err := f.s.DB.UpdateRunStatus(f.s.Run.ID, types.RunRunning); err != nil {
+						t.Fatal(err)
+					}
+					if err := f.s.DB.UpdateRunPRState(f.s.Run.ID, "open"); err != nil {
+						t.Fatal(err)
+					}
+					stepRow, err := f.s.DB.InsertStepResult(f.s.Run.ID, types.StepCI)
+					if err != nil {
+						t.Fatal(err)
+					}
+					status := types.StepStatusRunning
+					if entry == "reconcile" {
+						status = types.StepStatusAwaitingApproval
+					}
+					if err := f.s.DB.UpdateStepStatus(stepRow.ID, status); err != nil {
+						t.Fatal(err)
+					}
+					checks := `[{"name":"build","state":"SUCCESS","bucket":"pass"}]`
+					switch scenario {
+					case "pending":
+						checks = `[{"name":"build","state":"PENDING","bucket":"pending"}]`
+					case "failure":
+						checks = `[{"name":"build","state":"FAILURE","bucket":"fail"}]`
+					case "empty":
+						checks = `[]`
+					}
+					step := (&CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return f.tip, true })
+					polls := 0
+					if entry == "monitor" {
+						statePath := filepath.Join(t.TempDir(), "state")
+						if err := os.WriteFile(statePath, []byte("OPEN"), 0600); err != nil {
+							t.Fatal(err)
+						}
+						f.s.Env = continuationCIEnv(f, fakeCIGHSequence(t, "OPEN", []string{`[{"name":"build","state":"PENDING","bucket":"pending"}]`, checks}))
+						f.s.Env = append(f.s.Env, "FAKE_CLI_STATE_PATH="+statePath)
+						step.SetWaitForNextPoll(func(context.Context, time.Duration) error {
+							polls++
+							if polls > 1 {
+								t.Fatal("terminal observation kept polling")
+							}
+							if scenario == "later-worktree-head" {
+								gitCmd(t, f.s.WorkDir, "commit", "--allow-empty", "-m", "unvalidated repair")
+							}
+							return os.WriteFile(statePath, []byte(state), 0600)
+						})
+					} else {
+						f.s.Env = continuationCIEnv(f, fakeCIGH(t, state, checks))
+						if scenario == "later-worktree-head" {
+							gitCmd(t, f.s.WorkDir, "commit", "--allow-empty", "-m", "unvalidated repair")
+						}
+					}
+					switch scenario {
+					case "jobless-workflow-fails":
+						f.s.Env = append(f.s.Env, `FAKE_CLI_WORKFLOW_RUNS=[{"id":101,"name":"workflow-validation","status":"completed","conclusion":"failure"}]`)
+					case "workflow-discovery-fails":
+						f.s.Env = append(f.s.Env, `FAKE_CLI_WORKFLOW_RUNS=not-json`)
+					case "different-pr-head":
+						f.s.Env = append(f.s.Env, "FAKE_CLI_PR_HEAD_SHA="+f.published)
+					}
+					if entry == "monitor" && scenario == "workflow-discovery-fails" {
+						f.s.Env = append(f.s.Env, "FAKE_CLI_STATE_PATH=", "FAKE_CLI_STATE="+state)
+					}
+					if entry == "monitor" {
+						_, err = step.Execute(f.s)
+						if scenario != "workflow-discovery-fails" && polls != 1 {
+							t.Fatalf("did not observe pending CI before terminal state: polls=%d err=%v", polls, err)
+						}
+					} else {
+						var resolved bool
+						resolved, err = step.ReconcileApprovalGate(f.s)
+						if resolved != (scenario == "green") {
+							t.Fatalf("resolved = %v, err = %v", resolved, err)
+						}
+					}
+					if (err == nil) != (scenario == "green") {
+						t.Fatalf("terminal CI error = %v", err)
+					}
+					stored, err := f.s.DB.GetRun(f.s.Run.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					storedStep, err := f.s.DB.GetStepResult(stepRow.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if scenario == "green" {
+						if stored.Status != types.RunCompleted || storedStep.Status != types.StepStatusCompleted || stored.PRState == nil || *stored.PRState != strings.ToLower(state) {
+							t.Fatalf("green terminal not completed: run=%+v step=%+v", stored, storedStep)
+						}
+					} else if stored.Status != types.RunRunning || storedStep.Status != status || stored.CIReadyAt != nil || (stored.PRState != nil && *stored.PRState != "open") {
+						t.Fatalf("terminal state bypassed CI: run=%+v step=%+v", stored, storedStep)
+					}
+				})
+			}
+		}
 	}
 }

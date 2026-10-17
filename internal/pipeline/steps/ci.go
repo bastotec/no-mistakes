@@ -133,9 +133,16 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 	if err != nil {
 		return false, fmt.Errorf("extract PR number: %w", err)
 	}
-	state, err := host.GetPRState(sctx.Ctx, &scm.PR{Number: prNumber, URL: prURL})
+	pr := &scm.PR{Number: prNumber, URL: prURL}
+	state, err := host.GetPRState(sctx.Ctx, pr)
 	if err != nil {
 		return false, err
+	}
+	if state == scm.PRStateMerged || state == scm.PRStateClosed {
+		if err := verifyContinuationTerminalCI(sctx, host, pr); err != nil {
+			clearCIMonitorReady(sctx)
+			return false, err
+		}
 	}
 	switch state {
 	case scm.PRStateMerged:
@@ -207,6 +214,9 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		return fmt.Sprintf("could not verify live CI state: %v", err), nil
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
+	if sctx.Run.ContinuationJSON != nil {
+		pr.HeadSHA = sctx.Run.HeadSHA
+	}
 	// A preserve-history run's whole point is the pinned head/base
 	// relationship, so a refusal still standing at approval time is part of the
 	// override's reason even when every live check is green. Both conditions
@@ -216,6 +226,9 @@ func (s *CIStep) VerifyApprovalOverride(sctx *pipeline.StepContext) (string, err
 		reasons = append(reasons, refusal.Error())
 	}
 	checks, err := host.GetChecks(ctx, pr)
+	if refusal := assertContinuationCIFinalHead(sctx, pr); refusal != nil {
+		reasons = append(reasons, refusal.Error())
+	}
 	switch {
 	case err != nil:
 		reasons = append(reasons, fmt.Sprintf("could not verify live CI state: %v", err))
@@ -511,6 +524,12 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		// Check PR state (merged/closed -> exit)
 		prStateKnown := true
 		state, err := host.GetPRState(ctx, pr)
+		if err == nil && (state == scm.PRStateMerged || state == scm.PRStateClosed) {
+			if err := verifyContinuationTerminalCI(sctx, host, pr); err != nil {
+				clearCIMonitorReady(sctx)
+				return nil, err
+			}
+		}
 		if err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not check PR state: %v", err))
 			prStateKnown = false
@@ -821,17 +840,52 @@ func clearCIMonitorReady(sctx *pipeline.StepContext) {
 	}
 }
 
+func assertContinuationCIFinalHead(sctx *pipeline.StepContext, pr *scm.PR) error {
+	if sctx.Run.ContinuationJSON == nil {
+		return nil
+	}
+	if sctx.Run.LastPushedSHA == nil || *sctx.Run.LastPushedSHA != sctx.Run.HeadSHA ||
+		(pr != nil && pr.HeadSHA != sctx.Run.HeadSHA) {
+		return historyRefusal("continuation requires checks on the exact final published head")
+	}
+	if err := pipeline.AssertContinuationHistory(sctx); err != nil {
+		return err
+	}
+	head, err := stepGitHeadSHA(sctx)
+	if err != nil || head != sctx.Run.HeadSHA {
+		return historyRefusal("continuation final worktree head differs from checked head")
+	}
+	return nil
+}
+
+func verifyContinuationTerminalCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+	if sctx.Run.ContinuationJSON == nil {
+		return nil
+	}
+	pr.HeadSHA = sctx.Run.HeadSHA
+	checks, err := host.GetChecks(sctx.Ctx, pr)
+	if err != nil {
+		return historyRefusal("continuation: verify terminal PR CI: %v", err)
+	}
+	if err := assertContinuationCIFinalHead(sctx, pr); err != nil {
+		return err
+	}
+	if !allChecksPassed(checks) {
+		return historyRefusal("continuation requires exact-final-head green CI before terminal completion")
+	}
+	return nil
+}
+
 func setCIMonitorReadiness(sctx *pipeline.StepContext, ready, declaredNoCI bool) error {
 	if ready && sctx.Run.ContinuationJSON != nil {
-		if declaredNoCI || sctx.Run.LastPushedSHA == nil || *sctx.Run.LastPushedSHA != sctx.Run.HeadSHA {
+		if declaredNoCI {
 			return historyRefusal("continuation requires checks on the exact final published head")
+		}
+		if err := assertContinuationCIFinalHead(sctx, nil); err != nil {
+			return err
 		}
 		if err := AssertContinuationPolicy(sctx); err != nil {
 			return err
-		}
-		head, err := stepGitHeadSHA(sctx)
-		if err != nil || head != sctx.Run.HeadSHA {
-			return historyRefusal("continuation final worktree head differs from checked head")
 		}
 	}
 	declaredNoCI = ready && declaredNoCI

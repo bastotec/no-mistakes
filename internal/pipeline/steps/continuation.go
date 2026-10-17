@@ -29,16 +29,14 @@ func AssertContinuationPolicy(sctx *pipeline.StepContext) error {
 	guard := *sctx
 	guard.Ctx = ctx
 	sctx = &guard
-	_, pr, err := ValidateExistingPRIdentity(sctx)
-	if err != nil {
-		return historyRefusal("continuation: verify same PR: %v", err)
-	}
 	expected := pins.PRHead
+	validate := ValidateExistingPR
 	if sctx.Run.LastPushedSHA != nil {
 		expected = *sctx.Run.LastPushedSHA
+		validate = ValidateExistingPublishedPR
 	}
-	if pr == nil || pr.HeadSHA != expected {
-		return historyRefusal("continuation: external PR head changed")
+	if _, pr, err := validate(sctx, expected); err != nil || pr == nil {
+		return historyRefusal("continuation: verify same PR: %v", err)
 	}
 	run := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
 	head, err := lsRemoteSHA(run, resolvePushURL(sctx), normalizedBranchRef(sctx.Run.Branch))
