@@ -36,12 +36,10 @@ func installTestPreviewForge(t *testing.T) string {
 
 func TestManagedPreviewReplacement_AllCreationEntrypoints(t *testing.T) {
 	body := installTestPreviewForge(t)
-	for _, interrupted := range []bool{false, true} {
+	for _, creation := range []string{"bound", "interrupted", "interrupted-multiple-prs"} {
+		interrupted := creation != "bound"
 		for _, path := range []string{"push-new-head", "proof-new-head", "fresh-new-head", "rerun-newer-unbound-run", "existing-pr", "history", "active-push"} {
-			name := path
-			if interrupted {
-				name += "-create-response-lost"
-			}
+			name := path + "-" + creation
 			t.Run(name, func(t *testing.T) {
 				p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepReview}} })
 				repo, base := setupTestGitRepo(t, p, d, "preview-replacement")
@@ -79,6 +77,18 @@ func TestManagedPreviewReplacement_AllCreationEntrypoints(t *testing.T) {
 					}
 				} else if err := d.BindTestPreview(owner.ID, url); err != nil {
 					t.Fatal(err)
+				}
+				host := github.New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+					return exec.CommandContext(ctx, name, args...)
+				}, nil, "github.com", "test/repo")
+				if creation == "interrupted-multiple-prs" {
+					if err := os.WriteFile(body+".other-open", nil, 0600); err != nil {
+						t.Fatal(err)
+					}
+					pr, err := host.FindPR(context.Background(), "feature", "")
+					if err != nil || pr == nil || pr.Number != "100" || pr.BaseBranch != "release" {
+						t.Fatalf("expected newer unmarked PR to be discovered first: %+v, %v", pr, err)
+					}
 				}
 				gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "later change")
 				head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
@@ -142,6 +152,19 @@ func TestManagedPreviewReplacement_AllCreationEntrypoints(t *testing.T) {
 				defer client.Close()
 				if err := client.Call(method, params, nil); err == nil || !strings.Contains(err.Error(), "managed Test preview belongs only to that run") {
 					t.Fatalf("launch error=%v", err)
+				}
+				if creation == "interrupted-multiple-prs" {
+					if err := os.Remove(body + ".other-open"); err != nil {
+						t.Fatal(err)
+					}
+					pr, err := host.FindPR(context.Background(), "feature", "")
+					if err != nil || pr == nil || pr.URL != url || pr.BaseBranch != "main" {
+						t.Fatalf("expected original preview after other PR closed: %+v, %v", pr, err)
+					}
+					content, err := host.GetPRContent(context.Background(), pr)
+					if err != nil || content.Body != "<!-- no-mistakes:pr-validation:"+owner.ID+" -->" {
+						t.Fatalf("preview ownership marker changed: %+v, %v", content, err)
+					}
 				}
 				after, err := d.GetRunsByRepo(repo.ID)
 				if err != nil {

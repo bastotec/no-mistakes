@@ -54,17 +54,15 @@ func TestPreviewReplacementOwner(sctx *pipeline.StepContext) (string, error) {
 	if !unbound {
 		return "", nil
 	}
-	pr, err := host.FindPR(sctx.Ctx, sctx.Run.Branch, "")
-	if err != nil || pr == nil {
-		return "", err
-	}
-	content, err := host.(scm.PRContentReader).GetPRContent(sctx.Ctx, pr)
+	bodies, err := host.(*github.Host).OpenPRBodies(sctx.Ctx, sctx.Run.Branch)
 	if err != nil {
 		return "", err
 	}
-	for _, run := range runs {
-		if strings.Contains(content.Body, testPreviewMarker(run.RunID)) {
-			return run.RunID, nil
+	for _, body := range bodies {
+		for _, run := range runs {
+			if strings.Contains(body, testPreviewMarker(run.RunID)) {
+				return run.RunID, nil
+			}
 		}
 	}
 	return "", nil
