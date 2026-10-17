@@ -30,11 +30,12 @@ A repository can add to this sequence but never subtract from it: [`gates`](/no-
 The pipeline is opinionated so that "passed the gate" has a stable meaning:
 
 - the branch was checked against fresh remote upstream and the pushed-branch target first
-- review, tests, user-facing test evidence when available, docs, and lint happened before any branch push to the configured target
+- review, tests, user-facing test evidence when available, docs, and lint happened before the normal Push → PR → CI tail
 - every repository-declared gate ran at its configured point before Push, unless the operator explicitly skipped it after a failure
 - the human stayed in control when a step needed judgment
 - the final branch update was guarded against discarding unincorporated commits already on the push target
-- push, PR creation, and CI monitoring only happened after the local gate was satisfied
+
+An explicitly requested [Test preview](/no-mistakes/reference/cli/#no-mistakes-axi-publish-test-preview) can publish earlier; its command reference owns that exception and the post-publication validation requirements. It does not change the step order or mean the gate passed.
 
 ## The ten steps
 

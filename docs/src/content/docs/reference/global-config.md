@@ -961,7 +961,7 @@ Open pull requests created on GitHub as drafts (`gh pr create --draft`).
 | Type | `bool` |
 | Default | `false` |
 
-Only affects PR creation; existing PRs are not toggled between draft and ready. GitHub only — ignored for other providers.
+Ordinarily affects only PR creation; existing PRs are not toggled between draft and ready. The exception is a run-owned [Test preview](/no-mistakes/reference/cli/#no-mistakes-axi-publish-test-preview): it is always created as a draft, and the normal PR step readies it after validation only when this setting is `false`. GitHub only — ignored for other providers.
 This is a global default. Per-repo config can override it via `providers.github.draft_pull_requests`.
 
 ### providers.gitlab.draft_pull_requests

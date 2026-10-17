@@ -95,11 +95,10 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 
 // publishRunHead is the single guarded publication path for a run's head. The
 // Push step, a CI repair published without revalidation
-// (ci.revalidate_repairs: false), and explicit parked-Test preview publication
-// go through it, so the review-approved-head
-// continuity check, the force-with-lease anchor, the remote verification, the
-// push binding, and the gate-mirror update are written once and can never
-// drift apart between the two callers.
+// (ci.revalidate_repairs: false), and explicit pending/parked-Test preview
+// publication go through it, so the review-approved-head continuity check,
+// the force-with-lease anchor, the remote verification, the push binding, and
+// the gate-mirror update are written once and cannot drift between callers.
 //
 // localRefUpdate, when non-empty, is the SHA the run's local branch ref is
 // moved to after a verified push. Callers that already advanced the ref with
