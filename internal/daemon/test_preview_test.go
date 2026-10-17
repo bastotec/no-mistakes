@@ -107,6 +107,14 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 	if err := client.Call(ipc.MethodPublishTestPreview, params, nil); err == nil {
 		t.Fatal("accepted stale head")
 	}
+	// A push must not cancel the parked executor and leave its draft orphaned.
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: gate, Ref: "refs/heads/feature", Old: head, New: head}, nil); err == nil || !strings.Contains(err.Error(), "managed Test preview belongs only to that run") {
+		t.Fatalf("active preview replacement error=%v", err)
+	}
+	stillParked, err := database.GetRun(started.RunID)
+	if err != nil || stillParked.Status != types.RunRunning || stillParked.AwaitingAgentSince == nil {
+		t.Fatalf("replacement cancelled parked owner: %+v, %v", stillParked, err)
+	}
 	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: started.RunID}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -139,6 +147,10 @@ func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
 	if err := client.Call(ipc.MethodStartFreshRun, &request, &replay); err != nil || replay.Receipt.RunID != original.ID || replay.Receipt.Disposition != "reused" {
 		t.Fatalf("same-run replay=%+v error=%v", replay, err)
 	}
+	var pushedReplay ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: head, New: head, Intent: request.Intent, LaunchNonce: request.LaunchNonce, ValidationGeneration: request.ValidationGeneration}, &pushedReplay); err != nil || pushedReplay.RunID != original.ID {
+		t.Fatalf("same-run push replay=%+v error=%v", pushedReplay, err)
+	}
 	before, err := database.GetRunsByRepo(repo.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +162,9 @@ func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
 	}{
 		{"rerun", ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "main", PreviousRunID: original.ID}},
 		{"proof-mode", ipc.MethodStartFreshRun, &request},
+		{"push", ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: head, New: head}},
+		{"proof-push-with-base", ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: head, New: head, Intent: request.Intent, LaunchNonce: "proof-push-preview", ValidationGeneration: "generation"}},
+		{"proof-push-new-branch", ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: strings.Repeat("0", 40), New: head, Intent: request.Intent, LaunchNonce: "proof-push-zero-base-preview", ValidationGeneration: "generation"}},
 	} {
 		t.Run(launch.name, func(t *testing.T) {
 			err := client.Call(launch.method, launch.params, nil)

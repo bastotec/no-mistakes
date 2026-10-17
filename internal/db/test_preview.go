@@ -35,6 +35,20 @@ func (d *DB) TestPreviewPR(runID string) (string, error) {
 	return url, err
 }
 
+// BranchTestPreviewOwner finds the run whose still-open preview a replacement
+// could rediscover by branch. The binding is authoritative even if PRURL was
+// never persisted, or a newer run on the branch has no binding.
+func (d *DB) BranchTestPreviewOwner(repoID, branch string) (string, error) {
+	var owner string
+	err := d.sql.QueryRow(`SELECT r.id FROM runs r JOIN run_test_previews p ON p.run_id = r.id
+		WHERE r.repo_id = ? AND r.branch = ? AND lower(trim(coalesce(r.pr_state, ''))) NOT IN ('closed', 'merged')
+		ORDER BY r.created_at DESC, r.id DESC LIMIT 1`, repoID, branch).Scan(&owner)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return owner, err
+}
+
 func (d *DB) RequireTestPreviewValidation(runID string) error {
 	_, err := d.sql.Exec(`UPDATE run_test_previews SET validated_head = NULL WHERE run_id = ?`, runID)
 	return err

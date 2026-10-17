@@ -1172,6 +1172,17 @@ func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree st
 	return m.db.CopyRunSurvivedWork(fromRunID, toRunID, worktree)
 }
 
+func (m *RunManager) refuseManagedTestPreviewReplacement(repoID, branch string) error {
+	owner, err := m.db.BranchTestPreviewOwner(repoID, branch)
+	if err != nil {
+		return fmt.Errorf("read branch preview ownership: %w", err)
+	}
+	if owner != "" {
+		return fmt.Errorf("cannot replace run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", owner)
+	}
+	return nil
+}
+
 func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
 	// An explicit cross-repository URL must never escape into a legacy host
 	// selected from origin. Rerun carries its complete constraint separately;
@@ -1438,6 +1449,16 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("preserve-history: run %[1]s pins branch %[2]s to its integration, recorded at %[3]s, so no superseding run was started. "+
 			"If a push triggered this launch, it has already moved the gate branch and run %[1]s cannot publish until the gate branch is back at %[3]s: "+
 			"restore it with `git push --force %[4]s %[3]s:refs/heads/%[2]s`, or abort run %[1]s", active.ID, branch, recorded, gate.RemoteName)
+	}
+
+	// Every replacement reaches this boundary under the branch lock, including
+	// pushes with a previous head and launches that inherit no PR URL. Refuse
+	// before cancelling the owner or inserting a run: branch discovery could
+	// otherwise adopt its draft without the run-owned preview binding. Receipt
+	// replay/reattachment returns above this creation path and stays available.
+	if err := m.refuseManagedTestPreviewReplacement(repo.ID, branch); err != nil {
+		trackStartFailure("managed_test_preview")
+		return "", err
 	}
 
 	// A branch keeps the pull request an explicit association proved, so every
