@@ -28,7 +28,7 @@ func TestTestPreviewBindingSurvivesReopenAndRefusesReplacement(t *testing.T) {
 	if err := d.BindTestPreview(run.ID, "https://github.com/test/repo/pull/100"); err == nil {
 		t.Fatal("replaced binding")
 	}
-	if needed, err := d.TestPreviewNeedsValidation(run.ID, "head"); err != nil || !needed {
+	if needed, err := d.TestPreviewNeedsValidation(run.ID); err != nil || !needed {
 		t.Fatalf("new preview validation=%v, %v", needed, err)
 	}
 	if err := d.RecordTestPreviewValidation(run.ID, "head"); err != nil {
@@ -45,16 +45,19 @@ func TestTestPreviewBindingSurvivesReopenAndRefusesReplacement(t *testing.T) {
 	if got, err := d.TestPreviewPR(run.ID); err != nil || got != url {
 		t.Fatalf("binding=%q,%v", got, err)
 	}
-	if needed, err := d.TestPreviewNeedsValidation(run.ID, "head"); err != nil || needed {
+	if needed, err := d.TestPreviewNeedsValidation(run.ID); err != nil || needed {
 		t.Fatalf("persisted validation=%v, %v", needed, err)
 	}
-	if needed, err := d.TestPreviewNeedsValidation(run.ID, "changed"); err != nil || !needed {
-		t.Fatalf("changed head validation=%v, %v", needed, err)
+	if err := d.UpdateRunHeadSHA(run.ID, "changed"); err != nil {
+		t.Fatal(err)
+	}
+	if needed, err := d.TestPreviewNeedsValidation(run.ID); err != nil || needed {
+		t.Fatalf("post-validation head advance=%v, %v", needed, err)
 	}
 	if err := d.RequireTestPreviewValidation(run.ID); err != nil {
 		t.Fatal(err)
 	}
-	if needed, err := d.TestPreviewNeedsValidation(run.ID, "head"); err != nil || !needed {
+	if needed, err := d.TestPreviewNeedsValidation(run.ID); err != nil || !needed {
 		t.Fatalf("republished validation=%v, %v", needed, err)
 	}
 }

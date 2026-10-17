@@ -195,7 +195,7 @@ func TestPublishTestPreview_PendingPublishesBeforeFirstAttempt(t *testing.T) {
 	if attempts.Load() != 1 {
 		t.Fatalf("Test attempts=%d", attempts.Load())
 	}
-	if needed, err := database.TestPreviewNeedsValidation(run.ID, run.HeadSHA); err != nil || !needed {
+	if needed, err := database.TestPreviewNeedsValidation(run.ID); err != nil || !needed {
 		t.Fatalf("gated Test validated preview: %v, %v", needed, err)
 	}
 	if err := e.Respond(types.StepTest, types.ActionAbort, nil); err != nil {
@@ -226,7 +226,7 @@ func TestPublishTestPreview_ApprovalReexecutesUntilValidated(t *testing.T) {
 				return &StepOutcome{}, nil
 			}}
 			pr := &adaptiveCallStep{name: types.StepPR, fn: func(s *StepContext) (*StepOutcome, error) {
-				needed, err := database.TestPreviewNeedsValidation(run.ID, run.HeadSHA)
+				needed, err := database.TestPreviewNeedsValidation(run.ID)
 				if err != nil {
 					return nil, err
 				}

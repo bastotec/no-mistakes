@@ -76,8 +76,10 @@ func TestPublishTestPreview_RealPushSamePRPendingAttestation(t *testing.T) {
 	if _, err := s.DB.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.DB.InsertStepResult(s.Run.ID, types.StepPR); err != nil {
-		t.Fatal(err)
+	for _, step := range []types.StepName{types.StepDocument, types.StepLint, types.StepPush, types.StepPR} {
+		if _, err := s.DB.InsertStepResult(s.Run.ID, step); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if err := s.DB.UpdateRunStatus(s.Run.ID, types.RunRunning); err != nil {
 		t.Fatal(err)
@@ -97,11 +99,20 @@ func TestPublishTestPreview_RealPushSamePRPendingAttestation(t *testing.T) {
 		}
 		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
 	}}
+	documentAgent := &mockAgent{name: "document", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if err := os.WriteFile(filepath.Join(opts.CWD, "preview-notes.md"), []byte("Feature documentation\n"), 0600); err != nil {
+			return nil, err
+		}
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"document feature"}`)}, nil
+	}}
 	executor := pipeline.NewExecutor(s.DB, paths.WithRoot(t.TempDir()), s.Config, s.Agent, []pipeline.Step{
 		&previewContinuationStep{Step: &TestStep{}, env: s.Env, gate: gate, ag: testAgent},
+		&previewContinuationStep{Step: &DocumentStep{}, env: s.Env, gate: gate, ag: documentAgent},
+		&previewContinuationStep{Step: &LintStep{}, env: s.Env, gate: gate, ag: documentAgent},
+		&previewContinuationStep{Step: &PushStep{}, env: s.Env, gate: gate, ag: s.Agent},
 		&previewContinuationStep{Step: &PRStep{}, env: s.Env, gate: gate, ag: s.Agent},
 	}, nil)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
 	finished := make(chan struct{})
@@ -135,6 +146,62 @@ func TestPublishTestPreview_RealPushSamePRPendingAttestation(t *testing.T) {
 	}
 	if _, err := os.Stat(bodyFile + ".ready"); err != nil {
 		t.Fatalf("validated preview not readied: %v", err)
+	}
+	publishedHead := gitCmd(t, upstream, "rev-parse", "feature")
+	if publishedHead == head {
+		t.Fatal("housekeeping did not advance the published head")
+	}
+	completedTest, err := s.DB.GetStepResult(sr.ID)
+	if err != nil || completedTest == nil || completedTest.FindingsJSON == nil {
+		t.Fatalf("completed Test=%+v, %v", completedTest, err)
+	}
+	findingsAfter, err := types.ParseFindingsJSON(*completedTest.FindingsJSON)
+	if err != nil || findingsAfter.TestedHeadSHA != head {
+		t.Fatalf("tested-head disclosure=%+v, %v", findingsAfter, err)
+	}
+	attestation := parsePipelineAttestationForTest(t, string(final))
+	if attestation.HeadSHA != publishedHead || attestation.LiveValidation != nil {
+		t.Fatalf("housekeeping publication claimed stale live validation: %+v", attestation)
+	}
+}
+
+func TestTestPreview_CIRepairRevalidationUsesUnpublishedHead(t *testing.T) {
+	fixture := newCIRepairFixture(t, true, writeCIFix)
+	s := fixture.sctx
+	if err := s.DB.BindTestPreview(s.Run.ID, *s.Run.PRURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.RecordTestPreviewValidation(s.Run.ID, s.Run.HeadSHA); err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := fixture.run(t)
+	if err != nil || outcome == nil || outcome.RestartFrom != types.StepReview {
+		t.Fatalf("CI repair did not request revalidation: %+v, %v", outcome, err)
+	}
+	repairHead := fixture.localHead(t)
+	if repairHead == fixture.headSHA || fixture.remoteHead(t) != fixture.headSHA {
+		t.Fatal("repair must remain unpublished until revalidation")
+	}
+	s.Ctx = context.Background()
+	s.Fixing = false
+	attempts := 0
+	s.Agent = &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		attempts++
+		if strings.Contains(opts.Prompt, "Run-owned PR validation preview:") {
+			t.Error("repair revalidation requires an unpublished head's preview")
+		}
+		if !strings.Contains(opts.Prompt, repairHead) {
+			t.Error("repair Test did not receive the current repair head")
+		}
+		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+	}}
+	outcome, err = (&TestStep{}).Execute(s)
+	if err != nil || outcome == nil || outcome.NeedsApproval || attempts != 1 {
+		t.Fatalf("repair Test=%+v, %v; attempts=%d", outcome, err, attempts)
+	}
+	findings, err := types.ParseFindingsJSON(outcome.Findings)
+	if err != nil || findings.TestedHeadSHA != repairHead {
+		t.Fatalf("repair tested-head disclosure=%+v, %v", findings, err)
 	}
 }
 
@@ -194,6 +261,6 @@ type previewContinuationStep struct {
 }
 
 func (s *previewContinuationStep) Execute(ctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
-	ctx.Env, ctx.GateDir, ctx.Agent = s.env, s.gate, s.ag
+	ctx.Env, ctx.GateDir, ctx.Agent = append(append([]string{}, s.env...), "FAKE_CLI_PR_HEAD_SHA="+ctx.Run.HeadSHA), s.gate, s.ag
 	return s.Step.Execute(ctx)
 }

@@ -45,8 +45,8 @@ func (d *DB) RecordTestPreviewValidation(runID, head string) error {
 	return err
 }
 
-func (d *DB) TestPreviewNeedsValidation(runID, head string) (bool, error) {
+func (d *DB) TestPreviewNeedsValidation(runID string) (bool, error) {
 	var needed bool
-	err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM run_test_previews WHERE run_id = ? AND (validated_head IS NULL OR validated_head != ?))`, runID, head).Scan(&needed)
+	err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM run_test_previews WHERE run_id = ? AND validated_head IS NULL)`, runID).Scan(&needed)
 	return needed, err
 }

@@ -2328,7 +2328,7 @@ func (e *Executor) waitForApprovalOrReconcile(ctx context.Context, step Step, sc
 	defer func() {
 		if err == nil && step.Name() == types.StepTest && (response.action == types.ActionApprove || reconciled) {
 			var needed bool
-			needed, err = e.db.TestPreviewNeedsValidation(sctx.Run.ID, sctx.Run.HeadSHA)
+			needed, err = e.db.TestPreviewNeedsValidation(sctx.Run.ID)
 			if needed && err == nil {
 				response = approvalResponse{action: actionRerunTestPreview}
 				reconciled = false
@@ -2405,7 +2405,7 @@ func (e *Executor) claimGateReconciliation() bool {
 
 func (e *Executor) reconcileApprovalGate(ctx context.Context, step Step, sctx *StepContext, findingsJSON string) (bool, error) {
 	if step.Name() == types.StepTest {
-		needed, err := e.db.TestPreviewNeedsValidation(sctx.Run.ID, sctx.Run.HeadSHA)
+		needed, err := e.db.TestPreviewNeedsValidation(sctx.Run.ID)
 		if err != nil || needed {
 			return false, err
 		}

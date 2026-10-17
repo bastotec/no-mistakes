@@ -926,7 +926,10 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			baseSHA = headSHA
 			if len(runs) > 0 {
 				baseSHA = runs[0].BaseSHA
-				inheritedPRURL = inheritablePRURL(runs[0])
+				inheritedPRURL, err = m.inheritablePRURL(runs[0])
+				if err != nil {
+					return "", err
+				}
 			}
 		}
 		runID, err := m.startRunWithIntentSourceLocked(ctx, repo, branch, headSHA, baseSHA, trigger, skipSteps, persistedIntent, db.RunIntentSourceAgent, launchNonce, validationGeneration, requestDigest, storedPRBaseBranch, inheritedPRURL, "", "")
@@ -1129,12 +1132,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if selectedRun.PreserveHistoryBaseSHA != nil {
 		return "", fmt.Errorf("preserve-history run cannot be implicitly repinned by rerun; recover custody if needed, then use axi run --preserve-history <exact-base-sha> --base-branch <branch> for a new explicit integration")
 	}
-	preview, err := m.db.TestPreviewPR(selectedRun.ID)
+	inheritedPRURL, err := m.inheritablePRURL(selectedRun)
 	if err != nil {
-		return "", fmt.Errorf("read selected run preview ownership: %w", err)
-	}
-	if preview != "" && inheritablePRURL(selectedRun) != "" {
-		return "", fmt.Errorf("cannot rerun run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", selectedRun.ID)
+		return "", err
 	}
 	storedPRBaseBranch := strings.TrimSpace(prBaseBranch)
 	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil && explicitRunTarget(selectedRun) == "" {
@@ -1149,7 +1149,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	// next authorized repair restores it: a repair timeout that failed its
 	// step ends the run, where no repair can reach the work any more.
 	ctx = withSurvivedWorkFrom(ctx, selectedRun.ID)
-	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritablePRURL(selectedRun), "")
+	return m.startRunWithIntentSource(ctx, repo, branch, headSHA, baseSHA, "rerun", skipSteps, intent, intentSource, storedPRBaseBranch, inheritedPRURL, "")
 }
 
 type survivedWorkFromKey struct{}
@@ -1172,24 +1172,34 @@ func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree st
 	return m.db.CopyRunSurvivedWork(fromRunID, toRunID, worktree)
 }
 
-func inheritablePRURL(run *db.Run) string {
+func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
 	// An explicit cross-repository URL must never escape into a legacy host
 	// selected from origin. Rerun carries its complete constraint separately;
 	// independent launches without --existing-pr retain ordinary discovery.
 	if run.ExistingPRURL != nil {
-		return ""
+		return "", nil
 	}
 	if run.PRURL == nil {
-		return ""
+		return "", nil
 	}
 	state := ""
 	if run.PRState != nil {
 		state = strings.ToLower(strings.TrimSpace(*run.PRState))
 	}
 	if state == "merged" || state == "closed" {
-		return ""
+		return "", nil
 	}
-	return strings.TrimSpace(*run.PRURL)
+	url := strings.TrimSpace(*run.PRURL)
+	if url != "" {
+		preview, err := m.db.TestPreviewPR(run.ID)
+		if err != nil {
+			return "", fmt.Errorf("read run preview ownership: %w", err)
+		}
+		if preview != "" {
+			return "", fmt.Errorf("cannot replace run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", run.ID)
+		}
+	}
+	return url, nil
 }
 
 func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, callerHeadSHA string) (string, error) {

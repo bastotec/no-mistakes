@@ -169,11 +169,15 @@ Previous test findings to address:
 		}
 	}
 	trustedRunbook := trustedTestInstructionsSection(sctx)
-	previewPR, err := sctx.DB.TestPreviewPR(sctx.Run.ID)
+	previewNeedsValidation, err := sctx.DB.TestPreviewNeedsValidation(sctx.Run.ID)
 	if err != nil {
 		return nil, err
 	}
-	if previewPR != "" {
+	if previewNeedsValidation {
+		previewPR, err := sctx.DB.TestPreviewPR(sctx.Run.ID)
+		if err != nil {
+			return nil, err
+		}
 		trustedRunbook += fmt.Sprintf("\nRun-owned PR validation preview: %s\nFor this run, drive acceptance scenarios against the successful GitHub preview deployment for exact head %s (environment name contains preview), rather than substituting a local environment or stale branch deployment. Discover the deployment from this PR's exact head. If it is unavailable or cannot be driven, report inconclusive with untested scenarios and the reason; do not claim a pass or waive the scenarios.\n", previewPR, sctx.Run.HeadSHA)
 	}
 	evidencePrompt := fmt.Sprintf(

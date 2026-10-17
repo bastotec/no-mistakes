@@ -112,7 +112,7 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 	}
 }
 
-func TestRerunRefusesManagedTestPreview(t *testing.T) {
+func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
 	})
@@ -122,39 +122,53 @@ func TestRerunRefusesManagedTestPreview(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer client.Close()
-	var first ipc.PushReceivedResult
-	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", New: head}, &first); err != nil {
+	request := ipc.StartFreshRunParams{RepoID: repo.ID, Branch: "main", HeadSHA: head, Intent: "validate feature", LaunchNonce: "first-preview-launch", ValidationGeneration: "generation"}
+	var first ipc.StartFreshRunResult
+	if err := client.Call(ipc.MethodStartFreshRun, &request, &first); err != nil {
 		t.Fatal(err)
 	}
-	original := waitForRunTerminalState(t, database, first.RunID)
+	original := waitForRunTerminalState(t, database, first.Receipt.RunID)
 	url := "https://github.com/test/repo/pull/99"
-	if err := database.BindTestPreview(first.RunID, url); err != nil {
+	if err := database.BindTestPreview(original.ID, url); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateRunPRURL(first.RunID, url); err != nil {
+	if err := database.UpdateRunPRURL(original.ID, url); err != nil {
 		t.Fatal(err)
+	}
+	var replay ipc.StartFreshRunResult
+	if err := client.Call(ipc.MethodStartFreshRun, &request, &replay); err != nil || replay.Receipt.RunID != original.ID || replay.Receipt.Disposition != "reused" {
+		t.Fatalf("same-run replay=%+v error=%v", replay, err)
 	}
 	before, err := database.GetRunsByRepo(repo.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var replacement ipc.RerunResult
-	err = client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "main", PreviousRunID: first.RunID}, &replacement)
-	if err == nil || !strings.Contains(err.Error(), "managed Test preview belongs only to that run") {
-		t.Fatalf("rerun=%+v error=%v", replacement, err)
-	}
-	after, err := database.GetRunsByRepo(repo.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(after) != len(before) {
-		t.Fatalf("refused handoff created a run: %d -> %d", len(before), len(after))
-	}
-	current, _ := database.GetRun(first.RunID)
-	if current.Status != original.Status || current.PRURL == nil || *current.PRURL != url {
-		t.Fatalf("original run changed: %+v", current)
-	}
-	if bound, err := database.TestPreviewPR(first.RunID); err != nil || bound != url {
-		t.Fatalf("binding=%s, %v", bound, err)
+	request.LaunchNonce = "replacement-preview-launch"
+	for _, launch := range []struct {
+		name, method string
+		params       any
+	}{
+		{"rerun", ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "main", PreviousRunID: original.ID}},
+		{"proof-mode", ipc.MethodStartFreshRun, &request},
+	} {
+		t.Run(launch.name, func(t *testing.T) {
+			err := client.Call(launch.method, launch.params, nil)
+			if err == nil || !strings.Contains(err.Error(), "managed Test preview belongs only to that run") {
+				t.Fatalf("replacement error=%v", err)
+			}
+			after, err := database.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(before, after) {
+				t.Fatalf("refused handoff changed runs: before=%+v after=%+v", before, after)
+			}
+			if bound, err := database.TestPreviewPR(original.ID); err != nil || bound != url {
+				t.Fatalf("binding=%s, %v", bound, err)
+			}
+			if got := gitOutput(t, p.RepoDir(repo.ID), "rev-parse", "refs/heads/main"); got != head {
+				t.Fatalf("refused handoff moved gate head to %s", got)
+			}
+		})
 	}
 }

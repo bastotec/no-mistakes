@@ -167,7 +167,7 @@ func readyTestPreview(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) err
 			testComplete = row.Status == types.StepStatusCompleted
 		}
 	}
-	needed, err := sctx.DB.TestPreviewNeedsValidation(sctx.Run.ID, sctx.Run.HeadSHA)
+	needed, err := sctx.DB.TestPreviewNeedsValidation(sctx.Run.ID)
 	if err != nil {
 		return err
 	}
