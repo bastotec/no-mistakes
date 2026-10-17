@@ -1129,6 +1129,13 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if selectedRun.PreserveHistoryBaseSHA != nil {
 		return "", fmt.Errorf("preserve-history run cannot be implicitly repinned by rerun; recover custody if needed, then use axi run --preserve-history <exact-base-sha> --base-branch <branch> for a new explicit integration")
 	}
+	preview, err := m.db.TestPreviewPR(selectedRun.ID)
+	if err != nil {
+		return "", fmt.Errorf("read selected run preview ownership: %w", err)
+	}
+	if preview != "" && inheritablePRURL(selectedRun) != "" {
+		return "", fmt.Errorf("cannot rerun run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", selectedRun.ID)
+	}
 	storedPRBaseBranch := strings.TrimSpace(prBaseBranch)
 	if storedPRBaseBranch == "" && selectedRun.PRBaseBranch != nil && explicitRunTarget(selectedRun) == "" {
 		// An explicit target's base is not an operator override to inherit; the

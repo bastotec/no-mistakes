@@ -16,9 +16,6 @@ func testPreviewMarker(runID string) string {
 	return "<!-- no-mistakes:pr-validation:" + runID + " -->"
 }
 
-// PublishTestPreview is called ONLY under the executor's parked-Test lock.
-// It does not execute PushStep (which can collect uncommitted work), PRStep
-// (which runs drafting agents), or change any step/round/repair-budget row.
 func PublishTestPreview(sctx *pipeline.StepContext) (*ipc.PublishTestPreviewResult, error) {
 	if resolvedProvider(sctx) != scm.ProviderGitHub || resolvedHost(sctx, sctx.Repo.UpstreamURL) != "github.com" || existingPRURL(sctx) != "" {
 		return nil, fmt.Errorf("Test previews currently require a run-owned github.com PR, not an explicit existing PR")
@@ -87,6 +84,9 @@ func PublishTestPreview(sctx *pipeline.StepContext) (*ipc.PublishTestPreviewResu
 		if err := sctx.DB.BindTestPreview(sctx.Run.ID, pr.URL); err != nil {
 			return nil, err
 		}
+	}
+	if err := sctx.DB.RequireTestPreviewValidation(sctx.Run.ID); err != nil {
+		return nil, err
 	}
 	rows, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
@@ -167,8 +167,12 @@ func readyTestPreview(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) err
 			testComplete = row.Status == types.StepStatusCompleted
 		}
 	}
-	if !testComplete {
-		return fmt.Errorf("cannot ready preview while Test is incomplete")
+	needed, err := sctx.DB.TestPreviewNeedsValidation(sctx.Run.ID, sctx.Run.HeadSHA)
+	if err != nil {
+		return err
+	}
+	if !testComplete || needed {
+		return fmt.Errorf("cannot ready preview without successful post-publication Test execution")
 	}
 	if sctx.Config != nil && sctx.Config.Providers.GitHub.DraftPullRequests {
 		return nil

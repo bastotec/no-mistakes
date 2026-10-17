@@ -169,6 +169,13 @@ Previous test findings to address:
 		}
 	}
 	trustedRunbook := trustedTestInstructionsSection(sctx)
+	previewPR, err := sctx.DB.TestPreviewPR(sctx.Run.ID)
+	if err != nil {
+		return nil, err
+	}
+	if previewPR != "" {
+		trustedRunbook += fmt.Sprintf("\nRun-owned PR validation preview: %s\nFor this run, drive acceptance scenarios against the successful GitHub preview deployment for exact head %s (environment name contains preview), rather than substituting a local environment or stale branch deployment. Discover the deployment from this PR's exact head. If it is unavailable or cannot be driven, report inconclusive with untested scenarios and the reason; do not claim a pass or waive the scenarios.\n", previewPR, sctx.Run.HeadSHA)
+	}
 	evidencePrompt := fmt.Sprintf(
 		`You are validating a code change by driving the product itself. Derive the scenarios this change must satisfy, then run each one against the real running product.
 

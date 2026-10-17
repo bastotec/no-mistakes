@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS runs (
 
 CREATE TABLE IF NOT EXISTS run_test_previews (
     run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
-    pr_url TEXT NOT NULL
+    pr_url TEXT NOT NULL,
+    validated_head TEXT
 );
 
 CREATE TABLE IF NOT EXISTS step_results (
@@ -276,6 +277,7 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	`ALTER TABLE run_test_previews ADD COLUMN validated_head TEXT`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selection_source TEXT`,

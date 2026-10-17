@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -108,5 +109,52 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 	}
 	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: started.RunID}, nil); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestRerunRefusesManagedTestPreview(t *testing.T) {
+	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
+	})
+	repo, head := setupTestGitRepo(t, p, database, "preview-rerun")
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var first ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", New: head}, &first); err != nil {
+		t.Fatal(err)
+	}
+	original := waitForRunTerminalState(t, database, first.RunID)
+	url := "https://github.com/test/repo/pull/99"
+	if err := database.BindTestPreview(first.RunID, url); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(first.RunID, url); err != nil {
+		t.Fatal(err)
+	}
+	before, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var replacement ipc.RerunResult
+	err = client.Call(ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "main", PreviousRunID: first.RunID}, &replacement)
+	if err == nil || !strings.Contains(err.Error(), "managed Test preview belongs only to that run") {
+		t.Fatalf("rerun=%+v error=%v", replacement, err)
+	}
+	after, err := database.GetRunsByRepo(repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("refused handoff created a run: %d -> %d", len(before), len(after))
+	}
+	current, _ := database.GetRun(first.RunID)
+	if current.Status != original.Status || current.PRURL == nil || *current.PRURL != url {
+		t.Fatalf("original run changed: %+v", current)
+	}
+	if bound, err := database.TestPreviewPR(first.RunID); err != nil || bound != url {
+		t.Fatalf("binding=%s, %v", bound, err)
 	}
 }

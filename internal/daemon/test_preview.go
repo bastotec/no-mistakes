@@ -3,12 +3,15 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 )
 
 func (m *RunManager) HandlePublishTestPreview(ctx context.Context, p ipc.PublishTestPreviewParams) (*ipc.PublishTestPreviewResult, error) {
+	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
 	if m.shuttingDown.Load() {
 		return nil, fmt.Errorf("daemon is shutting down")
 	}

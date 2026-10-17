@@ -1,13 +1,19 @@
 package steps
 
 import (
+	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -25,8 +31,11 @@ func TestPublishTestPreview_RealPushSamePRPendingAttestation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := s.DB.StartStep(sr.ID); err != nil {
+		t.Fatal(err)
+	}
 	findings := `{"findings":[],"summary":"Waiting for live PR validation"}`
-	if err := s.DB.ParkStepForApproval(s.Run.ID, sr.ID, types.StepStatusAwaitingApproval, 1, 0, &findings); err != nil {
+	if err := s.DB.ParkStepForApproval(s.Run.ID, sr.ID, types.StepStatusAwaitingApproval, 0, 0, &findings); err != nil {
 		t.Fatal(err)
 	}
 	s.StepResultID = sr.ID
@@ -64,15 +73,62 @@ func TestPublishTestPreview_RealPushSamePRPendingAttestation(t *testing.T) {
 	if strings.Count(string(log), "pr create ") != 1 || strings.Contains(string(log), "pr ready ") {
 		t.Fatalf("not an idempotent draft publication: %s", log)
 	}
-	// The ordinary PR phase replaces only the owned pending narrative and readies
-	// the SAME PR after Test actually completes, not during the preview request.
-	if err := s.DB.CompleteStep(sr.ID, 0, 1, ""); err != nil {
+	if _, err := s.DB.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 0); err != nil {
 		t.Fatal(err)
 	}
-	_, err = (&PRStep{}).Execute(s)
+	if _, err := s.DB.InsertStepResult(s.Run.ID, types.StepPR); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DB.UpdateRunStatus(s.Run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	run, err = s.DB.GetRun(s.Run.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
+	attempts := 0
+	testAgent := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if !strings.Contains(opts.Prompt, "https://github.com/test/repo/pull/99") || !strings.Contains(opts.Prompt, head) {
+			t.Error("post-publication Test did not receive its exact preview target")
+		}
+		attempts++
+		if _, err := os.Stat(bodyFile + ".ready"); !os.IsNotExist(err) {
+			t.Error("draft readied before post-publication Test")
+		}
+		return &agent.Result{Output: json.RawMessage(passingScenarioFindingsJSON)}, nil
+	}}
+	executor := pipeline.NewExecutor(s.DB, paths.WithRoot(t.TempDir()), s.Config, s.Agent, []pipeline.Step{
+		&previewContinuationStep{Step: &TestStep{}, env: s.Env, gate: gate, ag: testAgent},
+		&previewContinuationStep{Step: &PRStep{}, env: s.Env, gate: gate, ag: s.Agent},
+	}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	finished := make(chan struct{})
+	go func() { defer close(finished); done <- executor.Resume(ctx, run, s.Repo, dir) }()
+	t.Cleanup(func() { cancel(); <-finished })
+	for {
+		if err := executor.Respond(types.StepTest, types.ActionApprove, nil); err == nil {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatal("recovered Test gate not available")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal("Test continuation did not complete")
+	}
+	if attempts != 1 {
+		t.Fatalf("post-publication Test attempts=%d", attempts)
+	}
+
 	final, _ := os.ReadFile(bodyFile)
 	if strings.Contains(string(final), "Test is still pending") {
 		t.Fatal("stale preview prose survived normal publication")
@@ -128,4 +184,16 @@ func TestPublishTestPreview_RefusesForeignOrReadyPRBeforePush(t *testing.T) {
 			}
 		})
 	}
+}
+
+type previewContinuationStep struct {
+	pipeline.Step
+	env  []string
+	gate string
+	ag   agent.Agent
+}
+
+func (s *previewContinuationStep) Execute(ctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	ctx.Env, ctx.GateDir, ctx.Agent = s.env, s.gate, s.ag
+	return s.Step.Execute(ctx)
 }
