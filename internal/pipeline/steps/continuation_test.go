@@ -74,9 +74,20 @@ func newContinuationFixture(t *testing.T) *continuationFixture {
 }
 
 func (f *continuationFixture) setPR(head, base string) {
+	f.setPRState(head, base, "OPEN")
+}
+
+func (f *continuationFixture) setPRState(head, base, state string) {
+	payload := strings.Replace(existingPRFixture(head), `"ref":"main"`, `"ref":"`+base+`"`, 1)
+	switch state {
+	case "CLOSED":
+		payload = strings.Replace(payload, `"state":"open","merged":false`, `"state":"closed","merged":false`, 1)
+	case "MERGED":
+		payload = strings.Replace(payload, `"state":"open","merged":false`, `"state":"closed","merged":true`, 1)
+	}
 	for i, e := range f.s.Env {
 		if strings.HasPrefix(e, "FAKE_CLI_EXISTING_PR_JSON=") {
-			f.s.Env[i] = "FAKE_CLI_EXISTING_PR_JSON=" + strings.Replace(existingPRFixture(head), `"ref":"main"`, `"ref":"`+base+`"`, 1)
+			f.s.Env[i] = "FAKE_CLI_EXISTING_PR_JSON=" + payload
 		}
 	}
 }
@@ -402,6 +413,39 @@ func continuationCIEnv(f *continuationFixture, env []string) []string {
 	)
 }
 
+func TestContinuation_BaseResolutionUsesSingleStepEntryProbe(t *testing.T) {
+	for _, name := range []string{"document", "lint"} {
+		t.Run(name, func(t *testing.T) {
+			f := newContinuationFixture(t)
+			f.s.Shared = &pipeline.RunShared{}
+			f.s.Config.IgnorePatterns = []string{"*"}
+			var step pipeline.Step = &DocumentStep{}
+			if name == "lint" {
+				step = &LintStep{}
+				f.s.Shared.SetHousekeepingLint(pipeline.HousekeepingLintResult{FindingsJSON: `{"findings":[],"summary":"clean"}`})
+			}
+			f.s.Agent = &mockAgent{name: "forbidden", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				t.Fatal("read-only step launched an agent")
+				return nil, nil
+			}}
+			if _, err := step.Execute(f.s); err != nil {
+				t.Fatal(err)
+			}
+			log, err := os.ReadFile(f.log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if reads := strings.Count(string(log), "api --hostname github.com repos/upstream/widgets/pulls/168"); reads != 1 {
+				t.Fatalf("identity reads = %d, want one step-entry probe: %s", reads, log)
+			}
+			gitCmd(t, f.upstream, "update-ref", "refs/heads/main", f.base)
+			if _, err := step.Execute(f.s); err == nil {
+				t.Fatal("step-entry policy failed to detect external movement")
+			}
+		})
+	}
+}
+
 func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testing.T) {
 	for _, scenario := range []string{"green", "jobless-workflow-fails", "workflow-discovery-fails", "pending", "empty", "different-pr-head", "unpublished-repair", "later-worktree-head"} {
 		t.Run(scenario, func(t *testing.T) {
@@ -442,11 +486,16 @@ func TestContinuation_CIApprovalRequiresCompleteExactFinalHeadEvidence(t *testin
 
 func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.T) {
 	for _, state := range []string{"CLOSED", "MERGED"} {
-		for _, entry := range []string{"monitor", "reconcile"} {
-			for _, scenario := range []string{"pending", "failure", "empty", "jobless-workflow-fails", "workflow-discovery-fails", "different-pr-head", "later-worktree-head", "green"} {
+		for _, entry := range []string{"monitor", "reconcile", "terminal-monitor", "repair-reconcile"} {
+			for _, scenario := range []string{"pending", "failure", "empty", "jobless-workflow-fails", "workflow-discovery-fails", "different-pr-head", "later-worktree-head", "pr-base-moves", "base-tip-moves", "source-moves", "identity-head-moves", "green"} {
+				if (entry == "terminal-monitor" || entry == "repair-reconcile") && scenario != "green" {
+					continue
+				}
 				t.Run(state+"/"+entry+"/"+scenario, func(t *testing.T) {
+					reconcile := strings.HasSuffix(entry, "reconcile")
 					f := newContinuationFixture(t)
 					f.publish(t)
+					f.s.Fixing = entry == "repair-reconcile"
 					if err := f.s.DB.UpdateRunStatus(f.s.Run.ID, types.RunRunning); err != nil {
 						t.Fatal(err)
 					}
@@ -458,7 +507,7 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 						t.Fatal(err)
 					}
 					status := types.StepStatusRunning
-					if entry == "reconcile" {
+					if reconcile {
 						status = types.StepStatusAwaitingApproval
 					}
 					if err := f.s.DB.UpdateStepStatus(stepRow.ID, status); err != nil {
@@ -474,6 +523,20 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 						checks = `[]`
 					}
 					step := (&CIStep{}).SetBaseBranchTip(func(context.Context) (string, bool) { return f.tip, true })
+					terminalIdentity := func() {
+						head, base := f.submitted, "main"
+						switch scenario {
+						case "pr-base-moves":
+							base = "other"
+						case "base-tip-moves":
+							gitCmd(t, f.upstream, "update-ref", "refs/heads/main", f.base)
+						case "source-moves":
+							gitCmd(t, f.fork, "update-ref", "refs/heads/feature", f.published)
+						case "identity-head-moves":
+							head = f.published
+						}
+						f.setPRState(head, base, state)
+					}
 					polls := 0
 					if entry == "monitor" {
 						statePath := filepath.Join(t.TempDir(), "state")
@@ -490,10 +553,12 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 							if scenario == "later-worktree-head" {
 								gitCmd(t, f.s.WorkDir, "commit", "--allow-empty", "-m", "unvalidated repair")
 							}
+							terminalIdentity()
 							return os.WriteFile(statePath, []byte(state), 0600)
 						})
 					} else {
 						f.s.Env = continuationCIEnv(f, fakeCIGH(t, state, checks))
+						terminalIdentity()
 						if scenario == "later-worktree-head" {
 							gitCmd(t, f.s.WorkDir, "commit", "--allow-empty", "-m", "unvalidated repair")
 						}
@@ -508,10 +573,11 @@ func TestContinuation_CITerminalCompletionRequiresExactGreenEvidence(t *testing.
 					}
 					if entry == "monitor" && scenario == "workflow-discovery-fails" {
 						f.s.Env = append(f.s.Env, "FAKE_CLI_STATE_PATH=", "FAKE_CLI_STATE="+state)
+						terminalIdentity()
 					}
-					if entry == "monitor" {
+					if !reconcile {
 						_, err = step.Execute(f.s)
-						if scenario != "workflow-discovery-fails" && polls != 1 {
+						if entry == "monitor" && scenario != "workflow-discovery-fails" && polls != 1 {
 							t.Fatalf("did not observe pending CI before terminal state: polls=%d err=%v", polls, err)
 						}
 					} else {

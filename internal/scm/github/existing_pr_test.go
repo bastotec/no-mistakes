@@ -26,6 +26,7 @@ func TestValidateExistingPRIdentity(t *testing.T) {
 		source, branch string
 		code           int
 		wantError      bool
+		terminal       bool
 	}{
 		{name: "fork upstream exact match"},
 		{name: "different requested repository", mutate: func(p map[string]any) {
@@ -39,8 +40,11 @@ func TestValidateExistingPRIdentity(t *testing.T) {
 		{name: "source ref is case sensitive", branch: "fm/Account-context", wantError: true},
 		{name: "missing head", mutate: func(p map[string]any) { delete(p["head"].(map[string]any), "sha") }, wantError: true},
 		{name: "deleted source repo", mutate: func(p map[string]any) { p["head"].(map[string]any)["repo"] = nil }, wantError: true},
-		{name: "closed", mutate: func(p map[string]any) { p["state"] = "closed" }, wantError: true},
-		{name: "merged", mutate: func(p map[string]any) { p["merged"] = true }, wantError: true},
+		{name: "closed", mutate: func(p map[string]any) { p["state"] = "closed" }, wantError: true, terminal: true},
+		{name: "merged", mutate: func(p map[string]any) { p["state"] = "closed"; p["merged"] = true }, wantError: true, terminal: true},
+		{name: "inconsistent merged state", mutate: func(p map[string]any) { p["merged"] = true }, wantError: true},
+		{name: "missing state", mutate: func(p map[string]any) { delete(p, "state") }, wantError: true},
+		{name: "unknown state", mutate: func(p map[string]any) { p["state"] = "unknown" }, wantError: true},
 		{name: "unavailable", code: 1, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -59,12 +63,19 @@ func TestValidateExistingPRIdentity(t *testing.T) {
 			if branch == "" {
 				branch = "fm/account-context"
 			}
-			pr, err := h.ValidateExistingPRIdentity(context.Background(), explicitTestURL, source, branch)
-			if (err != nil) != tc.wantError {
-				t.Fatalf("PR=%+v error=%v", pr, err)
-			}
-			if !tc.wantError && (pr.URL != explicitTestURL || pr.BaseBranch != "main" || pr.HeadSHA != explicitTestHead) {
-				t.Fatalf("unexpected PR: %+v", pr)
+			for _, allowTerminal := range []bool{false, true} {
+				validate := h.ValidateExistingPRIdentity
+				if allowTerminal {
+					validate = h.ValidateContinuationPRIdentity
+				}
+				pr, err := validate(context.Background(), explicitTestURL, source, branch)
+				wantError := tc.wantError && !(allowTerminal && tc.terminal)
+				if (err != nil) != wantError {
+					t.Fatalf("allowTerminal=%v PR=%+v error=%v", allowTerminal, pr, err)
+				}
+				if !wantError && (pr.URL != explicitTestURL || pr.BaseBranch != "main" || pr.HeadSHA != explicitTestHead) {
+					t.Fatalf("unexpected PR: %+v", pr)
+				}
 			}
 		})
 	}

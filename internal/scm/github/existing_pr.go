@@ -34,6 +34,14 @@ func ExistingPRTarget(raw string) (repo, number string, err error) {
 // ValidateExistingPRIdentity uses a numbered REST lookup, never branch
 // discovery. Both repositories and the source ref must be proven before use.
 func (h *Host) ValidateExistingPRIdentity(ctx context.Context, raw, sourceRepo, branch string) (*scm.PR, error) {
+	return h.validateExistingPRIdentity(ctx, raw, sourceRepo, branch, false)
+}
+
+func (h *Host) ValidateContinuationPRIdentity(ctx context.Context, raw, sourceRepo, branch string) (*scm.PR, error) {
+	return h.validateExistingPRIdentity(ctx, raw, sourceRepo, branch, true)
+}
+
+func (h *Host) validateExistingPRIdentity(ctx context.Context, raw, sourceRepo, branch string, allowTerminal bool) (*scm.PR, error) {
 	repo, number, err := ExistingPRTarget(raw)
 	if err != nil {
 		return nil, err
@@ -75,7 +83,7 @@ func (h *Host) ValidateExistingPRIdentity(ctx context.Context, raw, sourceRepo, 
 	if strconv.Itoa(p.Number) != number || p.URL == "" || !strings.EqualFold(p.Base.Repo.FullName, repo) || !strings.EqualFold(p.Base.Repo.URL, "https://github.com/"+repo) {
 		return nil, fmt.Errorf("explicit PR response repository/identity mismatch")
 	}
-	if p.State != "open" || p.Merged || p.Base.Ref == "" {
+	if p.Base.Ref == "" || (p.State != "open" || p.Merged) && !(allowTerminal && p.State == "closed") {
 		return nil, fmt.Errorf("explicit PR is not an open, readable review object")
 	}
 	if sourceRepo == "" || !strings.EqualFold(p.Head.Repo.FullName, sourceRepo) || !strings.EqualFold(p.Head.Repo.URL, "https://github.com/"+sourceRepo) || p.Head.Ref != strings.TrimPrefix(branch, "refs/heads/") {

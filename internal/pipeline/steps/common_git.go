@@ -51,9 +51,6 @@ func resolveBaseSHA(ctx context.Context, sctx *pipeline.StepContext, workDir, ba
 // failure. It stops instead.
 func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) (string, error) {
 	if sctx.Run.ContinuationJSON != nil {
-		if err := AssertContinuationPolicy(sctx); err != nil {
-			return "", err
-		}
 		pins, err := sctx.Run.ContinuationPins()
 		if err != nil {
 			return "", err

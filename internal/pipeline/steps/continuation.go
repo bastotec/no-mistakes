@@ -14,6 +14,10 @@ func (s *RebaseStep) CheckRunPolicy(sctx *pipeline.StepContext) error {
 // agent boundary, on repair and on publication. It never incorporates a moved
 // base or treats a patch-equivalent history as the pinned author history.
 func AssertContinuationPolicy(sctx *pipeline.StepContext) error {
+	return assertContinuationPolicy(sctx, false)
+}
+
+func assertContinuationPolicy(sctx *pipeline.StepContext, allowTerminal bool) error {
 	if sctx.Run == nil || sctx.Run.ContinuationJSON == nil {
 		return nil
 	}
@@ -30,12 +34,12 @@ func AssertContinuationPolicy(sctx *pipeline.StepContext) error {
 	guard.Ctx = ctx
 	sctx = &guard
 	expected := pins.PRHead
-	validate := ValidateExistingPR
+	validate := validateExistingPR
 	if sctx.Run.LastPushedSHA != nil {
 		expected = *sctx.Run.LastPushedSHA
-		validate = ValidateExistingPublishedPR
+		validate = validateExistingPublishedPR
 	}
-	if _, pr, err := validate(sctx, expected); err != nil || pr == nil {
+	if _, pr, err := validate(sctx, expected, allowTerminal); err != nil || pr == nil {
 		return historyRefusal("continuation: verify same PR: %v", err)
 	}
 	run := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }

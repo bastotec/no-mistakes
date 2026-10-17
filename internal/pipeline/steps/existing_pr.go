@@ -23,7 +23,11 @@ func existingPRURL(sctx *pipeline.StepContext) string {
 // The returned host is the validated one, so callers never rebuild it and can
 // never reach it without the validation that proved the target.
 func ValidateExistingPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm.PR, error) {
-	host, pr, err := ValidateExistingPRIdentity(sctx)
+	return validateExistingPR(sctx, head, false)
+}
+
+func validateExistingPR(sctx *pipeline.StepContext, head string, allowTerminal bool) (scm.Host, *scm.PR, error) {
+	host, pr, err := validateExistingPRIdentity(sctx, allowTerminal)
 	if err != nil || pr == nil {
 		return host, pr, err
 	}
@@ -55,14 +59,18 @@ var (
 // forge's own read lag is re-read rather than reported as a source branch that
 // moved outside the run.
 func ValidateExistingPublishedPR(sctx *pipeline.StepContext, head string) (scm.Host, *scm.PR, error) {
-	host, pr, err := ValidateExistingPR(sctx, head)
+	return validateExistingPublishedPR(sctx, head, false)
+}
+
+func validateExistingPublishedPR(sctx *pipeline.StepContext, head string, allowTerminal bool) (scm.Host, *scm.PR, error) {
+	host, pr, err := validateExistingPR(sctx, head, allowTerminal)
 	for attempt := 1; attempt < prHeadSettleAttempts && errors.Is(err, errExplicitPRHeadMismatch); attempt++ {
 		select {
 		case <-sctx.Ctx.Done():
 			return nil, nil, sctx.Ctx.Err()
 		case <-time.After(prHeadSettleDelay):
 		}
-		host, pr, err = ValidateExistingPR(sctx, head)
+		host, pr, err = validateExistingPR(sctx, head, allowTerminal)
 	}
 	return host, pr, err
 }
@@ -72,6 +80,10 @@ func ValidateExistingPublishedPR(sctx *pipeline.StepContext, head string) (scm.H
 // repository and branch. A run that is about to publish a new head has nothing
 // to compare the live head against yet, so only the identity is required.
 func ValidateExistingPRIdentity(sctx *pipeline.StepContext) (scm.Host, *scm.PR, error) {
+	return validateExistingPRIdentity(sctx, false)
+}
+
+func validateExistingPRIdentity(sctx *pipeline.StepContext, allowTerminal bool) (scm.Host, *scm.PR, error) {
 	raw := existingPRURL(sctx)
 	if raw == "" {
 		return nil, nil, nil
@@ -94,7 +106,11 @@ func ValidateExistingPRIdentity(sctx *pipeline.StepContext) (scm.Host, *scm.PR, 
 	if scm.ResolveHost(sctx.Ctx, pushURL) != "github.com" {
 		return nil, nil, fmt.Errorf("explicit PR source must be a github.com push repository")
 	}
-	pr, err := gh.ValidateExistingPRIdentity(sctx.Ctx, raw, github.RepoSlug(pushURL), sctx.Run.Branch)
+	validate := gh.ValidateExistingPRIdentity
+	if allowTerminal && sctx.Run.ContinuationJSON != nil {
+		validate = gh.ValidateContinuationPRIdentity
+	}
+	pr, err := validate(sctx.Ctx, raw, github.RepoSlug(pushURL), sctx.Run.Branch)
 	if err != nil {
 		return nil, nil, staleAssociation(sctx, err)
 	}

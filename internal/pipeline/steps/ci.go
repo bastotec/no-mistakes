@@ -101,13 +101,20 @@ func (s *CIStep) TransientRerunRecorded(name string) bool {
 
 func (s *CIStep) Name() types.StepName { return types.StepCI }
 
+func assertCIHeadContinuity(sctx *pipeline.StepContext) error {
+	if sctx.Run.ContinuationJSON != nil {
+		return pipeline.AssertContinuationHistory(sctx)
+	}
+	return assertPipelineHeadContinuity(sctx, types.StepCI)
+}
+
 // ReconcileApprovalGate re-checks the PR after the CI step has parked at an
 // approval gate. A PR can be merged or closed after a timeout/failure gate was
 // recorded; either terminal state supersedes the stale gate just as it does in
 // the normal CI polling loop. Open, unknown, and provider-error states remain
 // parked so reconciliation never guesses success.
 func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error) {
-	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+	if err := assertCIHeadContinuity(sctx); err != nil {
 		return false, fmt.Errorf("%w: %w", pipeline.ErrFatalGateReconciliation, err)
 	}
 	if err := sctx.Ctx.Err(); err != nil {
@@ -166,6 +173,9 @@ func (s *CIStep) ReconcileApprovalGate(sctx *pipeline.StepContext) (bool, error)
 		}
 		return true, nil
 	case scm.PRStateOpen:
+		if err := AssertContinuationPolicy(sctx); err != nil {
+			return false, err
+		}
 		if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, "open"); err != nil {
 			return false, err
 		}
@@ -309,8 +319,13 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		encoded, _ := types.MarshalFindingsJSON(findings)
 		outcome, err = &pipeline.StepOutcome{NeedsApproval: true, Findings: encoded}, nil
 	}()
-	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
+	if err := assertCIHeadContinuity(sctx); err != nil {
 		return nil, err
+	}
+	if sctx.Fixing {
+		if err := AssertContinuationPolicy(sctx); err != nil {
+			return nil, err
+		}
 	}
 	var explicitHost scm.Host
 	if existingPRURL(sctx) != "" {
@@ -323,7 +338,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if published == nil || published.LastPushedSHA == nil {
 			return nil, fmt.Errorf("explicit PR has no durable published head for CI")
 		}
-		explicitHost, _, err = ValidateExistingPublishedPR(sctx, *published.LastPushedSHA)
+		explicitHost, _, err = validateExistingPublishedPR(sctx, *published.LastPushedSHA, sctx.Run.ContinuationJSON != nil && !sctx.Fixing)
 		if err != nil {
 			return nil, err
 		}
@@ -861,6 +876,9 @@ func assertContinuationCIFinalHead(sctx *pipeline.StepContext, pr *scm.PR) error
 func verifyContinuationTerminalCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
 	if sctx.Run.ContinuationJSON == nil {
 		return nil
+	}
+	if err := assertContinuationPolicy(sctx, true); err != nil {
+		return err
 	}
 	pr.HeadSHA = sctx.Run.HeadSHA
 	checks, err := host.GetChecks(sctx.Ctx, pr)
