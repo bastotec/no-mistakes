@@ -6,8 +6,8 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 )
 
-func (s *RebaseStep) CheckRunPolicy(sctx *pipeline.StepContext) error {
-	return AssertContinuationPolicy(sctx)
+func (s *RebaseStep) CheckRunPolicy(sctx *pipeline.StepContext, allowTerminal bool) error {
+	return assertContinuationPolicy(sctx, allowTerminal)
 }
 
 // AssertContinuationPolicy revalidates external authority at each step and

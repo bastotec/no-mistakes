@@ -1229,8 +1229,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// error, so the step and its events reach a terminal state.
 		sctx.RestoredSurvivedWork = nil
 		var outcome *StepOutcome
-		sctx.CheckRunPolicy = func() error { return e.checkRunPolicy(sctx) }
-		err := e.checkRunPolicy(sctx)
+		sctx.CheckRunPolicy = func() error { return e.checkRunPolicy(sctx, false) }
+		allowTerminal := stepName == types.StepCI && !fixRound
+		err := e.checkRunPolicy(sctx, allowTerminal)
 		// Only steps whose fix round runs a repair agent get the work back:
 		// Rebase's resolver needs a clean worktree, and a Push or PR retry
 		// would publish it with no agent continuing it.
@@ -1247,7 +1248,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if err == nil {
-			err = e.checkRunPolicy(sctx)
+			err = e.checkRunPolicy(sctx, allowTerminal)
 			if err == nil {
 				outcome, err = step.Execute(sctx)
 			}

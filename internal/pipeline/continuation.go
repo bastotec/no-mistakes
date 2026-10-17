@@ -7,7 +7,9 @@ import (
 
 // RunPolicyGuard supplies provider-aware checks without making the executor
 // depend on a forge adapter. The core Rebase step owns integration policy.
-type RunPolicyGuard interface{ CheckRunPolicy(*StepContext) error }
+type RunPolicyGuard interface {
+	CheckRunPolicy(*StepContext, bool) error
+}
 
 // AssertContinuationHistory proves exact ancestry, never patch equivalence.
 // Agent tools are trusted, not sandboxed; reject their rewritten result before
@@ -43,13 +45,13 @@ func AssertContinuationHistory(s *StepContext) error {
 	return nil
 }
 
-func (e *Executor) checkRunPolicy(s *StepContext) error {
+func (e *Executor) checkRunPolicy(s *StepContext, allowTerminal bool) error {
 	if err := AssertContinuationHistory(s); err != nil {
 		return err
 	}
 	for _, step := range e.steps {
 		if guard, ok := step.(RunPolicyGuard); ok {
-			if err := guard.CheckRunPolicy(s); err != nil {
+			if err := guard.CheckRunPolicy(s, allowTerminal); err != nil {
 				return err
 			}
 		}

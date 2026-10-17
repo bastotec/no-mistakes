@@ -321,21 +321,27 @@ func TestContinuation_CIReadinessRequiresExactFinalHeadAndRealChecks(t *testing.
 		t.Fatal(err)
 	}
 	f.setPR(f.submitted, "main")
-	if err := setCIMonitorReadiness(f.s, true, true); err == nil {
+	if err := setCIMonitorReadiness(f.s, &scm.PR{HeadSHA: f.submitted}, true, true); err == nil {
 		t.Fatal("no-ci waiver counted as CI evidence")
 	}
-	if err := setCIMonitorReadiness(f.s, true, false); err != nil {
+	if err := setCIMonitorReadiness(f.s, nil, true, false); err == nil {
+		t.Fatal("missing checks head counted as CI evidence")
+	}
+	if err := setCIMonitorReadiness(f.s, &scm.PR{HeadSHA: f.published}, true, false); err == nil {
+		t.Fatal("stale checks head counted as CI evidence")
+	}
+	if err := setCIMonitorReadiness(f.s, &scm.PR{HeadSHA: f.submitted}, true, false); err != nil {
 		t.Fatal(err)
 	}
 	run, _ := f.s.DB.GetRun(f.s.Run.ID)
 	if run.CIReadyAt == nil {
 		t.Fatal("exact-head CI not recorded")
 	}
-	if err := setCIMonitorReadiness(f.s, false, false); err != nil {
+	if err := setCIMonitorReadiness(f.s, &scm.PR{HeadSHA: f.submitted}, false, false); err != nil {
 		t.Fatal(err)
 	}
 	gitCmd(t, f.s.WorkDir, "commit", "--allow-empty", "-m", "later unvalidated head")
-	if err := setCIMonitorReadiness(f.s, true, false); err == nil {
+	if err := setCIMonitorReadiness(f.s, &scm.PR{HeadSHA: f.submitted}, true, false); err == nil {
 		t.Fatal("earlier checks certified a later head")
 	}
 	run, _ = f.s.DB.GetRun(f.s.Run.ID)
@@ -348,7 +354,7 @@ func TestContinuation_ReadinessRefusalNeverLogsGreen(t *testing.T) {
 	f := newContinuationFixture(t)
 	var logs []string
 	f.s.Log = func(line string) { logs = append(logs, line) }
-	if message := logCIMonitorStatus(f.s, ciChecksPassedMsg, ""); message != "" {
+	if message := logCIMonitorStatus(f.s, &scm.PR{HeadSHA: f.submitted}, ciChecksPassedMsg, ""); message != "" {
 		t.Fatal("unpublished head emitted green status")
 	}
 	for _, line := range logs {

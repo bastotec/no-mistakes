@@ -390,7 +390,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 	pr := &scm.PR{Number: prNumber, URL: prURL}
 	if retryRefusal {
-		if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+		if err := setCIMonitorReadiness(sctx, nil, false, false); err != nil {
 			return nil, err
 		}
 		repair, err := s.retryProtectedPathRepair(sctx)
@@ -614,6 +614,9 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		// Check CI status - wait for all checks to complete before escalating
 		pr.HeadSHA = sctx.Run.HeadSHA
 		checks, err := host.GetChecks(ctx, pr)
+		if err == nil {
+			err = assertContinuationCIFinalHead(sctx, pr)
+		}
 		if err != nil {
 			clearCIMonitorReady(sctx)
 			lastMonitorLog = ""
@@ -730,7 +733,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			timeoutFailingChecks = terminalCheckTargetsForNames(checks, mergeCheckNames(reportedIssues, awaitingRerun))
 
 			if hasIssues || len(awaitingRerun) > 0 {
-				if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+				if err := setCIMonitorReadiness(sctx, nil, false, false); err != nil {
 					return nil, err
 				}
 			}
@@ -740,7 +743,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				// previous passed-checks signal, which matters for a cancelled
 				// check: it never counted as a failing check, so nothing above
 				// cleared it.
-				lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+				lastMonitorLog = logCIMonitorStatus(sctx, pr, ciChecksRunningMsg, lastMonitorLog)
 			} else if hasIssues && checksPending && !approvalOnly {
 				// Issue handling waits only for checks that can still complete on
 				// their own. A cancelled check whose rerun budget is exhausted must
@@ -802,7 +805,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// and unknown checks must never be promoted as green.
 					// Applies even when no_ci is declared: registered checks are
 					// never waived.
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					lastMonitorLog = logCIMonitorStatus(sctx, pr, ciChecksRunningMsg, lastMonitorLog)
 				case len(checks) == 0:
 					// Empty forge results are ready ONLY with positive durable
 					// evidence from trusted default-branch config (no_ci: true).
@@ -811,7 +814,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// evidence; there is no grace-period promotion path.
 					if sctx.Config != nil && sctx.Config.NoCI && sctx.Run.ContinuationJSON == nil {
 						sctx.DeferredFindings = ""
-						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
+						lastMonitorLog = logCIMonitorStatus(sctx, pr, ciNoChecksPassedMsg, lastMonitorLog)
 					} else {
 						clearCIMonitorReady(sctx)
 						lastMonitorLog = ""
@@ -819,10 +822,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 				case allChecksPassed(checks):
 					sctx.DeferredFindings = ""
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksPassedMsg, lastMonitorLog)
+					lastMonitorLog = logCIMonitorStatus(sctx, pr, ciChecksPassedMsg, lastMonitorLog)
 				default:
 					clearCIMonitorReady(sctx)
-					lastMonitorLog = logCIMonitorStatus(sctx, ciChecksRunningMsg, lastMonitorLog)
+					lastMonitorLog = logCIMonitorStatus(sctx, pr, ciChecksRunningMsg, lastMonitorLog)
 				}
 			}
 		}
@@ -833,11 +836,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 }
 
-func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) string {
+func logCIMonitorStatus(sctx *pipeline.StepContext, pr *scm.PR, message, previous string) string {
 	if message != previous {
 		ready := message == ciChecksPassedMsg || message == ciNoChecksPassedMsg
 		declaredNoCI := message == ciNoChecksPassedMsg
-		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
+		if err := setCIMonitorReadiness(sctx, pr, ready, declaredNoCI); err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
 			if sctx.Run.ContinuationJSON != nil {
 				clearCIMonitorReady(sctx)
@@ -850,7 +853,7 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 }
 
 func clearCIMonitorReady(sctx *pipeline.StepContext) {
-	if err := setCIMonitorReadiness(sctx, false, false); err != nil {
+	if err := setCIMonitorReadiness(sctx, nil, false, false); err != nil {
 		sctx.Log(fmt.Sprintf("warning: could not clear CI readiness: %v", err))
 	}
 }
@@ -860,7 +863,7 @@ func assertContinuationCIFinalHead(sctx *pipeline.StepContext, pr *scm.PR) error
 		return nil
 	}
 	if sctx.Run.LastPushedSHA == nil || *sctx.Run.LastPushedSHA != sctx.Run.HeadSHA ||
-		(pr != nil && pr.HeadSHA != sctx.Run.HeadSHA) {
+		pr == nil || pr.HeadSHA != sctx.Run.HeadSHA {
 		return historyRefusal("continuation requires checks on the exact final published head")
 	}
 	if err := pipeline.AssertContinuationHistory(sctx); err != nil {
@@ -894,12 +897,12 @@ func verifyContinuationTerminalCI(sctx *pipeline.StepContext, host scm.Host, pr 
 	return nil
 }
 
-func setCIMonitorReadiness(sctx *pipeline.StepContext, ready, declaredNoCI bool) error {
+func setCIMonitorReadiness(sctx *pipeline.StepContext, pr *scm.PR, ready, declaredNoCI bool) error {
 	if ready && sctx.Run.ContinuationJSON != nil {
 		if declaredNoCI {
 			return historyRefusal("continuation requires checks on the exact final published head")
 		}
-		if err := assertContinuationCIFinalHead(sctx, nil); err != nil {
+		if err := assertContinuationCIFinalHead(sctx, pr); err != nil {
 			return err
 		}
 		if err := AssertContinuationPolicy(sctx); err != nil {
