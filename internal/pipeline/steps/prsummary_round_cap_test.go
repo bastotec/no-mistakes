@@ -95,7 +95,7 @@ func TestBuildPipelineSummary_ReviewRoundCapFixWithoutRereview(t *testing.T) {
 		},
 	}
 
-	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	md, risk := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 	if !strings.Contains(md, "⚠️ **Review** - 1 finding fixed without rereview, 1 unresolved review note (round cap 1 reached)") {
 		t.Fatalf("status line does not name the unreviewed fix and the note:\n%s", md)
 	}
@@ -107,5 +107,21 @@ func TestBuildPipelineSummary_ReviewRoundCapFixWithoutRereview(t *testing.T) {
 	}
 	if !strings.Contains(md, "Unresolved review notes (review.max_rounds 1 reached, not fixed):") {
 		t.Fatalf("details do not list the unresolved notes:\n%s", md)
+	}
+	if strings.Contains(md, "**Review** - passed") || strings.Contains(md, "no issues remain") {
+		t.Fatalf("an unreviewed fix must not read as a clean verdict:\n%s", md)
+	}
+	history, dispositions, ok := strings.Cut(risk, "\n\nFinal recorded dispositions (not an independent clean verdict for the attested head):\n\n")
+	if !ok || !strings.HasPrefix(history, "Historical review assessments (not current-behavior claims):\n\n") ||
+		!strings.Contains(history, "- 🚨 High: r") {
+		t.Fatalf("expected historical high risk without a new clean verdict, got: %q", risk)
+	}
+	unresolved, fixed, ok := strings.Cut(dispositions, "\nFixed without rereview (residual risk unverified):\n\n")
+	if !ok || !strings.Contains(fixed, "real bug") {
+		t.Fatalf("risk does not disclose the unverified fix: %q", dispositions)
+	}
+	if !strings.Contains(unresolved, "rename this helper") || strings.Contains(unresolved, "real bug") ||
+		strings.Contains(unresolved, "No unresolved findings recorded.") {
+		t.Fatalf("risk confuses repaired findings with unresolved notes: %q", unresolved)
 	}
 }

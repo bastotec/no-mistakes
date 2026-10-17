@@ -81,17 +81,19 @@ func TestBuildPipelineSummary_ReviewUsesFinalCleanState(t *testing.T) {
 	if strings.Contains(md, "user-fixed") {
 		t.Errorf("did not expect user-fixed in review line, got:\n%s", md)
 	}
-	if strings.Contains(risk, "initial risk rationale") {
-		t.Errorf("did not expect stale initial rationale in risk, got: %q", risk)
+	history, dispositions, ok := strings.Cut(risk, "\n\nFinal recorded dispositions (not an independent clean verdict for the attested head):\n\n")
+	if !ok {
+		t.Fatalf("expected historical assessments separated from final dispositions, got: %q", risk)
 	}
-	if !strings.Contains(risk, "follow-up fixes reduced risk") {
-		t.Errorf("expected final rationale in risk, got: %q", risk)
+	if !strings.HasPrefix(history, "Historical review assessments (not current-behavior claims):\n\n") ||
+		!strings.Contains(history, "- ⚠️ Medium: initial risk rationale") {
+		t.Errorf("expected clearly labeled initial assessment, got: %q", history)
 	}
-	if !strings.Contains(risk, "Low") {
-		t.Errorf("expected capitalized Low in risk, got: %q", risk)
+	if !strings.HasSuffix(history, "- ✅ Low: follow-up fixes reduced risk") {
+		t.Errorf("expected final low-risk assessment last in history, got: %q", history)
 	}
-	if !strings.Contains(risk, "✅") {
-		t.Errorf("expected checkmark for low risk, got: %q", risk)
+	if dispositions != "- No unresolved findings recorded." {
+		t.Errorf("expected no current concerns or invented residual-risk verdict, got: %q", dispositions)
 	}
 	if !strings.Contains(md, "🔧 Fix attempted; result not reported.") || !strings.Contains(md, "✅ Re-checked - no issues remain.") {
 		t.Errorf("expected the fix and verification to remain visible for multi-round review, got:\n%s", md)
@@ -242,13 +244,18 @@ func TestBuildPipelineSummary_ReviewUsesLatestRoundNotFirst(t *testing.T) {
 	}
 	_, risk := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
 
-	if strings.Contains(risk, "initial concern") {
-		t.Errorf("expected latest round risk, not stale first round, got: %q", risk)
+	history, dispositions, ok := strings.Cut(risk, "\n\nFinal recorded dispositions (not an independent clean verdict for the attested head):\n\n")
+	if !ok {
+		t.Fatalf("expected historical assessments separated from final dispositions, got: %q", risk)
 	}
-	if !strings.Contains(risk, "issues resolved") {
-		t.Errorf("expected latest round rationale, got: %q", risk)
+	if !strings.HasPrefix(history, "Historical review assessments (not current-behavior claims):\n\n") ||
+		!strings.Contains(history, "- ⚠️ Medium: initial concern") {
+		t.Errorf("expected initial concern retained only as historical evidence, got: %q", history)
 	}
-	if !strings.Contains(risk, "Low") {
-		t.Errorf("expected Low risk from latest round, got: %q", risk)
+	if !strings.HasSuffix(history, "- ✅ Low: issues resolved") {
+		t.Errorf("expected latest round's low-risk assessment last in history, got: %q", history)
+	}
+	if dispositions != "- No unresolved findings recorded." {
+		t.Errorf("expected latest round's resolved state, not stale concerns or a clean verdict, got: %q", dispositions)
 	}
 }
