@@ -131,6 +131,7 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
 | `--preserve-history` | `string` | (none) | Full integration-base commit SHA; requires `--base-branch`, preserves the submitted head and forbids automatic integration and forced publication |
 | `--existing-pr` | `string` | (none) | Explicit existing github.com PR URL; validates repository, source ref and head; remembered for the branch; never falls back to another PR |
+| `--continue-pr` | `string` | (none) | Continue the same PR from an unpublished strict descendant, preserving exact author history and original base, excluding local Test and requiring final-head CI; normal fast-forward push only |
 | `--retire-existing-pr` | `bool` | `false` | Drop the branch's remembered PR association and start no run |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
@@ -216,6 +217,26 @@ A validated association belongs to the **branch**, so you name the pull request 
 Establishing and replacing require the submitted head to already be the pull request's live head, because you are asserting which commit the target is at. A reused association does not: those runs exist to publish a new head, so they prove the association itself - the pull request is open, lives in the recorded repository, and its source is this push repository and branch - and the head is proven against the remote before the push and again by the PR and CI steps. A head this run just published is re-read a bounded number of times before a mismatch is reported, because the forge serves pull requests from a replica; the comparison itself stays exact, and an ancestor is never accepted. Either way a stale, ambiguous or unreadable target - a merged or closed pull request, a source ref that moved - fails the run rather than discovering, creating or updating a different pull request, and the failure names the branch, its pull request and the retire command. Nothing is retired automatically. Retiring is refused while a run is active on the branch, so an in-flight run never changes where it publishes.
 
 Branches with no association are untouched: ordinary repository-scoped discovery is unchanged, and an `origin` pointing at a fork does **not** automatically discover upstream PRs. For general fork routing, including new PR creation, use [`init --fork-url`](#no-mistakes-init).
+
+### History-safe existing-PR continuation
+
+Use a **distinct operation** when an open GitHub PR has an unpublished correction on top of its published source head:
+
+```sh
+no-mistakes axi run \
+  --continue-pr https://github.com/upstream/widgets/pull/168 \
+  --intent "Validate and publish the additive correction without rewriting author history"
+```
+
+The clean invoking feature branch must be a **strict descendant** of the exact live PR head. Equal, backward, sibling and merely patch-equivalent submissions refuse. The PR must belong to the selected repository, source repository and branch; no discovery, creation or alternate target is permitted. Both CLI and daemon must support this operation: an older daemon rejects the distinct RPC, with no push-hook fallback.
+
+The run durably pins the submitted author head, original PR head, PR URL, base branch, current base tip and unique original merge base. Main may already be ahead at admission: this operation **does not integrate main**. Review and repair measure from the pinned original merge base. Every step and agent boundary rechecks exact ancestry and external PR/source/base identity; a changed PR head, retargeted PR, moved base tip, missing read or incompatible repair refuses. A repair can append descendants, but cannot rewrite submitted commits or integrate a base that changes the original relationship. These checks are not a Git sandbox: agents run trusted tools, and an incompatible tool result is rejected before it acquires recorded head or publication authority. CI merge conflicts never launch an integration resolver.
+
+Review, Document and Lint remain required. The **entire local Test step is explicitly excluded**, including `commands.test` and its agent, and is recorded and rendered as **skipped**, never passed or live-validated. CI must report real passing checks for the exact final published head: a trusted `no_ci` declaration, empty check list, previous-head evidence, skipped CI or an approval over failing/unverifiable checks cannot substitute. CI repairs always return through Review and the remaining validation stages before publication, regardless of the ordinary repair-revalidation setting. A repository check that requires a completed local Test step will still refuse this skipped Test; this operation does not waive external repository policy.
+
+Publication uses only an ordinary fast-forward push, never force or a known-head lease. A non-fast-forward race is rejected by the remote itself. Before and after publication the same PR is validated; its author-owned title and narrative stay intact and only the owned evidence appendix is updated. As with ordinary publication, a refused push can leave the proposed-head appendix ahead of the source branch, failing closed rather than claiming successful publication.
+
+`--continue-pr` cannot be combined with `--existing-pr`, `--preserve-history`, `--skip`, `--base-branch`, `--retire-existing-pr`, or launch-receipt flags. Their existing contracts are unchanged; Test exclusion is part of this operation, not permission to pass invalid flag combinations. While active, the run cannot be superseded. Reattach with the same URL and submitted or current run head; no new intent is required for reattachment. Pins survive daemon recovery and additive fixes. `rerun` refuses to repin this operation: after a terminal refusal, follow branch-custody guidance and explicitly admit another strict descendant if appropriate. The branch remembers the same PR association, but the continuation policy belongs to this run only; later ordinary runs retain their ordinary integration and Test semantics.
 
 ### Strict launch receipts
 

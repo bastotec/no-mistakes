@@ -15,6 +15,7 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
+	CheckRunPolicy        func() error
 	Ctx                   context.Context
 	Run                   *db.Run
 	Repo                  *db.Repo

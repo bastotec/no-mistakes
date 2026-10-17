@@ -164,7 +164,7 @@ func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate 
 	lastSeen := lastKnownBranchTip(ctx, sctx, branch, branchTrackedInPushNamespace(sctx))
 	gitRun := func(args ...string) (string, error) { return stepGitRun(sctx, args...) }
 	var decision forcePushDecision
-	if preservesHistory(sctx) {
+	if preservesHistory(sctx) || sctx.Run.ContinuationJSON != nil {
 		decision, err = historyPushDecision(sctx, pushURL, ref, headBeingPushed)
 	} else {
 		decision, err = resolveForcePushDecision(gitRun, pushURL, ref, headBeingPushed, lastSeen, sctx.Run.BaseSHA)

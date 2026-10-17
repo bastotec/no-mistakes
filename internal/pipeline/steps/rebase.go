@@ -57,7 +57,7 @@ func runIntegrationBranch(sctx *pipeline.StepContext) string {
 }
 
 func (s *RebaseStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
-	if preservesHistory(sctx) {
+	if preservesHistory(sctx) || sctx.Run.ContinuationJSON != nil {
 		if err := AssertHistoryPolicy(sctx); err != nil {
 			return nil, err
 		}

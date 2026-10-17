@@ -50,6 +50,16 @@ func resolveBaseSHA(ctx context.Context, sctx *pipeline.StepContext, workDir, ba
 // - or from the run's own head, which is an empty diff no step reports as a
 // failure. It stops instead.
 func resolveBranchBaseSHA(ctx context.Context, sctx *pipeline.StepContext, fallbackBaseSHA, defaultBranch string) (string, error) {
+	if sctx.Run.ContinuationJSON != nil {
+		if err := AssertContinuationPolicy(sctx); err != nil {
+			return "", err
+		}
+		pins, err := sctx.Run.ContinuationPins()
+		if err != nil {
+			return "", err
+		}
+		return pins.MergeBase, nil
+	}
 	if mb := mergeBaseWithDefaultBranch(ctx, sctx, sctx.WorkDir, defaultBranch); mb != "" {
 		return mb, nil
 	}

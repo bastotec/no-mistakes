@@ -55,6 +55,7 @@ CREATE TABLE IF NOT EXISTS runs (
     pr_base_branch       TEXT,
     preserve_history_base_sha TEXT,
     existing_pr_url      TEXT,
+    continuation_json    TEXT,
     created_at           INTEGER NOT NULL,
     updated_at           INTEGER NOT NULL
 );
@@ -347,6 +348,7 @@ var migrationStatements = []string{
 	`ALTER TABLE runs ADD COLUMN pr_base_branch TEXT`,
 	`ALTER TABLE runs ADD COLUMN preserve_history_base_sha TEXT`,
 	`ALTER TABLE runs ADD COLUMN existing_pr_url TEXT`,
+	`ALTER TABLE runs ADD COLUMN continuation_json TEXT`,
 	// The start of the currently displayed execution/fix round is separate
 	// from started_at, which remains the whole-step clock.
 	`ALTER TABLE step_results ADD COLUMN round_started_at INTEGER`,

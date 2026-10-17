@@ -64,7 +64,24 @@ func (sctx *StepContext) RunAgentSessionContext(parent context.Context, role Ses
 	return sctx.runAgent(parent, opts, role)
 }
 
-func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, sessionRole SessionRole) (*agent.Result, error) {
+func (sctx *StepContext) runAgent(parent context.Context, opts agent.RunOpts, sessionRole SessionRole) (result *agent.Result, err error) {
+	if sctx != nil && sctx.Run != nil && sctx.Run.ContinuationJSON != nil {
+		check := func() error {
+			if sctx.CheckRunPolicy != nil {
+				return sctx.CheckRunPolicy()
+			}
+			return AssertContinuationHistory(sctx)
+		}
+		if err := check(); err != nil {
+			return nil, err
+		}
+		defer func() {
+			if policyErr := check(); policyErr != nil {
+				result = nil
+				err = errors.Join(err, policyErr)
+			}
+		}()
+	}
 	var ag agent.Agent
 	timeout := AgentTimeout(nil)
 	if sctx != nil {

@@ -27,6 +27,9 @@ func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
+	if sctx.Run.ContinuationJSON != nil {
+		return &pipeline.StepOutcome{Skipped: true, SkipReason: "continuation: local Test explicitly excluded; exact-final-head CI required"}, nil
+	}
 	// test.skip is the trusted repository's own decision that its CI owns
 	// testing; Merge already resolved it from the default-branch copy only.
 	// Nothing runs - neither commands.test nor the test agent - and the step

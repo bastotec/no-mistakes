@@ -297,6 +297,9 @@ func (e *Executor) Execute(ctx context.Context, run *db.Run, repo *db.Repo, work
 
 		sr := stepRecords[step.Name()]
 		if e.skips[step.Name()] {
+			if run.ContinuationJSON != nil {
+				return e.failRun(run, repo, fmt.Errorf("continuation: per-run skips are forbidden"), ctx)
+			}
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, 0, 0, ""); err != nil {
 				return e.failRun(run, repo, fmt.Errorf("skip step %s: %w", step.Name(), err), ctx)
 			}
@@ -691,6 +694,9 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, gate.step.Name(), string(types.StepStatusCompleted), "", "", &duration)
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	case types.ActionSkip:
+		if run.ContinuationJSON != nil {
+			return e.failRun(run, repo, fmt.Errorf("continuation: required stages cannot be skipped"), ctx)
+		}
 		e.recordDeclinedRound(gate.lastRoundID, gate.findings, gate.step.Name(), gate.round)
 		if err := e.db.CompleteStepWithStatus(gate.stepResult.ID, types.StepStatusSkipped, recoveredExitCode(gate.stepResult), duration, recoveredLogPath(gate.stepResult)); err != nil {
 			return e.failRun(run, repo, fmt.Errorf("skip recovered step %s: %w", gate.step.Name(), err), ctx)
@@ -1223,13 +1229,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		// error, so the step and its events reach a terminal state.
 		sctx.RestoredSurvivedWork = nil
 		var outcome *StepOutcome
-		var err error
+		sctx.CheckRunPolicy = func() error { return e.checkRunPolicy(sctx) }
+		err := e.checkRunPolicy(sctx)
 		// Only steps whose fix round runs a repair agent get the work back:
 		// Rebase's resolver needs a clean worktree, and a Push or PR retry
 		// would publish it with no agent continuing it.
-		if fixRound && restoresSurvivedWork(stepName) {
+		if err == nil && fixRound && restoresSurvivedWork(stepName) {
 			sctx.RestoredSurvivedWork, err = e.restoreSurvivedWork(run.ID, sctx.WorkDir, writeLog)
-		} else if !fixRound {
+		} else if err == nil && !fixRound {
 			// Restored work a shutdown left in the worktree goes back into a
 			// ref before a round that is not a repair can see it; work that
 			// cannot be moved out stops the round instead of being run over
@@ -1240,7 +1247,13 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if err == nil {
-			outcome, err = step.Execute(sctx)
+			err = e.checkRunPolicy(sctx)
+			if err == nil {
+				outcome, err = step.Execute(sctx)
+			}
+			if policyErr := AssertContinuationHistory(sctx); policyErr != nil {
+				outcome, err = nil, errors.Join(err, policyErr)
+			}
 			// Only repair steps capture: another step's leftovers are not a
 			// repair to continue, and capturing them would replace a handoff
 			// they never contained.
@@ -1554,6 +1567,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			goto done
 
 		case types.ActionSkip:
+			if run.ContinuationJSON != nil {
+				return false, "", fmt.Errorf("continuation: required stages cannot be skipped")
+			}
 			// Skip - mark step skipped and return (not an error)
 			e.recordDeclinedRound(currentRoundID, outcome.Findings, stepName, roundNum)
 			if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusSkipped, finalExitCode, executionMS, logPath); err != nil {
@@ -2032,6 +2048,9 @@ func (e *Executor) applyApprovalOverride(step Step, sctx *StepContext, stepResul
 	}
 	if unresolved == "" {
 		return nil
+	}
+	if sctx.Run.ContinuationJSON != nil && step.Name() == types.StepCI {
+		return fmt.Errorf("continuation requires exact-final-head green CI; approval cannot waive: %s", unresolved)
 	}
 	if dbErr := e.db.SetStepOverrideReason(stepResultID, unresolved); dbErr != nil {
 		return fmt.Errorf("record approval override reason for step %s: %w", step.Name(), dbErr)

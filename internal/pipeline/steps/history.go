@@ -60,6 +60,9 @@ func preservesHistory(sctx *pipeline.StepContext) bool {
 // exactly as the monitor treats the PR state. It mutates nothing, so a refusal
 // here is a decision for the operator, not a reason to end the run.
 func historyConstraintRefusal(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) error {
+	if err := AssertContinuationPolicy(sctx); err != nil {
+		return err
+	}
 	if !preservesHistory(sctx) {
 		return nil
 	}
@@ -87,6 +90,9 @@ func historyConstraintRefusal(sctx *pipeline.StepContext, host scm.Host, pr *scm
 // descendants may proceed. A resumed run reads these pins from its durable row.
 // This is deliberately independent of auto-fix budgets and rebase.strategy.
 func AssertHistoryPolicy(sctx *pipeline.StepContext) error {
+	if err := AssertContinuationPolicy(sctx); err != nil {
+		return err
+	}
 	if !preservesHistory(sctx) {
 		return nil
 	}

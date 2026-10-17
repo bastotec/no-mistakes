@@ -98,6 +98,15 @@ func ValidateExistingPRIdentity(sctx *pipeline.StepContext) (scm.Host, *scm.PR, 
 	if err != nil {
 		return nil, nil, staleAssociation(sctx, err)
 	}
+	if sctx.Run.ContinuationJSON != nil {
+		pins, err := sctx.Run.ContinuationPins()
+		if err != nil {
+			return nil, nil, err
+		}
+		if pr.BaseBranch != pins.BaseBranch {
+			return nil, nil, historyRefusal("continuation: external PR base changed")
+		}
+	}
 	return host, pr, nil
 }
 

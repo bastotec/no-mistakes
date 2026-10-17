@@ -1343,6 +1343,21 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.RerunResult{RunID: id}, nil
 	})
 
+	srv.Handle(ipc.MethodStartContinuationRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.StartContinuationRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, err
+		}
+		id, err := mgr.HandleStartContinuationRun(ctx, &p)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.RerunResult{RunID: id}, nil
+	})
+
 	srv.Handle(ipc.MethodRetireExistingPR, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
@@ -1520,6 +1535,7 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		PRBaseBranch:           r.PRBaseBranch,
 		ExistingPRURL:          r.ExistingPRURL,
 		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
+		ContinuationJSON:       r.ContinuationJSON,
 		AwaitingAgent:          r.AwaitingAgentSince != nil,
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 		CreatedAt:              r.CreatedAt,

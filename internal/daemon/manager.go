@@ -3,6 +3,7 @@ package daemon
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -1126,6 +1127,9 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 		}
 	}
 
+	if selectedRun.ContinuationJSON != nil {
+		return "", fmt.Errorf("continuation cannot be repinned by rerun; recover custody if needed, then explicitly admit a new strict descendant with axi run --continue-pr <url>")
+	}
 	if selectedRun.PreserveHistoryBaseSHA != nil {
 		return "", fmt.Errorf("preserve-history run cannot be implicitly repinned by rerun; recover custody if needed, then use axi run --preserve-history <exact-base-sha> --base-branch <branch> for a new explicit integration")
 	}
@@ -1409,6 +1413,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("active_run_lookup")
 		return "", fmt.Errorf("check active run: %w", err)
 	}
+	if active != nil && active.ContinuationJSON != nil {
+		return "", fmt.Errorf("continuation: run %s owns this branch with immutable pins; no superseding launch is permitted; reattach with axi run --continue-pr <url>", active.ID)
+	}
 	if active != nil && active.PreserveHistoryBaseSHA != nil {
 		trackStartFailure("preserve_history_protected")
 		recorded := active.HeadSHA
@@ -1665,7 +1672,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// proven here; the head is proven again against the remote before the push
 	// and after it by the PR and CI steps.
 	var explicitPR *scm.PR
-	if existingPR != "" {
+	if existingPR != "" && trigger != "continuation" {
 		_, explicitPR, err = steps.ValidateExistingPR(explicitCtx, headSHA)
 	} else {
 		_, explicitPR, err = steps.ValidateExistingPRIdentity(explicitCtx)
@@ -1693,6 +1700,39 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		}
 		explicitBase = base
 		run.PRBaseBranch = &base
+	}
+
+	if trigger == "continuation" {
+		if explicitPR == nil {
+			m.db.UpdateRunError(run.ID, "continuation: explicit PR required")
+			return "", fmt.Errorf("continuation: explicit PR required")
+		}
+		if err := steps.PrepareContinuation(explicitCtx, explicitPR.HeadSHA); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		tip, err := steps.ContinuationBaseTip(explicitCtx, explicitBase)
+		if err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		base, err := git.Run(ctx, wtDir, "merge-base", "--all", tip, explicitPR.HeadSHA)
+		if err != nil || strings.Contains(base, "\n") {
+			m.db.UpdateRunError(run.ID, "continuation: original merge base is not unique")
+			return "", fmt.Errorf("continuation: original merge base is not unique")
+		}
+		pins := db.ContinuationPins{Version: 1, PRHead: explicitPR.HeadSHA, BaseTip: tip, MergeBase: base, BaseBranch: explicitBase, URL: target}
+		raw, err := json.Marshal(pins)
+		if err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
+		policy := string(raw)
+		run.ContinuationJSON = &policy
+		if err := steps.AssertContinuationPolicy(explicitCtx); err != nil {
+			m.db.UpdateRunError(run.ID, err.Error())
+			return "", err
+		}
 	}
 
 	// Create agent. In demo mode, newPipelineAgent returns a no-op agent, and it
@@ -1740,7 +1780,21 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// exactly where it already was, at every one of those failure points rather
 	// than only at the forge check.
 	if explicitPR != nil {
-		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target, explicitBase); err != nil {
+		if run.ContinuationJSON != nil {
+			if err := steps.AssertContinuationPolicy(explicitCtx); err != nil {
+				m.db.UpdateRunError(run.ID, err.Error())
+				return "", err
+			}
+			if err := bindExplicitGateBranch(ctx, gateDir, branch, headSHA); err != nil {
+				m.db.UpdateRunError(run.ID, err.Error())
+				return "", err
+			}
+		}
+		var policy []string
+		if run.ContinuationJSON != nil {
+			policy = append(policy, *run.ContinuationJSON)
+		}
+		if err := m.db.AssociateRunWithExistingPR(run.ID, repo.ID, branch, target, explicitBase, policy...); err != nil {
 			m.db.UpdateRunError(run.ID, err.Error())
 			trackStartFailure("associate_existing_pr")
 			return "", err

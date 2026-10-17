@@ -121,6 +121,7 @@ type runView struct {
 	SubmittedHeadSHA       *string
 	PRBaseBranch           *string
 	PreserveHistoryBaseSHA *string
+	ContinuationJSON       *string
 	// AwaitingAgentSince is the unix-seconds time the run parked at a gate
 	// awaiting the driving agent, or nil when the run is not parked. It powers
 	// the top-level parked signal in the run object.
@@ -146,6 +147,7 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 		SubmittedHeadSHA:       r.SubmittedHeadSHA,
 		PRBaseBranch:           r.PRBaseBranch,
 		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
+		ContinuationJSON:       r.ContinuationJSON,
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 		CIOverrideReason:       r.CIOverrideReason,
 		SurvivedWork:           r.SurvivedWork,
@@ -193,6 +195,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 		SubmittedHeadSHA:       r.SubmittedHeadSHA,
 		PRBaseBranch:           r.PRBaseBranch,
 		PreserveHistoryBaseSHA: r.PreserveHistoryBaseSHA,
+		ContinuationJSON:       r.ContinuationJSON,
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 	}
 	if database != nil {
@@ -484,6 +487,15 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 	}
 	fields = append(fields, toon.Field{Key: "head", Value: shortSHA(rv.HeadSHA)})
 	fields = append(fields, toon.Field{Key: "head_sha", Value: rv.HeadSHA})
+	if rv.ContinuationJSON != nil {
+		r := &db.Run{ContinuationJSON: rv.ContinuationJSON}
+		p, err := r.ContinuationPins()
+		if err != nil {
+			fields = append(fields, toon.Field{Key: "continuation_error", Value: err.Error()})
+		} else {
+			fields = append(fields, toon.Field{Key: "continuation", Value: toon.NewObject(toon.Field{Key: "original_pr_head_sha", Value: p.PRHead}, toon.Field{Key: "base_tip_sha", Value: p.BaseTip}, toon.Field{Key: "merge_base_sha", Value: p.MergeBase}, toon.Field{Key: "base_branch", Value: p.BaseBranch}, toon.Field{Key: "local_test", Value: "excluded"}, toon.Field{Key: "publication", Value: "fast-forward-only"})})
+		}
+	}
 	if rv.PreserveHistoryBaseSHA != nil {
 		pins := []toon.Field{{Key: "base_sha", Value: *rv.PreserveHistoryBaseSHA}}
 		if rv.SubmittedHeadSHA != nil {

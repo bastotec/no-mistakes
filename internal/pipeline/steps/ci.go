@@ -775,7 +775,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					// Without that declaration, keep waiting - delayed registration
 					// is common and must never look green. Elapsed time is not
 					// evidence; there is no grace-period promotion path.
-					if sctx.Config != nil && sctx.Config.NoCI {
+					if sctx.Config != nil && sctx.Config.NoCI && sctx.Run.ContinuationJSON == nil {
 						sctx.DeferredFindings = ""
 						lastMonitorLog = logCIMonitorStatus(sctx, ciNoChecksPassedMsg, lastMonitorLog)
 					} else {
@@ -805,6 +805,10 @@ func logCIMonitorStatus(sctx *pipeline.StepContext, message, previous string) st
 		declaredNoCI := message == ciNoChecksPassedMsg
 		if err := setCIMonitorReadiness(sctx, ready, declaredNoCI); err != nil {
 			sctx.Log(fmt.Sprintf("warning: could not persist CI readiness: %v", err))
+			if sctx.Run.ContinuationJSON != nil {
+				clearCIMonitorReady(sctx)
+				return ""
+			}
 		}
 		sctx.Log(message)
 	}
@@ -818,6 +822,18 @@ func clearCIMonitorReady(sctx *pipeline.StepContext) {
 }
 
 func setCIMonitorReadiness(sctx *pipeline.StepContext, ready, declaredNoCI bool) error {
+	if ready && sctx.Run.ContinuationJSON != nil {
+		if declaredNoCI || sctx.Run.LastPushedSHA == nil || *sctx.Run.LastPushedSHA != sctx.Run.HeadSHA {
+			return historyRefusal("continuation requires checks on the exact final published head")
+		}
+		if err := AssertContinuationPolicy(sctx); err != nil {
+			return err
+		}
+		head, err := stepGitHeadSHA(sctx)
+		if err != nil || head != sctx.Run.HeadSHA {
+			return historyRefusal("continuation final worktree head differs from checked head")
+		}
+	}
 	declaredNoCI = ready && declaredNoCI
 	if err := sctx.DB.SetRunCIReadyWithReason(sctx.Run.ID, ready, declaredNoCI); err != nil {
 		return err

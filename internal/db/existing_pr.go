@@ -18,7 +18,11 @@ import (
 // otherwise means an operator `--base-branch` override, and that is exactly how
 // a later rerun reads it (`explicitRunTarget`), so a base persisted without the
 // pin beside it would be inherited as an override the operator never made.
-func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL, prBaseBranch string) error {
+func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL, prBaseBranch string, continuation ...string) error {
+	var pins *string
+	if len(continuation) > 0 {
+		pins = &continuation[0]
+	}
 	ts := now()
 	tx, err := d.sql.Begin()
 	if err != nil {
@@ -26,8 +30,8 @@ func (d *DB) AssociateRunWithExistingPR(runID, repoID, branch, prURL, prBaseBran
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(
-		`UPDATE runs SET existing_pr_url = ?, pr_url = ?, pr_base_branch = ?, updated_at = ? WHERE id = ?`,
-		prURL, prURL, prBaseBranch, ts, runID,
+		`UPDATE runs SET existing_pr_url = ?, pr_url = ?, pr_base_branch = ?, continuation_json = ?, updated_at = ? WHERE id = ? AND (continuation_json IS NULL OR (continuation_json = ? AND existing_pr_url = ? AND pr_base_branch = ?))`,
+		prURL, prURL, prBaseBranch, pins, ts, runID, pins, prURL, prBaseBranch,
 	)
 	if err != nil {
 		return fmt.Errorf("pin run to existing pr: %w", err)

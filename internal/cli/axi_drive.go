@@ -121,6 +121,7 @@ func newAxiRunCmd() *cobra.Command {
 	var validationGeneration string
 	var baseBranch string
 	var preserveHistoryBase string
+	var continuePR string
 	var existingPR string
 	var retireExistingPR bool
 	var wait time.Duration
@@ -177,6 +178,14 @@ func newAxiRunCmd() *cobra.Command {
 					return emitError(cmd, 2, err.Error(),
 						"Valid steps: intent, rebase, review, jev, test, document, lint, push, pr, ci")
 				}
+				if cmd.Flags().Changed("continue-pr") {
+					for _, name := range []string{"existing-pr", "preserve-history", "skip", "base-branch", "launch-nonce", "validation-generation", "retire-existing-pr"} {
+						if cmd.Flags().Changed(name) {
+							return emitError(cmd, 2, "--continue-pr cannot be combined with --"+name)
+						}
+					}
+					return runAxiContinuation(cmd, autoYes, intent, continuePR, wait)
+				}
 				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
@@ -203,6 +212,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&validationGeneration, "validation-generation", "", "opaque generation bound to --launch-nonce proof mode")
 	cmd.Flags().StringVar(&baseBranch, "base-branch", "", "integration branch to open the PR against for this run only (overrides pr.base_branch)")
 	cmd.Flags().StringVar(&preserveHistoryBase, "preserve-history", "", "pin the exact integration base SHA and submitted history; require --base-branch, forbid rebase/merge and force updates (including CI repair)")
+	cmd.Flags().StringVar(&continuePR, "continue-pr", "", "continue an existing PR from an unpublished strict descendant; immutable history/base, local Test excluded, mandatory CI, fast-forward-only publication")
 	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
 	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
 	bindAxiWaitFlag(cmd, &wait)
@@ -218,7 +228,7 @@ func runAxiRun(cmd *cobra.Command, autoYes bool, skipSteps []types.StepName, int
 // --yes and --wait shape how a run is driven rather than what it validates, so
 // a retirement that drives nothing simply leaves them with nothing to do - and
 // refusing them would lock out any harness that appends them to every command.
-var launchShapingFlags = []string{"intent", "skip", "base-branch", "preserve-history", "existing-pr", "launch-nonce", "validation-generation"}
+var launchShapingFlags = []string{"intent", "skip", "base-branch", "preserve-history", "existing-pr", "continue-pr", "launch-nonce", "validation-generation"}
 
 func changedLaunchFlags(cmd *cobra.Command) []string {
 	var conflicting []string
@@ -643,13 +653,15 @@ func freshRunBranchOwnershipState(ctx context.Context, env *axiEnv) *branchsync.
 // fails closed when the active run cannot be read.
 func protectedRunOwnership(env *axiEnv, state branchsync.State) *branchsync.State {
 	run, err := env.d.GetActiveRun(env.repo.ID, state.Local.Branch)
-	if err == nil && (run == nil || run.PreserveHistoryBaseSHA == nil || run.HeadSHA == state.Local.Head) {
+	if err == nil && (run == nil || (run.PreserveHistoryBaseSHA == nil && run.ContinuationJSON == nil) || run.HeadSHA == state.Local.Head) {
 		return nil
 	}
 	blocked := state
 	blocked.Safety = "blocked_preserve_history"
 	if err != nil {
 		blocked.Error = fmt.Sprintf("could not confirm whether an active run pins this branch with --preserve-history: %v", err)
+	} else if run.ContinuationJSON != nil {
+		blocked.Error = fmt.Sprintf("continuation: run %s pins this branch; reattach with --continue-pr instead of pushing a superseding head", run.ID)
 	} else {
 		blocked.Error = fmt.Sprintf("run %s pins this branch's integration with --preserve-history; a fresh run would move the gate branch it publishes from, so none was started", run.ID)
 	}

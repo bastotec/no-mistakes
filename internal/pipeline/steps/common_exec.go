@@ -236,6 +236,17 @@ func stepGitPush(sctx *pipeline.StepContext, remote, ref, expectedSHA string, fo
 // explicit source SHA (rather than HEAD) is what lets a caller publish exactly
 // the commit it verified, even if the worktree moves underneath it.
 func stepGitPushCommit(sctx *pipeline.StepContext, remote, commitSHA, ref, expectedSHA string, forceWithLease bool) error {
+	if sctx.Run != nil && sctx.Run.ContinuationJSON != nil {
+		if forceWithLease || expectedSHA != "" {
+			return historyRefusal("continuation forbids forced publication, including a known-head lease")
+		}
+		if err := pipeline.AssertContinuationHistory(sctx); err != nil {
+			return err
+		}
+		if _, err := stepGitRun(sctx, "merge-base", "--is-ancestor", *sctx.Run.SubmittedHeadSHA, commitSHA); err != nil {
+			return historyRefusal("continuation publication lost submitted history")
+		}
+	}
 	args := []string{"push", remote}
 	if forceWithLease {
 		if expectedSHA != "" {

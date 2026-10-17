@@ -174,7 +174,7 @@ func resolveCIRepairBases(ctx context.Context, sctx *pipeline.StepContext, baseB
 // The result reports whether the recorded head advanced and whether the repair
 // must revalidate; a zero result means the agent produced no changes.
 func (s *CIStep) autoFixCI(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, targets ciFixTargets) (ciRepairResult, error) {
-	if preservesHistory(sctx) && targets.MergeConflict {
+	if (preservesHistory(sctx) || sctx.Run.ContinuationJSON != nil) && targets.MergeConflict {
 		// Refuse before even launching a resolver; a post-rebase ancestry
 		// check would only diagnose the history loss after it happened.
 		return ciRepairResult{}, historyRefusal("CI merge-conflict repair requires integration; prepare a new integration explicitly, not an automatic rebase")
@@ -590,6 +590,9 @@ func (s *CIStep) retryProtectedPathRepair(sctx *pipeline.StepContext) (ciRepairR
 }
 
 func (s *CIStep) commitRepair(sctx *pipeline.StepContext, summary string) (ciRepairResult, error) {
+	if err := AssertContinuationPolicy(sctx); err != nil {
+		return ciRepairResult{}, err
+	}
 	status, err := stepGitRun(sctx, "status", "--porcelain")
 	if err != nil {
 		return ciRepairResult{}, fmt.Errorf("check CI changes: %w", err)
@@ -685,6 +688,12 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 // the two paths differ in whether the repair is published now or held until
 // Review has approved it.
 func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
+	if err := AssertContinuationPolicy(sctx); err != nil {
+		return ciRepairResult{}, err
+	}
+	if sctx.Run.ContinuationJSON != nil {
+		return s.recordLocalRepair(sctx, headSHA)
+	}
 	if ciRevalidatesRepairs(sctx) {
 		return s.recordLocalRepair(sctx, headSHA)
 	}

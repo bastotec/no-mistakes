@@ -9,10 +9,11 @@ import (
 
 // JSON-RPC 2.0 method names.
 const (
-	MethodPushReceived       = "push_received"
-	MethodStartFreshRun      = "start_fresh_run"
-	MethodStartExistingPRRun = "start_existing_pr_run"
-	MethodRetireExistingPR   = "retire_existing_pr"
+	MethodPushReceived         = "push_received"
+	MethodStartFreshRun        = "start_fresh_run"
+	MethodStartExistingPRRun   = "start_existing_pr_run"
+	MethodStartContinuationRun = "start_continuation_run"
+	MethodRetireExistingPR     = "retire_existing_pr"
 	// A distinct method prevents an older daemon from silently ignoring the
 	// history contract. This path imports locally; it never fires a gate hook.
 	MethodStartHistoryRun    = "start_history_run"
@@ -99,6 +100,11 @@ type StartExistingPRRunParams struct {
 	HeadSHA string `json:"head_sha"`
 	Intent  string `json:"intent"`
 	URL     string `json:"url"`
+}
+
+type StartContinuationRunParams struct {
+	StartExistingPRRunParams
+	WorkDir string `json:"work_dir"`
 }
 
 // RetireExistingPRParams drops a branch's canonical pull request association so
@@ -366,6 +372,7 @@ type RunInfo struct {
 	PRBaseBranch           *string `json:"pr_base_branch,omitempty"`
 	ExistingPRURL          *string `json:"existing_pr_url,omitempty"`
 	PreserveHistoryBaseSHA *string `json:"preserve_history_base_sha,omitempty"`
+	ContinuationJSON       *string `json:"continuation_json,omitempty"`
 	// AwaitingAgent is true while the run is parked at a gate awaiting the
 	// driving agent's response. AwaitingAgentSince is the unix-seconds time it
 	// parked, so a supervisor can read "parked for N seconds" in one call. Both
