@@ -365,7 +365,7 @@ func markdownOutsideHTMLComments(line string, inComment *bool) string {
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
-	pipelineMD, _, _ := s.buildPipelineSections(sctx, provider, true, false)
+	pipelineMD, riskLine, _ := s.buildPipelineSections(sctx, provider, true, false)
 	start := strings.Index(pipelineMD, pipelineAttestationCommentPrefix)
 	if start < 0 {
 		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline attestation")
@@ -381,8 +381,15 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 	if !strings.Contains(pipelineMD, noMistakesPRSignature) {
 		return "", fmt.Errorf("cannot publish template narrative without the no-mistakes signature")
 	}
-	if provider == scm.ProviderBitbucket {
-		return noMistakesPRSignature + "\n\n```text\n" + attestation + "\n```", nil
+	// Keep the repository's heading contract intact while sharing the same
+	// disposition-aware risk evidence as ordinary descriptions. The appendix
+	// is run-owned; the author's narrative is never rewritten to match it.
+	risk := ""
+	if riskLine != "" {
+		risk = "\n\n" + neutralizeAttestationMarkers(riskLine)
 	}
-	return noMistakesPRSignature + "\n\n" + attestation, nil
+	if provider == scm.ProviderBitbucket {
+		return noMistakesPRSignature + "\n\n```text\n" + attestation + "\n```" + risk, nil
+	}
+	return noMistakesPRSignature + "\n\n" + attestation + risk, nil
 }

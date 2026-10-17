@@ -1363,18 +1363,78 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 		}
 
 		src := reviewStepFindings(sr, rounds[sr.ID])
-		if src == nil || src.RiskLevel == "" {
+		if src == nil {
 			return ""
 		}
 
-		emoji := riskEmoji(src.RiskLevel)
-		label := capitalizeRisk(src.RiskLevel)
-		if src.RiskRationale != "" {
-			return fmt.Sprintf("%s %s: %s", emoji, label, src.RiskRationale)
+		// Fix-only rounds can retain the pre-fix risk rationale verbatim.
+		// Even a rereview's rating describes that review, not necessarily the
+		// attested head. Keep those assessments as history and derive what is
+		// still open from the recorded final dispositions, never from prose.
+		hasRepairs := len(src.ResolvedByFix) > 0
+		for _, r := range rounds[sr.ID] {
+			hasRepairs = hasRepairs || r.IsFixRound()
 		}
-		return fmt.Sprintf("%s %s", emoji, label)
+		if hasRepairs {
+			return reviewRiskAfterRepairs(sr, rounds[sr.ID], src)
+		}
+		if src.RiskLevel == "" {
+			return ""
+		}
+		return recordedRiskAssessment(src)
 	}
 	return ""
+}
+
+func recordedRiskAssessment(f *types.Findings) string {
+	line := fmt.Sprintf("%s %s", riskEmoji(f.RiskLevel), capitalizeRisk(f.RiskLevel))
+	if f.RiskRationale != "" {
+		line += ": " + f.RiskRationale
+	}
+	return line
+}
+
+// reviewRiskAfterRepairs is shared by ordinary bodies and owned appendices
+// through BuildPipelineSummaryFor. Ratings remain historical, including high
+// ratings; absence of open findings is not a new residual-risk verdict.
+func reviewRiskAfterRepairs(sr *db.StepResult, rounds []*db.StepRound, final *types.Findings) string {
+	var b strings.Builder
+	b.WriteString("Historical review assessments (not current-behavior claims):\n\n")
+	seen := map[string]bool{}
+	writeAssessment := func(f *types.Findings) {
+		if f == nil || f.RiskLevel == "" {
+			return
+		}
+		line := recordedRiskAssessment(f)
+		if !seen[line] {
+			b.WriteString("- " + escapePRText(line, prBodyMarkdown) + "\n")
+			seen[line] = true
+		}
+	}
+	for _, r := range rounds {
+		if r.FindingsJSON != nil {
+			if f, err := types.ParseFindingsJSON(*r.FindingsJSON); err == nil {
+				writeAssessment(&f)
+			}
+		}
+	}
+	writeAssessment(final)
+	b.WriteString("\nFinal recorded dispositions (not an independent clean verdict for the attested head):\n\n")
+	if len(final.Items)+len(final.UnresolvedNotes) == 0 {
+		b.WriteString("- No unresolved findings recorded.\n")
+	} else {
+		b.WriteString("Unresolved findings and review notes:\n\n")
+		writeFindingItems(&b, sr, &types.Findings{Items: final.Items}, prBodyMarkdown)
+		writeFindingItems(&b, sr, &types.Findings{Items: final.UnresolvedNotes}, prBodyMarkdown)
+	}
+	if len(final.ResolvedByFix) > 0 {
+		b.WriteString("\nFixed without rereview (residual risk unverified):\n\n")
+		writeFindingItems(&b, sr, &types.Findings{Items: final.ResolvedByFix}, prBodyMarkdown)
+	}
+	if len(final.ReviewUnreviewed) > 0 {
+		b.WriteString("\n" + unreviewedAnglesLine(final.ReviewUnreviewed) + "\n")
+	}
+	return strings.TrimSpace(b.String())
 }
 
 func capitalizeRisk(level string) string {
