@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -16,11 +17,7 @@ func testPreviewMarker(runID string) string {
 	return "<!-- no-mistakes:pr-validation:" + runID + " -->"
 }
 
-func TestPreviewReplacementOwner(sctx *pipeline.StepContext) (string, error) {
-	runs, err := sctx.DB.BranchTestPreviewRuns(sctx.Repo.ID, sctx.Run.Branch)
-	if err != nil || len(runs) == 0 {
-		return "", err
-	}
+func TestPreviewReplacementOwner(sctx *pipeline.StepContext, runs []db.TestPreviewRun) (string, error) {
 	if resolvedHost(sctx, sctx.Repo.UpstreamURL) != "github.com" {
 		for _, run := range runs {
 			if run.PRURL != "" {

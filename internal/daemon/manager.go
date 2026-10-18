@@ -1173,6 +1173,12 @@ func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree st
 }
 
 func (m *RunManager) refuseManagedTestPreviewReplacement(ctx context.Context, repoID, branch string) error {
+	// A first launch has no possible preview owner. Leave configuration
+	// validation to run setup so its failure is recorded on the failed run.
+	runs, err := m.db.BranchTestPreviewRuns(repoID, branch)
+	if err != nil || len(runs) == 0 {
+		return err
+	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	repo, err := m.db.GetRepo(repoID)
@@ -1193,7 +1199,7 @@ func (m *RunManager) refuseManagedTestPreviewReplacement(ctx context.Context, re
 	owner, err := steps.TestPreviewReplacementOwner(&pipeline.StepContext{
 		Ctx: ctx, DB: m.db, Repo: repo, Run: &db.Run{Branch: branch},
 		WorkDir: m.paths.RepoDir(repoID), ForgeContext: forge,
-	})
+	}, runs)
 	if err != nil {
 		return fmt.Errorf("read branch preview ownership: %w", err)
 	}

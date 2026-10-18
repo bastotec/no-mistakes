@@ -762,6 +762,7 @@ func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testi
 }
 
 func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
+	installTestPreviewForge(t) // The completed Test step requires a preview-ownership lookup on rerun.
 	review := &mockPassStep{name: types.StepReview}
 	testStep := &mockPassStep{name: types.StepTest}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {
