@@ -47,18 +47,16 @@ func (d *DB) ExportTestSnapshot(path, runID string) error {
 		`INSERT INTO test_snapshot.repos (id,working_path,upstream_url,fork_url,default_branch,created_at) SELECT id,working_path,'',NULL,default_branch,created_at FROM main.repos WHERE id=(SELECT repo_id FROM main.runs WHERE id=?)`,
 		`INSERT INTO test_snapshot.runs SELECT * FROM main.runs WHERE id=?`,
 		`INSERT INTO test_snapshot.step_results SELECT * FROM main.step_results WHERE run_id=?`,
-		`INSERT INTO test_snapshot.step_rounds SELECT * FROM main.step_rounds WHERE step_result_id IN (SELECT id FROM main.step_results WHERE run_id=?)`,
+		`INSERT INTO test_snapshot.step_rounds
+		 (id,step_result_id,round,trigger_type,findings_json,reviewed_head_sha,starting_head_sha,trusted_config_sha,user_findings_json,selected_finding_ids,selection_source,fix_summary,repair_published,duration_ms,created_at)
+		 SELECT id,step_result_id,round,trigger_type,findings_json,reviewed_head_sha,starting_head_sha,trusted_config_sha,user_findings_json,selected_finding_ids,selection_source,fix_summary,repair_published,duration_ms,created_at
+		 FROM main.step_rounds WHERE step_result_id IN (SELECT id FROM main.step_results WHERE run_id=?)`,
 		`INSERT INTO test_snapshot.run_test_previews SELECT * FROM main.run_test_previews WHERE run_id=?`,
 	}
 	for _, query := range copies {
 		if _, err = tx.ExecContext(ctx, query, runID); err != nil {
 			return fmt.Errorf("export Test records: %w", err)
 		}
-	}
-	// Replay provenance can contain operator-authored YAML, including inline
-	// credentials. Test history needs findings and decisions, not config bytes.
-	if _, err := tx.ExecContext(ctx, `UPDATE test_snapshot.step_rounds SET global_config_yaml=NULL, repo_config_yaml=NULL`); err != nil {
-		return err
 	}
 	return tx.Commit()
 }

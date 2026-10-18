@@ -2,10 +2,13 @@ package pipeline
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 )
+
+var ErrIsolatedTestHandoff = errors.New("isolated Test state handoff incomplete")
 
 // RunIsolatedTestRepair gives the whole namespace worker the same durable
 // custody as a native repair invocation. A terminal whole-step result replays
@@ -52,6 +55,9 @@ func (sctx *StepContext) RunIsolatedTestRepair(run func(markStarted func(int) er
 		}
 		return outcome, runErr
 	}
+	if errors.Is(runErr, ErrIsolatedTestHandoff) {
+		return outcome, runErr
+	}
 	var resultJSON []byte
 	if outcome != nil {
 		output, err := json.Marshal(outcome)
@@ -65,11 +71,44 @@ func (sctx *StepContext) RunIsolatedTestRepair(run func(markStarted func(int) er
 	}
 	var class, message *string
 	if runErr != nil {
-		c, m := repairInvocationErrorClass(runErr), runErr.Error()
+		payload, err := json.Marshal(EncodeIsolatedTestError(runErr))
+		if err != nil {
+			return nil, err
+		}
+		c, m := "isolated_test_error", string(payload)
 		class, message = &c, &m
 	}
 	if err := sctx.DB.FinishRepairInvocation(invocation.ID, resultJSON, outcome != nil, class, message); err != nil {
 		return nil, fmt.Errorf("persist isolated Test repair result: %w", err)
 	}
 	return outcome, runErr
+}
+
+type IsolatedTestError struct {
+	Class         string
+	Message       string
+	ProtectedPath *ProtectedPathError
+}
+
+func EncodeIsolatedTestError(err error) *IsolatedTestError {
+	failure := &IsolatedTestError{Class: repairInvocationErrorClass(err), Message: err.Error()}
+	var refusal *ProtectedPathError
+	if errors.As(err, &refusal) {
+		copy := *refusal
+		failure.ProtectedPath = &copy
+	}
+	return failure
+}
+
+func (failure *IsolatedTestError) Restore() error {
+	if failure == nil {
+		return errors.New("isolated Test: missing error details")
+	}
+	if failure.ProtectedPath != nil {
+		return fmt.Errorf("%s: %w", failure.Message, failure.ProtectedPath)
+	}
+	if failure.Class == "isolated_test_error" {
+		return errors.New(failure.Message)
+	}
+	return restoreRepairInvocationError(&failure.Class, failure.Message)
 }

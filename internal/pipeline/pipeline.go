@@ -59,6 +59,8 @@ type StepContext struct {
 	// for a whole-Test worker. It prevents interrupted repair side effects
 	// from being replayed merely because the daemon restarted.
 	IsolatedRepairRound func() string
+	IsolatedRound       func() int
+	IsolatedActivity    func()
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an

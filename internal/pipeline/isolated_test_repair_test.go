@@ -1,6 +1,13 @@
 package pipeline
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"strings"
 	"testing"
 
@@ -74,5 +81,105 @@ func TestIsolatedTestInterruptedRepairRefusesReplay(t *testing.T) {
 	_, err := sctx.RunIsolatedTestRepair(func(func(int) error) (*StepOutcome, error) { called = true; return &StepOutcome{}, nil })
 	if err == nil || !strings.Contains(err.Error(), "refusing to replay") || called {
 		t.Fatalf("interrupted side effects were replayed: called=%v err=%v", called, err)
+	}
+}
+
+func TestIsolatedTestRepairReplaysTypedFailures(t *testing.T) {
+	for _, failure := range []error{fmt.Errorf("fix: %w", ErrTestAgentTimeout), fmt.Errorf("fix: %w", &ProtectedPathError{Path: "package.lock", Rule: "*.lock"})} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			sctx := isolatedRepairContext(t)
+			calls := 0
+			work := func(mark func(int) error) (*StepOutcome, error) {
+				calls++
+				if err := mark(os.Getpid()); err != nil {
+					return nil, err
+				}
+				payload, err := json.Marshal(EncodeIsolatedTestError(failure))
+				if err != nil {
+					return nil, err
+				}
+				var received IsolatedTestError
+				if err := json.Unmarshal(payload, &received); err != nil {
+					return nil, err
+				}
+				return nil, received.Restore()
+			}
+			for attempt := 0; attempt < 2; attempt++ {
+				_, err := sctx.RunIsolatedTestRepair(work)
+				if errors.Is(failure, ErrTestAgentTimeout) {
+					if !errors.Is(err, ErrTestAgentTimeout) {
+						t.Fatalf("timeout identity lost on attempt %d: %v", attempt, err)
+					}
+				} else {
+					var refusal *ProtectedPathError
+					if !errors.As(err, &refusal) || refusal.Path != "package.lock" || refusal.Rule != "*.lock" {
+						t.Fatalf("refusal details lost on attempt %d: %v", attempt, err)
+					}
+					outcome := ProtectedPathOutcome(err)
+					if outcome == nil || !outcome.NeedsApproval || !HasProtectedPathRefusal(outcome.Findings) {
+						t.Fatalf("refusal no longer parks: %+v", outcome)
+					}
+				}
+			}
+			if calls != 1 {
+				t.Fatalf("terminal failure reran worker %d times", calls)
+			}
+		})
+	}
+}
+
+func TestExecutor_IsolatedTestTimeoutCapturesSurvivedWork(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	dir := survivedWorkRepo(t)
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		work := func(mark func(int) error) (*StepOutcome, error) {
+			if err := mark(os.Getpid()); err != nil {
+				return nil, err
+			}
+			writeFile(t, dir, "progress.txt", "survived")
+			encoded, err := json.Marshal(EncodeIsolatedTestError(fmt.Errorf("isolated fix: %w", ErrTestAgentTimeout)))
+			if err != nil {
+				return nil, err
+			}
+			var received IsolatedTestError
+			if err := json.Unmarshal(encoded, &received); err != nil {
+				return nil, err
+			}
+			return nil, received.Restore()
+		}
+		if _, err := sctx.RunIsolatedTestRepair(work); !errors.Is(err, ErrTestAgentTimeout) {
+			return nil, fmt.Errorf("initial timeout lost: %v", err)
+		}
+		return sctx.RunIsolatedTestRepair(func(func(int) error) (*StepOutcome, error) { t.Error("terminal repair reran"); return nil, nil })
+	}}
+	executor := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+	_ = executor.Execute(context.Background(), run, repo, dir)
+	work, err := database.GetRunSurvivedWork(run.ID)
+	if err != nil || work == nil || work.State != types.SurvivedWorkCaptured {
+		t.Fatalf("isolated timeout left no handoff: %+v %v", work, err)
+	}
+	if got := gitRun(t, dir, "show", work.Ref+":progress.txt"); got != "survived" {
+		t.Fatalf("repair lost: %q", got)
+	}
+}
+
+func TestIsolatedTestIncompleteHandoffRetainsRepairCustody(t *testing.T) {
+	sctx := isolatedRepairContext(t)
+	_, err := sctx.RunIsolatedTestRepair(func(mark func(int) error) (*StepOutcome, error) {
+		if err := mark(os.Getpid()); err != nil {
+			return nil, err
+		}
+		return nil, errors.Join(ErrTestAgentTimeout, ErrIsolatedTestHandoff)
+	})
+	if !errors.Is(err, ErrTestAgentTimeout) || !errors.Is(err, ErrIsolatedTestHandoff) {
+		t.Fatalf("handoff failure lost: %v", err)
+	}
+	called := false
+	_, err = sctx.RunIsolatedTestRepair(func(func(int) error) (*StepOutcome, error) { called = true; return &StepOutcome{}, nil })
+	if err == nil || !strings.Contains(err.Error(), "refusing to replay") || called {
+		t.Fatalf("incomplete handoff replayed: called=%v err=%v", called, err)
 	}
 }

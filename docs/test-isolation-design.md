@@ -156,17 +156,32 @@ explicit opt-in; restarting the daemon retains an existing run's pin.
 
 The worker receives a disposable snapshot of only its run's advisory database
 records, with remote credentials and raw config provenance removed. The live
-daemon database and sockets are not mounted. Worker head updates require a
-parent acknowledgement; a repair's whole-step invocation is recorded under the
-existing durable repair-custody protocol, never reconstructed as an unconfined
-agent turn. An interrupted started repair follows the existing reconciliation
+daemon database and sockets are not mounted. Config provenance is excluded before
+snapshot insertion and from prior-branch decision input, not deleted after export.
+
+Shared gate Git metadata is never mounted. Each worker receives an independent
+object/ref/index store with a generated configuration and only the resolved Git
+author/committer identity. The worktree's Git pointer is overmounted read-only;
+worker configuration, hooks and unrelated refs are disposable. A head update sends
+an object pack, not a metadata path: the parent checks its objects and ancestry,
+then advances only the detached run HEAD and index before acknowledging it.
+
+Worker errors retain Test timeout and protected-path classifications, including
+terminal repair replay, so interrupted edits keep their existing custody and
+approval behavior. Privacy-safe invocation records and lifecycle activity return
+to the parent; no live database or raw agent output is needed for accounting.
+A repair's whole-step invocation is recorded under the existing durable
+repair-custody protocol, never reconstructed as an unconfined agent turn. An interrupted started repair follows the existing reconciliation
 gate rather than blindly replaying its side effects.
 
 Namespace teardown kills detached descendants and discards PostgreSQL storage.
 The invocation-owned bridge is closed, and successful/error cleanup removes its
-scratch snapshot and policy files. After a daemon crash, the next invocation
-cleans its own stale scratch directory and creates a new cluster and channel;
-it never imports prior disposable database contents. This does not clean
+scratch snapshot and policy files after the final index handoff. Staged-only
+repair bytes are imported as Git objects and index entries without checking out
+files. An unexpected worker/daemon death retains private Git state for
+reconciliation instead of deleting it or reusing it as another invocation.
+A subsequent authorized invocation needs fresh storage, a new cluster and a new
+channel; it never imports prior disposable database contents. This does not clean
 intentional worktree edits or roll back application commits.
 
 ## Bounded activation proposal (not activation approval)

@@ -28,9 +28,10 @@ func Check() error {
 
 // Options are built by the daemon, never by repository configuration.
 type Options struct {
-	Worker, Deck, State, WorkDir, GateDir, EvidenceDir, ScratchParent string
-	PostgresRoot                                                      string
-	Model                                                             ModelConfig
+	Worker, Deck, State, WorkDir, EvidenceDir, ScratchParent string
+	Git                                                      *GitWorkspace
+	PostgresRoot                                             string
+	Model                                                    ModelConfig
 }
 
 type Invocation struct {
@@ -61,7 +62,11 @@ func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 	if err != nil {
 		return nil, fmt.Errorf("test-isolation-model-credential: configured key file is unavailable")
 	}
-	for _, mount := range []string{o.WorkDir, o.GateDir, o.EvidenceDir, o.PostgresRoot, o.Worker, o.Deck, o.State, "/usr", "/bin", "/lib", "/lib64"} {
+	mounts := []string{o.WorkDir, o.EvidenceDir, o.PostgresRoot, o.Worker, o.Deck, o.State, "/usr", "/bin", "/lib", "/lib64"}
+	if o.Git != nil {
+		mounts = append(mounts, o.Git.Dir, o.Git.Pointer)
+	}
+	for _, mount := range mounts {
 		if mount == "" {
 			continue
 		}
@@ -123,7 +128,7 @@ func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 	}
 	args = append(args, "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/tmp/home", "--tmpfs", "/nm")
 	// Only run-owned paths are writable. Never bind /, HOME, NM_HOME or /run.
-	for _, path := range []string{o.WorkDir, o.GateDir, o.EvidenceDir} {
+	for _, path := range []string{o.WorkDir, o.EvidenceDir} {
 		if path == "" {
 			continue
 		}
@@ -131,6 +136,18 @@ func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 			return nil, fmt.Errorf("test-isolation-mount: absolute run-owned paths are required")
 		}
 		args = append(args, "--bind", path, path)
+	}
+	if o.Git != nil {
+		args = append(args, "--bind", o.Git.Dir, "/nm/git")
+		gitPath := filepath.Join(o.WorkDir, ".git")
+		info, err := os.Lstat(gitPath)
+		if err != nil {
+			return nil, err
+		}
+		if !info.Mode().IsRegular() {
+			return nil, fmt.Errorf("test-isolation-mount: a linked run worktree is required")
+		}
+		args = append(args, "--ro-bind", o.Git.Pointer, gitPath)
 	}
 	for _, binding := range [][2]string{{o.Worker, "/nm/worker"}, {o.Deck, "/nm/deck"}, {o.State, "/nm/state.db"}} {
 		args = append(args, "--ro-bind", binding[0], binding[1])
@@ -149,7 +166,11 @@ func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 	if o.PostgresRoot != "" {
 		args = append(args, "--ro-bind", o.PostgresRoot, "/nm/postgres")
 	}
-	for _, entry := range Environment(o.WorkDir) {
+	environment := Environment(o.WorkDir)
+	if o.Git != nil {
+		environment = append(environment, o.Git.Identity...)
+	}
+	for _, entry := range environment {
 		for i := range entry {
 			if entry[i] == '=' {
 				args = append(args, "--setenv", entry[:i], entry[i+1:])

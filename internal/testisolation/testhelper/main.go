@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
@@ -53,6 +54,9 @@ func run() error {
 		if err := json.NewDecoder(os.Stdin).Decode(&r); err != nil {
 			return err
 		}
+		if r.Mode == "git-metadata" {
+			return probeGit(r)
+		}
 		return probe(r)
 	}
 	if err := testisolation.RestrictWorkerNetwork(); err != nil {
@@ -61,6 +65,9 @@ func run() error {
 	var r request
 	if err := json.NewDecoder(os.Stdin).Decode(&r); err != nil {
 		return err
+	}
+	if r.Mode == "git-metadata" {
+		return runDescendant(r)
 	}
 	if r.Mode == "postgres" {
 		closeServices, err := testisolation.ServePrivateServices()
@@ -117,6 +124,9 @@ func run() error {
 	if r.Hold {
 		select {}
 	}
+	return runDescendant(r)
+}
+func runDescendant(r request) error {
 	cmd := exec.Command("/nm/worker", "grandchild")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	input, _ := json.Marshal(r)
@@ -245,4 +255,61 @@ func probe(r request) error {
 	}
 	fmt.Println("detached grandchild: database transaction, model streaming, credential and egress boundaries passed")
 	return nil
+}
+
+func probeGit(r request) error {
+	if _, err := os.Stat(r.HiddenFile); !os.IsNotExist(err) {
+		return fmt.Errorf("live gate metadata is visible: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(r.HiddenFile, "config"), []byte("escape"), 0600); err == nil {
+		return fmt.Errorf("live gate config writable")
+	}
+	if err := os.WriteFile(".git", []byte("gitdir: /tmp/escape\n"), 0600); err == nil {
+		return fmt.Errorf("live Git pointer writable")
+	}
+	if err := os.Rename(".git", ".git-displaced"); err == nil {
+		return fmt.Errorf("live Git pointer replaceable")
+	}
+	run := func(args ...string) (string, error) {
+		cmd := exec.Command("git", args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return "", fmt.Errorf("git %v: %w: %s", args, err, out)
+		}
+		return strings.TrimSpace(string(out)), nil
+	}
+	if err := os.WriteFile("tracked", []byte("namespace repair\n"), 0600); err != nil {
+		return err
+	}
+	if _, err := run("add", "tracked"); err != nil {
+		return err
+	}
+	if _, err := run("commit", "-m", "namespace repair"); err != nil {
+		return err
+	}
+	head, err := run("rev-parse", "HEAD")
+	if err != nil {
+		return err
+	}
+	callback := filepath.Join(os.Getenv("PWD"), "callback")
+	if err := os.WriteFile(callback, []byte("#!/bin/sh\necho escaped > "+filepath.Join(os.Getenv("PWD"), "escaped")+"\n"), 0700); err != nil {
+		return err
+	}
+	if _, err := run("config", "core.fsmonitor", callback); err != nil {
+		return err
+	}
+	if _, err := run("config", "core.hooksPath", filepath.Dir(callback)); err != nil {
+		return err
+	}
+	if _, err := run("update-ref", "refs/heads/foreign", head); err != nil {
+		return err
+	}
+	pack, err := testisolation.ExportGitHead(context.Background(), os.Getenv("PWD"), r.Canary, head)
+	if err != nil {
+		return err
+	}
+	return json.NewEncoder(os.Stdout).Encode(struct {
+		Head string
+		Pack []byte
+	}{head, pack})
 }

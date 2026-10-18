@@ -1,7 +1,10 @@
 package db
 
 import (
+	"bytes"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -82,12 +85,26 @@ func TestTestSnapshotContainsOnlyThisRunAndNoConfigProvenance(t *testing.T) {
 		t.Fatal(err)
 	}
 	findings := `{"findings":[]}`
-	if _, err := d.InsertReviewStepRoundWithProvenance(step.ID, 1, "initial", &findings, nil, "head", "base", "trusted", []byte("operator-secret"), []byte("repo-secret"), 1); err != nil {
+	globalSecret := []byte(strings.Repeat("operator-secret-credential-", 2048))
+	repoSecret := []byte(strings.Repeat("repo-secret-credential-", 2048))
+	if _, err := d.InsertReviewStepRoundWithProvenance(step.ID, 1, "initial", &findings, nil, "head", "base", "trusted", globalSecret, repoSecret, 1); err != nil {
 		t.Fatal(err)
 	}
 	path := filepath.Join(t.TempDir(), "snapshot.sqlite")
 	if err := d.ExportTestSnapshot(path, run.ID); err != nil {
 		t.Fatal(err)
+	}
+	for _, file := range []string{path, path + "-wal", path + "-journal"} {
+		contents, err := os.ReadFile(file)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(contents, globalSecret[:128]) || bytes.Contains(contents, repoSecret[:128]) {
+			t.Fatal("exported SQLite bytes contain secret provenance")
+		}
 	}
 	snapshot, err := Open(path)
 	if err != nil {

@@ -62,6 +62,7 @@ type buildError struct {
 func (e *buildError) Error() string { return e.err.Error() + ": " + e.output }
 
 func TestMain(m *testing.M) {
+	os.Unsetenv("GIT_CONFIG_COUNT")
 	code := m.Run()
 	if helperPath != "" {
 		os.RemoveAll(filepath.Dir(helperPath))

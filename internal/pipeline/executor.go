@@ -1187,6 +1187,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		MarkRunning:         markRunning,
 		OnPRMerged:          e.onPRMerged,
 		IsolatedRepairRound: func() string { return activeRepairRoundID },
+		IsolatedRound:       func() int { return roundNum + 1 },
+		IsolatedActivity: func() {
+			onAgentLifecycle(agent.LifecycleEvent{Agent: "deck", Phase: agent.LifecyclePhaseActivity})
+		},
 	}
 	if stepName == types.StepTest {
 		e.mu.Lock()
@@ -2137,6 +2141,8 @@ func (a *gateStepBoundaryAgent) NeutralizesGateInstructions() bool {
 
 func repairInvocationErrorClass(err error) string {
 	switch {
+	case errors.Is(err, ErrTestAgentTimeout):
+		return "test_agent_timeout"
 	case errors.Is(err, ErrReviewAgentTimeout):
 		return "review_agent_timeout"
 	case errors.Is(err, ErrAgentTimeout):
@@ -2157,6 +2163,14 @@ func restoreRepairInvocationError(class *string, message string) error {
 		return errors.New(message)
 	}
 	switch *class {
+	case "isolated_test_error":
+		var failure IsolatedTestError
+		if err := json.Unmarshal([]byte(message), &failure); err != nil {
+			return fmt.Errorf("decode isolated Test error: %w", err)
+		}
+		return failure.Restore()
+	case "test_agent_timeout":
+		return fmt.Errorf("%s: %w", message, ErrTestAgentTimeout)
 	case "review_agent_timeout":
 		return fmt.Errorf("%s: %w", message, ErrReviewAgentTimeout)
 	case "agent_timeout":

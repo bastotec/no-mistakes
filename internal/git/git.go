@@ -173,6 +173,13 @@ func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []stri
 	return out, nil
 }
 
+func RunRawWithInput(ctx context.Context, dir, input string, args ...string) ([]byte, error) {
+	if isBareGitDir(dir) {
+		args = append([]string{"--git-dir=" + dir}, args...)
+	}
+	return runInDirWithEnvAndInputRaw(ctx, dir, nil, input, args...)
+}
+
 // ValidateBareRepository verifies both the filesystem shape and Git's own bare
 // repository classification. The Git query is explicitly scoped with
 // --git-dir, so validation itself cannot discover an ancestor repository.
