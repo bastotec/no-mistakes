@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -41,6 +42,110 @@ func TestTestStepIsolationRefusesUnsupportedAgentBeforeAnyCommand(t *testing.T) 
 		t.Fatal("command ran before refusal")
 	}
 }
+func TestIsolatedTestWorkerFailurePreservesCauseDiagnosticsAndCustody(t *testing.T) {
+	if runtime.GOOS != "linux" || os.Getuid() == 0 {
+		t.Skip("Linux unprivileged worker launcher")
+	}
+	for _, mode := range []string{"startup", "input", "shutdown"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			bin := filepath.Join(root, "bin")
+			if err := os.Mkdir(bin, 0700); err != nil {
+				t.Fatal(err)
+			}
+			body := "#!/bin/sh\n"
+			if mode != "input" {
+				body += "IFS= read -r request\n"
+			}
+			if mode == "shutdown" {
+				body += "printf '%s\\n' '{\"Kind\":\"log\",\"Text\":\"worker ready\"}'\nexec /bin/sleep 30\n"
+			} else {
+				body += "echo 'namespace prerequisite refused' >&2\nexit 23\n"
+			}
+			if err := os.WriteFile(filepath.Join(bin, "bwrap"), []byte(body), 0700); err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"deck", "initdb", "postgres", "psql"} {
+				if err := os.WriteFile(filepath.Join(bin, name), []byte("#!/bin/sh\nexit 0\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			key := filepath.Join(t.TempDir(), "model-key")
+			if err := os.WriteFile(key, []byte("fixture-only"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+			t.Setenv("NM_TEST_POSTGRES_ROOT", root)
+			t.Setenv("NM_TEST_MODEL_URL", "http://127.0.0.1:1/v1")
+			t.Setenv("NM_TEST_MODEL_KEY_FILE", key)
+			t.Setenv("NM_TEST_MODEL", "fixture-model")
+			source, base, head := setupGitRepo(t)
+			work := filepath.Join(t.TempDir(), "work")
+			gitCmd(t, source, "worktree", "add", "--detach", work, head)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, work, base, head, config.Commands{})
+			step, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.StartStepWithAutoFixLimit(step.ID, 1); err != nil {
+				t.Fatal(err)
+			}
+			findings := `{"findings":[{"id":"test-1","severity":"error","action":"auto-fix","description":"repair"}]}`
+			round, err := sctx.DB.InsertStepRound(step.ID, 1, "initial", &findings, nil, 1)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if decision, err := sctx.DB.ReserveStepRepairWithSelection(step.ID, round.ID, 1, nil); err != nil || !decision.Granted {
+				t.Fatalf("reserve repair: %+v %v", decision, err)
+			}
+			if err := sctx.DB.ClaimStepRepair(step.ID, round.ID); err != nil {
+				t.Fatal(err)
+			}
+			sctx.StepResultID, sctx.Fixing = step.ID, true
+			sctx.IsolatedRepairRound = func() string { return round.ID }
+			deadline, stop := context.WithTimeout(context.Background(), 10*time.Second)
+			defer stop()
+			ctx, cancel := context.WithCancelCause(deadline)
+			defer cancel(nil)
+			sctx.Ctx = ctx
+			if mode == "shutdown" {
+				sctx.Log = func(text string) {
+					if text == "worker ready" {
+						cancel(pipeline.ErrDaemonShutdown)
+					}
+				}
+			} else if mode == "input" {
+				sctx.UserIntent = strings.Repeat("x", 1<<20)
+			}
+			outcome, err := executeIsolatedTest(sctx)
+			if outcome != nil || !errors.Is(err, pipeline.ErrIsolatedTestHandoff) {
+				t.Fatalf("incomplete handoff lost: %+v %v", outcome, err)
+			}
+			if mode == "shutdown" {
+				if !errors.Is(err, pipeline.ErrDaemonShutdown) {
+					t.Fatalf("shutdown cause lost: %v", err)
+				}
+			} else {
+				var exit *exec.ExitError
+				if !errors.As(err, &exit) || exit.ExitCode() != 23 || !strings.Contains(err.Error(), "namespace prerequisite refused") {
+					t.Fatalf("worker diagnostic lost: %v", err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(filepath.Dir(sctx.EvidenceDir), "."+sctx.Run.ID+"-test-isolation", "git")); err != nil {
+				t.Fatalf("interrupted workspace lost: %v", err)
+			}
+			called := false
+			_, err = sctx.RunIsolatedTestRepair(func(func(int) error) (*pipeline.StepOutcome, error) {
+				called = true
+				return nil, nil
+			})
+			if called || err == nil || !strings.Contains(err.Error(), "refusing to replay") {
+				t.Fatalf("started repair custody lost: called=%v err=%v", called, err)
+			}
+		})
+	}
+}
+
 func TestIsolatedTestWorkerConfiguredPreparationUsesPrivateGit(t *testing.T) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux isolation only")

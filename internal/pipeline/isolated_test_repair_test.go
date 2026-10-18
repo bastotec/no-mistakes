@@ -166,6 +166,60 @@ func TestExecutor_IsolatedTestTimeoutCapturesSurvivedWork(t *testing.T) {
 	}
 }
 
+func TestExecutor_IsolatedTestShutdownRetainsRecoverableRepairGate(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		if !sctx.Fixing {
+			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"test-1","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+		}
+		return sctx.RunIsolatedTestRepair(func(mark func(int) error) (*StepOutcome, error) {
+			if err := mark(12345); err != nil {
+				return nil, err
+			}
+			cancel(ErrDaemonShutdown)
+			return nil, errors.Join(context.Cause(sctx.Ctx), ErrIsolatedTestHandoff)
+		})
+	}}
+	executor := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	done := make(chan struct{})
+	var executeErr error
+	workdir := t.TempDir()
+	go func() {
+		executeErr = executor.Execute(ctx, run, repo, workdir)
+		close(done)
+	}()
+	defer func() { cancel(nil); <-done }()
+	waitForStepStatus(t, database, run.ID, types.StepTest, types.StepStatusAwaitingApproval)
+	if err := executor.Respond(types.StepTest, types.ActionFix, []string{"test-1"}); err != nil {
+		t.Fatal(err)
+	}
+	<-done
+	if !errors.Is(executeErr, ErrDaemonShutdown) {
+		t.Fatalf("shutdown classification lost: %v", executeErr)
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil || len(results) != 1 || results[0].Status != types.StepStatusFixing {
+		t.Fatalf("shutdown failed active Test repair: %+v %v", results, err)
+	}
+	rounds, err := database.GetRoundsByStep(results[0].ID)
+	if err != nil || len(rounds) == 0 {
+		t.Fatalf("repair round missing: %+v %v", rounds, err)
+	}
+	if _, err := database.MarkRepairInvocationUnresolved(results[0].ID, rounds[len(rounds)-1].ID); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := database.GetRun(run.ID)
+	if err != nil || stored.Status != types.RunRunning {
+		t.Fatalf("shutdown failed active run: %+v %v", stored, err)
+	}
+	gate, err := executor.recoveredGate(run.ID)
+	if err != nil || gate == nil || !gate.repairUnresolved {
+		t.Fatalf("interrupted repair gate is not recoverable: %+v %v", gate, err)
+	}
+}
+
 func TestIsolatedTestIncompleteHandoffRetainsRepairCustody(t *testing.T) {
 	sctx := isolatedRepairContext(t)
 	_, err := sctx.RunIsolatedTestRepair(func(mark func(int) error) (*StepOutcome, error) {

@@ -10,6 +10,16 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 )
 
+func runGitRaw(ctx context.Context, dir, input string, args ...string) ([]byte, error) {
+	args = append([]string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"}, args...)
+	return git.RunRawWithInput(ctx, dir, input, args...)
+}
+
+func runGit(ctx context.Context, dir, input string, args ...string) (string, error) {
+	out, err := runGitRaw(ctx, dir, input, args...)
+	return strings.TrimSpace(string(out)), err
+}
+
 type GitWorkspace struct {
 	Dir      string
 	Pointer  string
@@ -19,7 +29,7 @@ type GitWorkspace struct {
 func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integrationRefs ...string) (*GitWorkspace, error) {
 	workspace := &GitWorkspace{Dir: filepath.Join(root, "git"), Pointer: filepath.Join(root, "git-pointer")}
 	for _, role := range []string{"AUTHOR", "COMMITTER"} {
-		ident, err := git.Run(ctx, workdir, "var", "GIT_"+role+"_IDENT")
+		ident, err := runGit(ctx, workdir, "", "var", "GIT_"+role+"_IDENT")
 		if err != nil {
 			return nil, fmt.Errorf("resolve isolated Git identity: %w", err)
 		}
@@ -29,11 +39,11 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 		}
 		workspace.Identity = append(workspace.Identity, "GIT_"+role+"_NAME="+ident[:start], "GIT_"+role+"_EMAIL="+ident[start+2:end])
 	}
-	format, err := git.Run(ctx, workdir, "rev-parse", "--show-object-format")
+	format, err := runGit(ctx, workdir, "", "rev-parse", "--show-object-format")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.Run(ctx, workdir, "init", "--bare", "--template=", "--object-format="+format, workspace.Dir); err != nil {
+	if _, err := runGit(ctx, workdir, "", "init", "--bare", "--template=", "--object-format="+format, workspace.Dir); err != nil {
 		return nil, err
 	}
 	config := "[core]\nrepositoryformatversion = 0\nbare = false\n"
@@ -43,24 +53,24 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 	if err := os.WriteFile(filepath.Join(workspace.Dir, "config"), []byte(config), 0600); err != nil {
 		return nil, err
 	}
-	if _, err := git.Run(ctx, workdir, "config", "--file", filepath.Join(workspace.Dir, "config"), "core.worktree", workdir); err != nil {
+	if _, err := runGit(ctx, workdir, "", "config", "--file", filepath.Join(workspace.Dir, "config"), "core.worktree", workdir); err != nil {
 		return nil, err
 	}
-	head, err := git.HeadSHA(ctx, workdir)
+	head, err := runGit(ctx, workdir, "", "rev-parse", "HEAD")
 	if err != nil {
 		return nil, err
 	}
 	revisions := []string{head}
 	var integrationRef, integrationHead string
 	for _, ref := range integrationRefs {
-		if _, err := git.Run(ctx, workdir, "merge-base", head, ref); err != nil {
+		if _, err := runGit(ctx, workdir, "", "merge-base", head, ref); err != nil {
 			continue
 		}
-		integrationRef, err = git.Run(ctx, workdir, "rev-parse", "--symbolic-full-name", "--verify", ref)
+		integrationRef, err = runGit(ctx, workdir, "", "rev-parse", "--symbolic-full-name", "--verify", ref)
 		if err != nil || !strings.HasPrefix(integrationRef, "refs/") {
 			return nil, fmt.Errorf("resolve isolated Git integration ref: %s", ref)
 		}
-		integrationHead, err = git.Run(ctx, workdir, "rev-parse", "--verify", integrationRef+"^{commit}")
+		integrationHead, err = runGit(ctx, workdir, "", "rev-parse", "--verify", integrationRef+"^{commit}")
 		if err != nil {
 			return nil, err
 		}
@@ -70,18 +80,18 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 	if integrationRef == "" && validHead(fallbackBase) && !git.IsZeroSHA(fallbackBase) {
 		revisions = append(revisions, fallbackBase)
 	}
-	pack, err := git.RunRawWithInput(ctx, workdir, strings.Join(revisions, "\n")+"\n", "pack-objects", "--stdout", "--revs")
+	pack, err := runGitRaw(ctx, workdir, strings.Join(revisions, "\n")+"\n", "pack-objects", "--stdout", "--revs")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.RunWithInput(ctx, workdir, string(pack), "--git-dir="+workspace.Dir, "index-pack", "--stdin", "--strict"); err != nil {
+	if _, err := runGit(ctx, workdir, string(pack), "--git-dir="+workspace.Dir, "index-pack", "--stdin", "--strict"); err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(filepath.Join(workspace.Dir, "HEAD"), []byte(head+"\n"), 0600); err != nil {
 		return nil, err
 	}
 	if integrationRef != "" {
-		if _, err := git.Run(ctx, workdir, "--git-dir="+workspace.Dir, "update-ref", integrationRef, integrationHead); err != nil {
+		if _, err := runGit(ctx, workdir, "", "--git-dir="+workspace.Dir, "update-ref", integrationRef, integrationHead); err != nil {
 			return nil, err
 		}
 	}
@@ -114,37 +124,37 @@ func ExportGitHead(ctx context.Context, workdir, base, head string) ([]byte, err
 	if !validHead(base) || !validHead(head) {
 		return nil, fmt.Errorf("invalid isolated Git head")
 	}
-	return git.RunRawWithInput(ctx, workdir, head+"\n^"+base+"\n", "pack-objects", "--stdout", "--revs")
+	return runGitRaw(ctx, workdir, head+"\n^"+base+"\n", "pack-objects", "--stdout", "--revs")
 }
 
 func ImportGitHead(ctx context.Context, workdir, base, head string, pack []byte) error {
 	if !validHead(base) || !validHead(head) {
 		return fmt.Errorf("invalid isolated Git head")
 	}
-	if _, err := git.Run(ctx, workdir, "symbolic-ref", "-q", "HEAD"); err == nil {
+	if _, err := runGit(ctx, workdir, "", "symbolic-ref", "-q", "HEAD"); err == nil {
 		return fmt.Errorf("isolated Test requires a detached run HEAD")
 	}
-	current, err := git.HeadSHA(ctx, workdir)
+	current, err := runGit(ctx, workdir, "", "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
 	if current != base {
 		return fmt.Errorf("isolated Test run HEAD moved before import")
 	}
-	if _, err := git.RunWithInput(ctx, workdir, string(pack), "index-pack", "--stdin", "--strict"); err != nil {
+	if _, err := runGit(ctx, workdir, string(pack), "index-pack", "--stdin", "--strict"); err != nil {
 		return err
 	}
-	kind, err := git.Run(ctx, workdir, "cat-file", "-t", head)
+	kind, err := runGit(ctx, workdir, "", "cat-file", "-t", head)
 	if err != nil || kind != "commit" {
 		return fmt.Errorf("isolated Test head is not a commit")
 	}
-	if _, err := git.Run(ctx, workdir, "merge-base", "--is-ancestor", base, head); err != nil {
+	if _, err := runGit(ctx, workdir, "", "merge-base", "--is-ancestor", base, head); err != nil {
 		return fmt.Errorf("isolated Test head rewrote run history: %w", err)
 	}
-	if _, err := git.Run(ctx, workdir, "update-ref", "--no-deref", "HEAD", head, base); err != nil {
+	if _, err := runGit(ctx, workdir, "", "update-ref", "--no-deref", "HEAD", head, base); err != nil {
 		return err
 	}
-	_, err = git.Run(ctx, workdir, "read-tree", head)
+	_, err = runGit(ctx, workdir, "", "read-tree", head)
 	return err
 }
 
@@ -157,7 +167,7 @@ func ExportGitIndex(ctx context.Context, workdir, head string) (*GitIndex, error
 	if !validHead(head) {
 		return nil, fmt.Errorf("invalid isolated Git head")
 	}
-	entries, err := git.RunRaw(ctx, workdir, "ls-files", "--stage", "-z")
+	entries, err := runGitRaw(ctx, workdir, "", "ls-files", "--stage", "-z")
 	if err != nil {
 		return nil, err
 	}
@@ -166,7 +176,7 @@ func ExportGitIndex(ctx context.Context, workdir, head string) (*GitIndex, error
 		return nil, err
 	}
 	revisions := strings.Join(append(objects, "^"+head), "\n") + "\n"
-	pack, err := git.RunRawWithInput(ctx, workdir, revisions, "pack-objects", "--stdout", "--revs")
+	pack, err := runGitRaw(ctx, workdir, revisions, "pack-objects", "--stdout", "--revs")
 	if err != nil {
 		return nil, err
 	}
@@ -181,11 +191,11 @@ func ImportGitIndex(ctx context.Context, workdir string, index *GitIndex) error 
 	if err != nil {
 		return err
 	}
-	if _, err := git.RunWithInput(ctx, workdir, string(index.Pack), "index-pack", "--stdin", "--strict"); err != nil {
+	if _, err := runGit(ctx, workdir, string(index.Pack), "index-pack", "--stdin", "--strict"); err != nil {
 		return err
 	}
 	if len(objects) != 0 {
-		kinds, err := git.RunWithInput(ctx, workdir, strings.Join(objects, "\n")+"\n", "cat-file", "--batch-check=%(objecttype)")
+		kinds, err := runGit(ctx, workdir, strings.Join(objects, "\n")+"\n", "cat-file", "--batch-check=%(objecttype)")
 		if err != nil {
 			return err
 		}
@@ -199,11 +209,11 @@ func ImportGitIndex(ctx context.Context, workdir string, index *GitIndex) error 
 			}
 		}
 	}
-	head, err := git.HeadSHA(ctx, workdir)
+	head, err := runGit(ctx, workdir, "", "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
-	paths, err := git.RunRaw(ctx, workdir, "ls-files", "-z")
+	paths, err := runGitRaw(ctx, workdir, "", "ls-files", "-z")
 	if err != nil {
 		return err
 	}
@@ -214,7 +224,7 @@ func ImportGitIndex(ctx context.Context, workdir string, index *GitIndex) error 
 		}
 	}
 	entries.Write(index.Entries)
-	_, err = git.RunWithInput(ctx, workdir, entries.String(), "update-index", "-z", "--index-info")
+	_, err = runGit(ctx, workdir, entries.String(), "update-index", "-z", "--index-info")
 	return err
 }
 

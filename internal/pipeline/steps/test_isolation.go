@@ -52,7 +52,13 @@ func executeIsolatedTest(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	})
 }
 
-func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(int) error) (*pipeline.StepOutcome, error) {
+func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(int) error) (outcome *pipeline.StepOutcome, invocationErr error) {
+	defer func() {
+		if cause := context.Cause(sctx.Ctx); cause != nil {
+			outcome = nil
+			invocationErr = errors.Join(invocationErr, cause)
+		}
+	}()
 	if sctx.Agent == nil || sctx.Agent.Name() != "deck" {
 		return nil, fmt.Errorf("test-isolation-adapter: Deck is required")
 	}
@@ -140,11 +146,13 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 	encoder := json.NewEncoder(in)
 	if err := encoder.Encode(input); err != nil {
 		cmd.Cancel()
-		cmd.Wait()
+		waitErr := cmd.Wait()
+		if waitErr != nil {
+			err = errors.Join(err, fmt.Errorf("test-isolation-worker: %w: %s", waitErr, stderr.String()))
+		}
 		return nil, errors.Join(err, pipeline.ErrIsolatedTestHandoff)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(out))
-	var outcome *pipeline.StepOutcome
 	var workerErr error
 	finished := false
 	for {
@@ -216,11 +224,11 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 	if keepWorkspace {
 		workerErr = errors.Join(workerErr, pipeline.ErrIsolatedTestHandoff)
 	}
+	if waitErr != nil {
+		workerErr = errors.Join(workerErr, fmt.Errorf("test-isolation-worker: %w: %s", waitErr, stderr.String()))
+	}
 	if workerErr != nil {
 		return nil, workerErr
-	}
-	if waitErr != nil {
-		return nil, fmt.Errorf("test-isolation-worker: %w: %s", waitErr, stderr.String())
 	}
 	if !finished || outcome == nil {
 		return nil, fmt.Errorf("test-isolation-worker: missing final result")

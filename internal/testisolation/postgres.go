@@ -3,7 +3,6 @@ package testisolation
 import (
 	"context"
 	"fmt"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -70,29 +69,17 @@ func startPostgres() (func(), error) {
 		log.Close()
 		return nil, err
 	}
-	done := make(chan error, 1)
-	go func() { done <- server.Wait() }()
+	done := make(chan struct{})
+	var serverErr error
+	go func() { serverErr = server.Wait(); close(done) }()
 	cleanup := func() { stop(); <-done; shellenv.TerminateShellCommandGroup(server); log.Close() }
-	deadline := time.Now().Add(10 * time.Second)
-	for {
-		connection, err := net.DialTimeout("tcp4", "127.0.0.1:17681", 100*time.Millisecond)
-		if err == nil {
-			connection.Close()
-			break
-		}
-		select {
-		case err := <-done:
-			stop()
-			log.Close()
-			details, _ := os.ReadFile("/tmp/postgres.log")
-			return nil, fmt.Errorf("test-isolation-postgres: server failed: %v: %s", err, details)
-		default:
-		}
-		if time.Now().After(deadline) {
-			cleanup()
-			return nil, fmt.Errorf("test-isolation-postgres: readiness deadline exceeded")
-		}
-		time.Sleep(20 * time.Millisecond)
+	ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+	err = waitForPostgres(ctx, "/nm/postgres/bin/psql", done)
+	cancel()
+	if err != nil {
+		cleanup()
+		details, _ := os.ReadFile("/tmp/postgres.log")
+		return nil, fmt.Errorf("test-isolation-postgres: readiness failed: %w (server: %v): %s", err, serverErr, details)
 	}
 	ctx, cancel = context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -104,4 +91,22 @@ func startPostgres() (func(), error) {
 		return nil, fmt.Errorf("test-isolation-postgres: create disposable database: %w: %s", err, output)
 	}
 	return cleanup, nil
+}
+
+func waitForPostgres(ctx context.Context, psql string, done <-chan struct{}) error {
+	for {
+		probe := exec.CommandContext(ctx, psql, "postgresql://nm_test@127.0.0.1:17681/postgres?sslmode=disable", "-X", "-v", "ON_ERROR_STOP=1", "-c", "SELECT 1")
+		probe.Env = append(postgresEnvironment(), "PGCONNECT_TIMEOUT=1")
+		shellenv.ConfigureShellCommand(probe)
+		if err := shellenv.RunShellCommand(probe); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-done:
+			return fmt.Errorf("server exited before readiness")
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
 }

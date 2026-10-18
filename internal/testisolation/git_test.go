@@ -190,6 +190,75 @@ func TestIsolatedGitImportsOnlyRunHeadAndResolvedIdentity(t *testing.T) {
 	}
 }
 
+func TestIsolatedGitHostHandoffDisablesInheritedCallbacks(t *testing.T) {
+	root, source, work, base := isolationGitFixture(t)
+	hooks := filepath.Join(work, ".githooks")
+	if err := os.Mkdir(hooks, 0700); err != nil {
+		t.Fatal(err)
+	}
+	markers := []string{"post-index-change", "reference-transaction", "fsmonitor"}
+	for _, name := range markers {
+		body := "#!/bin/sh\nprintf invoked > '" + filepath.Join(root, name) + "'\n"
+		if err := os.WriteFile(filepath.Join(hooks, name), []byte(body), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	isolationGit(t, source, nil, "config", "core.hooksPath", ".githooks")
+	isolationGit(t, source, nil, "config", "core.fsmonitor", filepath.Join(hooks, "fsmonitor"))
+	isolationGit(t, work, nil, "update-index", "--force-write-index", "--refresh")
+	isolationGit(t, work, nil, "update-ref", "refs/heads/callback-probe", base)
+	for _, name := range markers {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("callback positive control %s: %v", name, err)
+		}
+		if err := os.Remove(filepath.Join(root, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	workspace, err := PrepareGit(context.Background(), work, t.TempDir(), base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	privateGit := func(args ...string) string {
+		return isolationGit(t, work, append(Environment(work), workspace.Identity...), append([]string{"--git-dir=" + workspace.Dir}, args...)...)
+	}
+	if err := os.WriteFile(filepath.Join(work, "tracked"), []byte("private repair\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	privateGit("add", "tracked")
+	privateGit("commit", "-m", "private repair")
+	head := privateGit("rev-parse", "HEAD")
+	if err := os.WriteFile(filepath.Join(work, "staged-only"), []byte("staged repair\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	privateGit("add", "staged-only")
+	pack, err := ExportGitHead(context.Background(), workspace.Dir, base, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index, err := ExportGitIndex(context.Background(), workspace.Dir, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ImportGitHead(context.Background(), work, base, head, pack); err != nil {
+		t.Fatal(err)
+	}
+	if err := ImportGitIndex(context.Background(), work, index); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range markers {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("host callback %s ran across isolation boundary: %v", name, err)
+		}
+	}
+	if got := isolationGit(t, work, nil, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("head handoff lost: %s", got)
+	}
+	if got := isolationGit(t, work, nil, "-c", "core.fsmonitor=false", "show", ":staged-only"); got != "staged repair" {
+		t.Fatalf("index handoff lost: %q", got)
+	}
+}
+
 func TestIsolatedGitTransfersOnlyRequiredHistory(t *testing.T) {
 	_, source, work, base := isolationGitFixture(t)
 	if err := os.WriteFile(filepath.Join(source, "integration"), []byte("integration bytes\n"), 0600); err != nil {
