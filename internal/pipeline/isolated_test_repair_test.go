@@ -132,8 +132,8 @@ func TestIsolatedTestRepairReplaysTypedFailures(t *testing.T) {
 }
 
 func TestExecutor_IsolatedTestTimeoutCapturesSurvivedWork(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("callback fixture requires a POSIX shell")
+	if runtime.GOOS != "linux" {
+		t.Skip("isolated custody directory inspection requires Linux")
 	}
 	database, p, run, repo := setupTest(t)
 	if err := database.EnableTestIsolation(run.ID); err != nil {
@@ -350,7 +350,10 @@ func TestExecutor_IsolatedSurvivedWorkSuppressesContentFilters(t *testing.T) {
 						t.Fatal(err)
 					}
 					gitRun(t, dir, "config", "filter.CustOM."+driver, filter)
-					gitRun(t, dir, "config", "filter.CustOM.required", fmt.Sprint(isolated))
+					// The deliberately failing process fixture must be required:
+					// Git versions differ in whether an optional process failure
+					// falls back to the unfiltered content.
+					gitRun(t, dir, "config", "filter.CustOM.required", fmt.Sprint(isolated || driver == "process"))
 					gitRun(t, dir, "config", "diff.CustOM.textconv", "printf called >> '"+textconvMarker+"'; cat")
 					assertCallbacks := func() {
 						t.Helper()
