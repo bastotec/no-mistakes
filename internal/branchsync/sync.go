@@ -1846,9 +1846,10 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		s.classifyPipelineOwned(ctx, &state, run, "the pipeline head has not been successfully bound to the push target; do not make local follow-up commits yet")
 		return state, run, false
 	}
-	// Terminal PR lifecycle retires the branch regardless of local dirtiness
-	// or later target configuration. Refresh may classify retained versus
-	// removed only while the exact original target binding still matches.
+	// PR retirement takes precedence over local dirtiness or later target
+	// configuration, except for the published work closedPublishedWork keeps
+	// eligible for additive sync. Refresh classifies retained versus removed
+	// only while the exact original target binding still matches.
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
@@ -2205,8 +2206,9 @@ func closedPublishedWork(run *db.Run) bool {
 }
 
 // retiredBranchNextAction names the exit for a branch retired by its PR
-// lifecycle. Release is defined for a binding the observed remote no longer
-// matches, so a merged or closed PR whose remote still equals the binding -
+// lifecycle; closedPublishedWork bypasses retirement for published changes
+// eligible for additive sync. Release is defined for a binding the observed
+// remote no longer matches, so a retired PR whose remote still equals the binding -
 // or has not been checked against it yet - must not advertise it: release
 // refuses an intact binding and points back at a re-check, which loops.
 // While the run is active it owns the branch. Otherwise an unchecked remote
