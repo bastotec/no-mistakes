@@ -4,6 +4,7 @@ package e2e
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -31,7 +33,18 @@ func TestIsolatedTestRecoveryAndRepairJourney(t *testing.T) {
 	runIsolatedTestJourney(t, true)
 }
 
+func TestIsolatedTestCompletionRestartPoints(t *testing.T) {
+	for _, point := range []string{"after-index", "before-commit", "after-commit"} {
+		t.Run(point, func(t *testing.T) { runIsolatedTestJourneyPoint(t, true, point) })
+	}
+}
+
 func runIsolatedTestJourney(t *testing.T, repair bool) {
+	t.Helper()
+	runIsolatedTestJourneyPoint(t, repair, "")
+}
+
+func runIsolatedTestJourneyPoint(t *testing.T, repair bool, restartPoint string) {
 	t.Helper()
 	if os.Getenv("NM_TEST_POSTGRES_ROOT") == "" {
 		t.Skip("set NM_TEST_POSTGRES_ROOT for the native PostgreSQL isolated-daemon journey")
@@ -99,6 +112,10 @@ commands:
 		if parked == nil || !strings.Contains(output, "gate:") {
 			t.Fatalf("expected the synthetic baseline failure gate: %+v\n%s", parked, output)
 		}
+		if restartPoint != "" {
+			exerciseIsolatedCompletionRestart(t, h, parked.ID, restartPoint, &modelRequests)
+			return
+		}
 		// Only this harness-owned temporary daemon is restarted. Recovery must
 		// retain the opt-in and create another fresh PostgreSQL cluster.
 		if out, err := h.Run("daemon", "restart", "--force"); err != nil {
@@ -149,6 +166,117 @@ commands:
 	enabled, err := database.TestIsolationEnabled(run.ID)
 	if err != nil || !enabled {
 		t.Fatalf("run isolation was not durably pinned: %v %v", enabled, err)
+	}
+}
+
+// exerciseIsolatedCompletionRestart drives the production repair wrapper at a
+// controlled return boundary, then starts the real temporary daemon over its
+// durable state. The worker/model journey above is real; these completion
+// points are deterministic fixture callbacks, not scheduler-timed worker kills.
+func exerciseIsolatedCompletionRestart(t *testing.T, h *Harness, runID, point string, requests *atomic.Int32) {
+	t.Helper()
+	if out, err := h.Run("daemon", "stop", "--force"); err != nil {
+		t.Fatalf("stop fixture daemon: %v\n%s", err, out)
+	}
+	database, err := db.Open(paths.WithRoot(h.NMHome).DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	run, err := database.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	steps, err := database.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var step *db.StepResult
+	for _, candidate := range steps {
+		if candidate.StepName == types.StepTest {
+			step = candidate
+		}
+	}
+	if step == nil {
+		t.Fatal("Test record missing")
+	}
+	rounds, err := database.GetRoundsByStep(step.ID)
+	if err != nil || len(rounds) == 0 {
+		t.Fatalf("Test round missing: %v", err)
+	}
+	round := rounds[len(rounds)-1]
+	decision, err := database.AuthorizeStepRepair(step.ID, round.ID, 0, nil, nil)
+	if err != nil || !decision.Granted {
+		t.Fatalf("authorize fixture repair: %+v %v", decision, err)
+	}
+	if err := database.ClaimStepRepair(step.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatus(step.ID, types.StepStatusFixing); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	sctx := &pipeline.StepContext{Ctx: ctx, DB: database, Run: run, Fixing: true, StepResultID: step.ID,
+		WorkDir: paths.WithRoot(h.NMHome).WorktreeDir(run.RepoID, run.ID), IsolatedRepairRound: func() string { return round.ID }}
+	_, err = sctx.RunIsolatedTestRepair(func(mark func(int) error) (*pipeline.StepOutcome, error) {
+		// A deliberately absent fixture identity cannot target a host process.
+		if err := mark(1 << 30); err != nil {
+			return nil, err
+		}
+		outcome := &pipeline.StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"completion-fixture","severity":"warning","action":"ask-user","description":"durable fixture outcome"}]}`}
+		switch point {
+		case "after-index":
+			cancel(pipeline.ErrDaemonShutdown)
+			return outcome, nil // final handoff succeeded, parent cancels in teardown
+		case "before-commit":
+			cancel(pipeline.ErrDaemonShutdown)
+			return nil, pipeline.ErrDaemonShutdown
+		default:
+			return outcome, nil
+		}
+	})
+	if point == "after-commit" {
+		if err != nil {
+			t.Fatal(err)
+		}
+		cancel(pipeline.ErrDaemonShutdown)
+	} else if !errors.Is(err, pipeline.ErrDaemonShutdown) {
+		t.Fatalf("shutdown identity lost: %v", err)
+	}
+	active, err := database.HasStartedRepairDispatch(runID)
+	if err != nil || active != (point != "after-commit") {
+		t.Fatalf("wrong completion state: active=%v err=%v", active, err)
+	}
+	before := requests.Load()
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := h.Run("daemon", "start"); err != nil {
+		t.Fatalf("restart fixture daemon: %v\n%s", err, out)
+	}
+	want := "repair-reconciliation-"
+	if point == "after-commit" {
+		want = "completion-fixture"
+	}
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		info := h.RunInfo(runID)
+		if info.Status == types.RunFailed {
+			t.Fatalf("restart poisoned recovery: %+v", info)
+		}
+		for _, result := range info.Steps {
+			if result.StepName == types.StepTest && result.FindingsJSON != nil && strings.Contains(*result.FindingsJSON, want) {
+				if requests.Load() != before {
+					t.Fatal("restart relaunched an isolated model turn")
+				}
+				return
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("restart did not restore %s: %+v", want, info)
+		}
+		time.Sleep(25 * time.Millisecond)
 	}
 }
 

@@ -221,8 +221,16 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 	}
 	in.Close()
 	waitErr := cmd.Wait()
+	// The final event can precede namespace teardown. Recheck admission only
+	// after all descendants are gone, before accepting a terminal result or
+	// permitting any host-side custody operation on the working tree.
+	if err := testisolation.CheckRepository(sctx.Ctx, sctx.WorkDir, "HEAD"); err != nil {
+		keepWorkspace = true
+		workerErr = errors.Join(workerErr, err)
+	}
 	if keepWorkspace {
 		workerErr = errors.Join(workerErr, pipeline.ErrIsolatedTestHandoff)
+		workerErr = errors.Join(workerErr, pipeline.RetainIsolatedTestWork(sctx.DB, sctx.Run.ID, sctx.WorkDir, workerErr))
 	}
 	if waitErr != nil {
 		workerErr = errors.Join(workerErr, fmt.Errorf("test-isolation-worker: %w: %s", waitErr, stderr.String()))

@@ -27,6 +27,9 @@ type GitWorkspace struct {
 }
 
 func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integrationRefs ...string) (*GitWorkspace, error) {
+	if err := CheckRepository(ctx, workdir, "HEAD"); err != nil {
+		return nil, err
+	}
 	workspace := &GitWorkspace{Dir: filepath.Join(root, "git"), Pointer: filepath.Join(root, "git-pointer")}
 	for _, role := range []string{"AUTHOR", "COMMITTER"} {
 		ident, err := runGit(ctx, workdir, "", "var", "GIT_"+role+"_IDENT")
@@ -99,7 +102,7 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 	if err != nil {
 		return nil, err
 	}
-	if err := ImportGitIndex(ctx, workspace.Dir, index); err != nil {
+	if err := importGitIndex(ctx, workspace.Dir, index); err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(workspace.Pointer, []byte("gitdir: /nm/git\n"), 0600); err != nil {
@@ -151,6 +154,9 @@ func ImportGitHead(ctx context.Context, workdir, base, head string, pack []byte)
 	if _, err := runGit(ctx, workdir, "", "merge-base", "--is-ancestor", base, head); err != nil {
 		return fmt.Errorf("isolated Test head rewrote run history: %w", err)
 	}
+	if err := CheckRepository(ctx, workdir, "HEAD", head); err != nil {
+		return err
+	}
 	if _, err := runGit(ctx, workdir, "", "update-ref", "--no-deref", "HEAD", head, base); err != nil {
 		return err
 	}
@@ -184,6 +190,13 @@ func ExportGitIndex(ctx context.Context, workdir, head string) (*GitIndex, error
 }
 
 func ImportGitIndex(ctx context.Context, workdir string, index *GitIndex) error {
+	if err := CheckRepository(ctx, workdir, "HEAD"); err != nil {
+		return err
+	}
+	return importGitIndex(ctx, workdir, index)
+}
+
+func importGitIndex(ctx context.Context, workdir string, index *GitIndex) error {
 	if index == nil {
 		return fmt.Errorf("isolated Test omitted its index handoff")
 	}
@@ -243,6 +256,7 @@ func indexObjects(entries []byte) ([]string, error) {
 		case "100644", "100755", "120000":
 			objects = append(objects, fields[1])
 		case "160000":
+			return nil, fmt.Errorf("test-isolation-repository: gitlinks/submodules are unsupported")
 		default:
 			return nil, fmt.Errorf("invalid isolated Git index mode")
 		}

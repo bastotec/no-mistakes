@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/testisolation"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -41,7 +42,14 @@ func (g survivedWorkGit) args(ctx context.Context, dir string, args []string) ([
 	if !g.noCallbacks {
 		return args, nil
 	}
-	overrides := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false"}
+	overrides := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"}
+	// Never enter another repository to inspect its private configuration.
+	args = append([]string(nil), args...)
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--ignore-submodules=") {
+			args[i] = "--ignore-submodules=all"
+		}
+	}
 	keys, err := git.RunRaw(ctx, dir, append(overrides, "config", "--null", "--name-only", "--list")...)
 	if err != nil {
 		return nil, err
@@ -241,6 +249,11 @@ func (g survivedWorkGit) deleteSurvivedWorkRef(workDir, ref string) {
 func (g survivedWorkGit) captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
+	if g.noCallbacks {
+		if err := testisolation.CheckRepository(ctx, workDir, "HEAD"); err != nil {
+			return &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: workDir, InspectionError: err.Error(), Next: survivedWorkInPlaceNext}
+		}
+	}
 	// Raw output: a porcelain line's leading status column is significant.
 	statusRaw, err := g.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	status := string(statusRaw)
@@ -356,6 +369,17 @@ func (g survivedWorkGit) captureSurvivedWork(workDir, runID string, record func(
 
 const survivedWorkInPlaceNext = "Left uncommitted in the run worktree and not pushed. Cleanup refuses to remove the worktree while it holds changes; recover the files from it by hand before abandoning the run."
 
+// RetainIsolatedTestWork records unsupported worker state without asking Git
+// to inspect or capture it. Even a database failure leaves a cleanup marker.
+func RetainIsolatedTestWork(database *db.DB, runID, workDir string, cause error) error {
+	work := &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: workDir, InspectionError: cause.Error(), Next: survivedWorkInPlaceNext}
+	if err := database.SetRunSurvivedWork(runID, work); err != nil {
+		(survivedWorkGit{noCallbacks: true}).writeSurvivedWorkMarker(workDir)
+		return err
+	}
+	return nil
+}
+
 // snapshotSurvivedWork writes the index and the full working tree as two
 // commits on HEAD without touching the real index or the worktree.
 func (g survivedWorkGit) snapshotSurvivedWork(ctx context.Context, workDir string) (base, commit string, err error) {
@@ -416,6 +440,11 @@ func (g survivedWorkGit) RestoreSurvivedWork(workDir string, work *types.Survive
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
+	if g.noCallbacks {
+		if err := testisolation.CheckRepository(ctx, workDir, "HEAD", work.Ref, work.Ref+"^"); err != nil {
+			return fmt.Errorf("refuse isolated custody restore: %w", err)
+		}
+	}
 	status, err := g.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return fmt.Errorf("read worktree status: %w", err)
@@ -480,6 +509,11 @@ func SurvivedWorkPrompt(restored *types.SurvivedWork) string {
 func (g survivedWorkGit) survivedWorkUnclean(workDir string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
+	if g.noCallbacks {
+		if err := testisolation.CheckRepository(ctx, workDir, "HEAD"); err != nil {
+			return true
+		}
+	}
 	status, err := g.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	return err != nil || strings.TrimSpace(status) != ""
 }

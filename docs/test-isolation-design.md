@@ -175,13 +175,30 @@ configuration or hooks are imported. A head update sends an object pack, not a
 metadata path: the parent checks its objects and ancestry, then advances only the
 detached run HEAD and index before acknowledging it.
 
+Opted-in Test admits only a single repository: submodules/gitlinks and nested
+repositories (including `.git` files and bare layouts) are unsupported. Admission
+checks HEAD/index metadata and uses a bounded, no-follow filesystem inspection
+before launch, handoff acceptance, custody capture/restore and cleanup. Isolated
+custody status never recurses into nested repositories. Unsupported or ambiguous
+work is retained in place with durable custody; it is not reset, cleaned, deleted
+or accepted as a completed handoff. Inspection is limited to 100,000 entries and
+128 directory levels; exceeding either bound refuses admission. Ordinary runs
+retain their existing repository and custody behavior.
+
 Worker errors retain Test timeout and protected-path classifications, including
 terminal repair replay, so interrupted edits keep their existing custody and
 approval behavior. Privacy-safe invocation records and lifecycle activity return
 to the parent; no live database or raw agent output is needed for accounting.
 A repair's whole-step invocation is recorded under the existing durable
 repair-custody protocol, never reconstructed as an unconfined agent turn. An interrupted started repair follows the existing reconciliation
-gate rather than blindly replaying its side effects.
+gate rather than blindly replaying its side effects. Successful index import is
+not completion: the final outcome and handoffs must validate and the namespace
+worker must exit first. Parent cancellation before durable completion leaves the
+repair unresolved, never cached as an ordinary worker failure. Isolated repair
+completion commits its terminal result and removal of the matching active step
+PID in one ownership-checked transaction. Restart therefore sees either an
+unresolved repair requiring reconciliation or a replayable terminal result, not
+a terminal failure fabricated from daemon shutdown or a stale active PID.
 
 Namespace teardown kills detached descendants and discards PostgreSQL storage.
 The invocation-owned bridge is closed, and successful/error cleanup removes its

@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,7 +56,16 @@ func (sctx *StepContext) RunIsolatedTestRepair(run func(markStarted func(int) er
 		}
 		return outcome, runErr
 	}
-	if errors.Is(runErr, ErrIsolatedTestHandoff) {
+	// Parent cancellation is lifecycle state, not a replayable worker verdict.
+	// This applies even after a complete index handoff, during worker teardown.
+	ctx := sctx.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if cause := context.Cause(ctx); cause != nil {
+		return nil, errors.Join(runErr, cause)
+	}
+	if errors.Is(runErr, ErrIsolatedTestHandoff) || errors.Is(runErr, ErrDaemonShutdown) || errors.Is(runErr, context.Canceled) {
 		return outcome, runErr
 	}
 	var resultJSON []byte
@@ -78,8 +88,8 @@ func (sctx *StepContext) RunIsolatedTestRepair(run func(markStarted func(int) er
 		c, m := "isolated_test_error", string(payload)
 		class, message = &c, &m
 	}
-	if err := sctx.DB.FinishRepairInvocation(invocation.ID, resultJSON, outcome != nil, class, message); err != nil {
-		return nil, fmt.Errorf("persist isolated Test repair result: %w", err)
+	if err := sctx.DB.FinishIsolatedTestRepairInvocation(ctx, invocation.ID, resultJSON, outcome != nil, class, message); err != nil {
+		return nil, errors.Join(fmt.Errorf("persist isolated Test repair result: %w", err), context.Cause(ctx))
 	}
 	return outcome, runErr
 }
