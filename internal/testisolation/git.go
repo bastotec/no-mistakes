@@ -80,6 +80,9 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 			return nil, err
 		}
 	}
+	if err := prepareGitAttributes(ctx, workdir, workspace.Dir); err != nil {
+		return nil, err
+	}
 	head, err := runGit(ctx, workdir, "", "rev-parse", "HEAD")
 	if err != nil {
 		return nil, err
@@ -130,6 +133,50 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 		return nil, err
 	}
 	return workspace, nil
+}
+
+func prepareGitAttributes(ctx context.Context, workdir, privateDir string) error {
+	external, err := runGit(ctx, workdir, "", "config", "--path", "--get", "core.attributesFile")
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return fmt.Errorf("resolve isolated Git attributes: %w", err)
+		}
+		configHome := os.Getenv("XDG_CONFIG_HOME")
+		if configHome == "" {
+			home, err := os.UserHomeDir()
+			if err != nil {
+				return err
+			}
+			configHome = filepath.Join(home, ".config")
+		}
+		external = filepath.Join(configHome, "git", "attributes")
+	}
+	info, err := runGit(ctx, workdir, "", "rev-parse", "--path-format=absolute", "--git-path", "info/attributes")
+	if err != nil {
+		return err
+	}
+	for _, file := range [][2]string{{external, filepath.Join(privateDir, "attributes")}, {info, filepath.Join(privateDir, "info", "attributes")}} {
+		var data []byte
+		if file[0] != "" {
+			source := file[0]
+			if !filepath.IsAbs(source) {
+				source = filepath.Join(workdir, source)
+			}
+			data, err = os.ReadFile(source)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("read isolated Git attributes: %w", err)
+			}
+		}
+		if err := os.MkdirAll(filepath.Dir(file[1]), 0700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(file[1], data, 0600); err != nil {
+			return err
+		}
+	}
+	_, err = runGit(ctx, workdir, "", "config", "--file", filepath.Join(privateDir, "config"), "core.attributesFile", filepath.Join(privateDir, "attributes"))
+	return err
 }
 
 func validHead(head string) bool {

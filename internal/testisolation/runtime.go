@@ -169,6 +169,7 @@ func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 	environment := Environment(o.WorkDir)
 	if o.Git != nil {
 		environment = append(environment, o.Git.Identity...)
+		environment = append(environment, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=core.attributesFile", "GIT_CONFIG_VALUE_0=/nm/git/attributes")
 	}
 	for _, entry := range environment {
 		for i := range entry {

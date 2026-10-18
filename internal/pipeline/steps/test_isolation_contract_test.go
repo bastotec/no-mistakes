@@ -211,12 +211,28 @@ func TestIsolatedTestWorkerConfiguredPreparationUsesPrivateGit(t *testing.T) {
 }
 
 func TestIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T) {
+	for _, mode := range []string{"autocrlf", "attributes"} {
+		t.Run(mode, func(t *testing.T) {
+			testIsolatedTestNoOpFixPreservesCheckoutNormalization(t, mode)
+		})
+	}
+}
+
+func testIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T, mode string) {
 	if runtime.GOOS != "linux" {
 		t.Skip("Linux isolation only")
 	}
 	root := t.TempDir()
 	global := filepath.Join(root, "gitconfig")
-	if err := os.WriteFile(global, []byte("[core]\nautocrlf = true\n"), 0600); err != nil {
+	globalConfig := "[core]\nautocrlf = true\n"
+	if mode == "attributes" {
+		external := filepath.Join(root, "host-attributes")
+		if err := os.WriteFile(external, []byte("*.txt text eol=crlf filter=host\nprecedence.txt -text\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		globalConfig = "[core]\nautocrlf = false\nattributesFile = " + external + "\n"
+	}
+	if err := os.WriteFile(global, []byte(globalConfig), 0600); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", global)
@@ -226,19 +242,30 @@ func TestIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T) {
 		"normalized.txt": []byte("first line\nsecond line\n"),
 		"binary.dat":     []byte("binary\x00\nunchanged\n"),
 	}
+	if mode == "attributes" {
+		files["info.dat"] = []byte("info normalized\n")
+		files["precedence.txt"] = []byte("info takes precedence\n")
+		files["repo.txt"] = []byte("repository takes precedence\n")
+		files[".gitattributes"] = []byte("repo.txt text eol=lf\n")
+		info := filepath.Join(source, ".git", "info", "attributes")
+		if err := os.WriteFile(info, []byte("info.dat text eol=crlf\nprecedence.txt text eol=crlf\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
 	for name, data := range files {
 		if err := os.WriteFile(filepath.Join(source, name), data, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	gitCmd(t, source, "add", "normalized.txt", "binary.dat")
+	add := []string{"add"}
+	for name := range files {
+		add = append(add, name)
+	}
+	gitCmd(t, source, add...)
 	gitCmd(t, source, "commit", "-m", "normalization fixture")
 	head := gitCmd(t, source, "rev-parse", "HEAD")
 	work := filepath.Join(root, "work")
 	gitCmd(t, source, "worktree", "add", "--detach", work, head)
-	if _, err := os.Stat(filepath.Join(work, ".gitattributes")); !os.IsNotExist(err) {
-		t.Fatalf("fixture must not override normalization with attributes: %v", err)
-	}
 	checkout := map[string][]byte{}
 	for name := range files {
 		data, err := os.ReadFile(filepath.Join(work, name))
@@ -249,6 +276,22 @@ func TestIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T) {
 	}
 	if !bytes.Equal(checkout["normalized.txt"], []byte("first line\r\nsecond line\r\n")) || !bytes.Equal(checkout["binary.dat"], files["binary.dat"]) {
 		t.Fatalf("unexpected checkout bytes: %q", checkout)
+	}
+	if mode == "attributes" {
+		for _, name := range []string{"info.dat", "precedence.txt"} {
+			if !bytes.Equal(checkout[name], bytes.ReplaceAll(files[name], []byte("\n"), []byte("\r\n"))) {
+				t.Fatalf("info attributes did not normalize %s: %q", name, checkout[name])
+			}
+		}
+		if !bytes.Equal(checkout["repo.txt"], files["repo.txt"]) {
+			t.Fatalf("external attributes overrode repository attributes: %q", checkout["repo.txt"])
+		}
+	}
+	marker := filepath.Join(root, "host-filter-executed")
+	if mode == "attributes" {
+		gitCmd(t, source, "config", "filter.host.clean", "printf called > '"+marker+"'; cat")
+		gitCmd(t, source, "config", "filter.host.smudge", "printf called > '"+marker+"'; cat")
+		gitCmd(t, source, "config", "filter.host.required", "true")
 	}
 	calls := 0
 	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
@@ -262,6 +305,13 @@ func TestIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T) {
 	}
 	if err := os.WriteFile(filepath.Join(work, ".git"), []byte("gitdir: "+workspace.Dir+"\n"), 0600); err != nil {
 		t.Fatal(err)
+	}
+	if mode == "attributes" {
+		for _, path := range []string{filepath.Join(root, "host-attributes"), filepath.Join(source, ".git", "info", "attributes")} {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+		}
 	}
 	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
 	sctx.GateDir, sctx.IsolatedTestWorker, sctx.Fixing = workspace.Dir, true, true
@@ -287,6 +337,9 @@ func TestIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T) {
 	}
 	if status := gitCmd(t, work, "status", "--porcelain"); status != "" {
 		t.Fatalf("no-op fixer left normalization noise: %s", status)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("host attribute filter executed: %v", err)
 	}
 }
 

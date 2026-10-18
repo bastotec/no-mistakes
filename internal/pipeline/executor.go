@@ -2581,7 +2581,17 @@ func (e *Executor) preserveUnpublishedTerminalHead(ctx context.Context, run *db.
 	if head == published {
 		return true
 	}
-	if err := custody.PreserveRecoveryHead(ctx, e.workDir, run.ID, head); err != nil {
+	g, err := e.survivedWorkGit(run.ID)
+	if err != nil {
+		slog.Warn("failed to resolve terminal head preservation policy", "run", run.ID, "error", err)
+		return false
+	}
+	options, err := g.args(ctx, e.workDir, nil)
+	if err != nil {
+		slog.Warn("failed to disable terminal head callbacks", "run", run.ID, "error", err)
+		return false
+	}
+	if err := custody.PreserveRecoveryHead(ctx, e.workDir, run.ID, head, options...); err != nil {
 		slog.Warn("failed to anchor unpublished terminal head", "run", run.ID, "head", head, "error", err)
 		return false
 	}
