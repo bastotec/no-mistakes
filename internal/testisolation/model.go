@@ -69,10 +69,8 @@ func modelHandler(c ModelConfig) (http.Handler, error) {
 			http.Error(w, "model request exceeds limit", 413)
 			return
 		}
-		var selection struct {
-			Model string `json:"model"`
-		}
-		if err := json.Unmarshal(body, &selection); err != nil || selection.Model != c.Model {
+		body, err = canonicalModelRequest(body, c.Model)
+		if err != nil {
 			http.Error(w, "model selection refused", 403)
 			return
 		}
@@ -113,6 +111,52 @@ func modelHandler(c ModelConfig) (http.Handler, error) {
 		}
 	})
 	return &modelBridgeHandler{Handler: handler, transport: transport}, nil
+}
+
+func canonicalModelRequest(body []byte, model string) ([]byte, error) {
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, fmt.Errorf("invalid model request")
+	}
+	fields := make(map[string]json.RawMessage)
+	modelSeen := false
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return nil, err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return nil, fmt.Errorf("invalid model request key")
+		}
+		if strings.EqualFold(key, "model") {
+			if key != "model" || modelSeen {
+				return nil, fmt.Errorf("ambiguous model selection")
+			}
+			modelSeen = true
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, err
+		}
+		fields[key] = value
+	}
+	if _, err := decoder.Token(); err != nil {
+		return nil, err
+	}
+	if _, err := decoder.Token(); err != io.EOF {
+		return nil, fmt.Errorf("invalid trailing model request")
+	}
+	var selected string
+	if !modelSeen || json.Unmarshal(fields["model"], &selected) != nil || selected != model {
+		return nil, fmt.Errorf("model selection refused")
+	}
+	fields["model"], err = json.Marshal(model)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(fields)
 }
 
 type modelBridgeHandler struct {

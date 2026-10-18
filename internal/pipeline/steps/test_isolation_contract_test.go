@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/testisolation"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -40,6 +41,142 @@ func TestTestStepIsolationRefusesUnsupportedAgentBeforeAnyCommand(t *testing.T) 
 		t.Fatal("command ran before refusal")
 	}
 }
+func TestIsolatedTestWorkerConfiguredPreparationUsesPrivateGit(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux isolation only")
+	}
+	source, base, head := setupGitRepo(t)
+	if err := os.WriteFile(filepath.Join(source, ".gitignore"), []byte(".deps/\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, source, "add", ".gitignore")
+	gitCmd(t, source, "commit", "-m", "ignore prepared dependencies")
+	head = gitCmd(t, source, "rev-parse", "HEAD")
+	work := filepath.Join(t.TempDir(), "work")
+	gitCmd(t, source, "worktree", "add", "--detach", work, head)
+	evidenceCalls := 0
+	ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		evidenceCalls++
+		if _, err := os.Stat(filepath.Join(opts.CWD, ".deps", "count")); err != nil {
+			t.Fatalf("prepared dependencies unavailable: %v", err)
+		}
+		if got := gitCmd(t, work, "show", ":pending_test.go"); got != "staged bytes" {
+			t.Fatalf("preparation lost staged bytes: %q", got)
+		}
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"prepared","tested":["dependency check"],"testing_summary":"dependencies available","artifacts":[],"scenarios":[{"name":"configured command","result":"pass","live":true,"evidence":"dependency check","reason":""}],"verdict":"go"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, work, base, head, config.Commands{
+		Prepare: preparationCommand(), Test: dependencyExistsCommand() + " && echo baseline > .deps/baseline",
+	})
+	if err := os.WriteFile(filepath.Join(work, "pending_test.go"), []byte("staged bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, work, "add", "pending_test.go")
+	workspace, err := testisolation.PrepareGit(sctx.Ctx, work, t.TempDir(), base, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, ".git"), []byte("gitdir: "+workspace.Dir+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sctx.GateDir, sctx.IsolatedTestWorker, sctx.Shared = workspace.Dir, true, &pipeline.RunShared{}
+	if _, err := snapshotPreparationState(sctx.Ctx, work, sctx.GateDir); err == nil {
+		t.Fatal("ordinary preparation accepted non-bare Git storage")
+	}
+	outcome, err := (&TestStep{}).Execute(sctx)
+	if err != nil || outcome == nil || outcome.NeedsApproval || outcome.ExitCode != 0 {
+		t.Fatalf("configured isolated Test: %+v %v", outcome, err)
+	}
+	if evidenceCalls != 1 {
+		t.Fatalf("evidence calls = %d", evidenceCalls)
+	}
+	if _, err := os.Stat(filepath.Join(work, ".deps", "baseline")); err != nil {
+		t.Fatalf("baseline did not run: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(work, "base.txt")); err != nil || string(got) != "base content" {
+		t.Fatalf("preparation mutation survived: %q %v", got, err)
+	}
+	if _, err := os.Stat(filepath.Join(work, "prepare.tmp")); !os.IsNotExist(err) {
+		t.Fatalf("preparation artifact survived: %v", err)
+	}
+	if got := gitCmd(t, source, "rev-parse", "HEAD"); got != head {
+		t.Fatal("worker changed shared head")
+	}
+}
+
+func TestIsolatedTestWorkerProtectedPathRetryRetainsStagedOnlyBlobs(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux isolation only")
+	}
+	source, base, head := setupGitRepo(t)
+	work := filepath.Join(t.TempDir(), "work")
+	gitCmd(t, source, "worktree", "add", "--detach", work, head)
+	pointer, err := os.ReadFile(filepath.Join(work, ".git"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		if calls == 1 {
+			for name, content := range map[string]string{"protected.lock": "protected edit\n", "staged_test.go": "retained blob\n"} {
+				if err := os.WriteFile(filepath.Join(work, name), []byte(content), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			gitCmd(t, work, "add", "protected.lock", "staged_test.go")
+			if err := os.Remove(filepath.Join(work, "staged_test.go")); err != nil {
+				t.Fatal(err)
+			}
+		} else if got := gitCmd(t, work, "show", ":staged_test.go"); got != "retained blob" {
+			t.Fatalf("retry lost staged-only content: %q", got)
+		}
+		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, work, base, head, config.Commands{})
+	sctx.IsolatedTestWorker, sctx.Fixing = true, true
+	sctx.Config.ProtectedPaths = []string{"protected.lock"}
+	sctx.PreviousFindings = `{"findings":[{"id":"test-1","severity":"error","description":"repair failure","action":"auto-fix"}]}`
+	for range 2 {
+		workspace, err := testisolation.PrepareGit(sctx.Ctx, work, t.TempDir(), base, "main")
+		if err != nil {
+			t.Fatalf("prepare retry: %v", err)
+		}
+		sctx.GateDir = workspace.Dir
+		func() {
+			if err := os.WriteFile(filepath.Join(work, ".git"), []byte("gitdir: "+workspace.Dir+"\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			defer func() {
+				if err := os.WriteFile(filepath.Join(work, ".git"), pointer, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}()
+			_, err := (&TestStep{}).Execute(sctx)
+			var refusal *pipeline.ProtectedPathError
+			if !errors.As(err, &refusal) || refusal.Path != "protected.lock" {
+				t.Fatalf("expected protected-path refusal: %v", err)
+			}
+		}()
+		index, err := testisolation.ExportGitIndex(sctx.Ctx, workspace.Dir, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := testisolation.ImportGitIndex(sctx.Ctx, work, index); err != nil {
+			t.Fatal(err)
+		}
+		if got := gitCmd(t, work, "show", ":staged_test.go"); got != "retained blob" {
+			t.Fatalf("handoff lost staged-only content: %q", got)
+		}
+		if got := gitCmd(t, work, "rev-parse", "HEAD"); got != head {
+			t.Fatal("refused repair advanced host head")
+		}
+	}
+	if calls != 2 {
+		t.Fatalf("repair calls = %d", calls)
+	}
+}
+
 func TestTestStepOrdinaryRunKeepsAmbientEnvironment(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX environment assertion")

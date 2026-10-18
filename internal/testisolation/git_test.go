@@ -74,7 +74,7 @@ func isolationGitFixture(t *testing.T) (string, string, string, string) {
 
 func TestIsolatedGitImportsOnlyRunHeadAndResolvedIdentity(t *testing.T) {
 	root, source, work, base := isolationGitFixture(t)
-	workspace, err := PrepareGit(context.Background(), work, root)
+	workspace, err := PrepareGit(context.Background(), work, root, base)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,6 +166,22 @@ func TestIsolatedGitImportsOnlyRunHeadAndResolvedIdentity(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(work, "staged-only")); !os.IsNotExist(err) {
 		t.Fatalf("index import changed working files: %v", err)
 	}
+	for range 2 {
+		next, err := PrepareGit(context.Background(), work, t.TempDir(), head)
+		if err != nil {
+			t.Fatalf("prepare subsequent invocation: %v", err)
+		}
+		if got := isolationGit(t, work, nil, "--git-dir="+next.Dir, "show", ":staged-only"); got != "custody bytes" {
+			t.Fatalf("subsequent invocation lost staged-only blob: %q", got)
+		}
+		index, err := ExportGitIndex(context.Background(), next.Dir, head)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ImportGitIndex(context.Background(), work, index); err != nil {
+			t.Fatal(err)
+		}
+	}
 	if err := ImportGitIndex(context.Background(), work, &GitIndex{Pack: []byte("invalid")}); err == nil {
 		t.Fatal("invalid index pack accepted")
 	}
@@ -174,10 +190,68 @@ func TestIsolatedGitImportsOnlyRunHeadAndResolvedIdentity(t *testing.T) {
 	}
 }
 
+func TestIsolatedGitTransfersOnlyRequiredHistory(t *testing.T) {
+	_, source, work, base := isolationGitFixture(t)
+	if err := os.WriteFile(filepath.Join(source, "integration"), []byte("integration bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	isolationGit(t, source, nil, "add", "integration")
+	isolationGit(t, source, nil, "commit", "-m", "integration advance")
+	tip := isolationGit(t, source, nil, "rev-parse", "HEAD")
+	isolationGit(t, source, nil, "update-ref", "refs/remotes/origin/main", tip)
+	isolationGit(t, source, nil, "reset", "--hard", base)
+	if err := os.WriteFile(filepath.Join(source, "archive"), []byte("unrelated recovery bytes\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	isolationGit(t, source, nil, "add", "archive")
+	blob := isolationGit(t, source, nil, "rev-parse", ":archive")
+	tree := isolationGit(t, source, nil, "write-tree")
+	archive := isolationGit(t, source, nil, "commit-tree", tree, "-m", "unrelated recovery")
+	isolationGit(t, source, nil, "update-ref", "refs/no-mistakes/recovery/unrelated", archive)
+	isolationGit(t, source, nil, "reset", "--hard", base)
+
+	for _, test := range []struct {
+		name string
+		refs []string
+		want string
+	}{
+		{"integration", []string{"origin/main", "foreign"}, "refs/remotes/origin/main"},
+		{"fallback", []string{"missing"}, ""},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			workspace, err := PrepareGit(context.Background(), work, t.TempDir(), tip, test.refs...)
+			if err != nil {
+				t.Fatal(err)
+			}
+			run := func(args ...string) string {
+				return isolationGit(t, work, nil, append([]string{"--git-dir=" + workspace.Dir}, args...)...)
+			}
+			if got := run("rev-parse", "HEAD"); got != base {
+				t.Fatalf("run head changed: %s", got)
+			}
+			if got := run("for-each-ref", "--format=%(refname)"); got != test.want {
+				t.Fatalf("unexpected private refs: %q", got)
+			}
+			if got := run("show", tip+":integration"); got != "integration bytes" {
+				t.Fatalf("required integration history lost: %q", got)
+			}
+			for _, object := range []string{blob, archive} {
+				got, err := git.RunWithInput(context.Background(), workspace.Dir, object+"\n", "cat-file", "--batch-check")
+				if err != nil || got != object+" missing" {
+					t.Fatalf("unrelated recovery object transferred: %q %v", got, err)
+				}
+			}
+			if _, err := os.Stat(filepath.Join(workspace.Dir, "objects", "info", "alternates")); !os.IsNotExist(err) {
+				t.Fatalf("private store references shared objects: %v", err)
+			}
+		})
+	}
+}
+
 func TestNamespaceGitMetadataCannotMutateGateOrInstallHostCallbacks(t *testing.T) {
 	worker := buildHelper(t)
 	root, source, work, base := isolationGitFixture(t)
-	workspace, err := PrepareGit(context.Background(), work, root)
+	workspace, err := PrepareGit(context.Background(), work, root, base)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -42,7 +42,12 @@ func ensurePrepared(sctx *pipeline.StepContext, logStep types.StepName) error {
 			return fmt.Errorf("read preparation marker: %w", err)
 		}
 
-		snapshot, err := snapshotPreparationState(sctx.Ctx, sctx.WorkDir, sctx.GateDir)
+		var snapshot preparationSnapshot
+		if sctx.IsolatedTestWorker {
+			snapshot, err = capturePreparationState(sctx.Ctx, sctx.WorkDir, "")
+		} else {
+			snapshot, err = snapshotPreparationState(sctx.Ctx, sctx.WorkDir, sctx.GateDir)
+		}
 		if err != nil {
 			return err
 		}
@@ -169,6 +174,10 @@ func snapshotPreparationState(ctx context.Context, workDir, gateDir string) (pre
 	if err != nil {
 		return preparationSnapshot{}, err
 	}
+	return capturePreparationState(ctx, workDir, parent)
+}
+
+func capturePreparationState(ctx context.Context, workDir, parent string) (preparationSnapshot, error) {
 	dir, err := os.MkdirTemp(parent, "prepare-")
 	if err != nil {
 		return preparationSnapshot{}, fmt.Errorf("create preparation snapshot: %w", err)

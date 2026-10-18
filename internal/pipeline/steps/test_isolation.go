@@ -87,7 +87,7 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 	if err != nil {
 		return nil, err
 	}
-	workspace, err := testisolation.PrepareGit(sctx.Ctx, sctx.WorkDir, root)
+	workspace, err := testisolation.PrepareGit(sctx.Ctx, sctx.WorkDir, root, sctx.Run.BaseSHA, integrationMergeBaseRefs(sctx, runIntegrationBranch(sctx))...)
 	if err != nil {
 		return nil, err
 	}

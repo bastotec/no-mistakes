@@ -16,7 +16,7 @@ type GitWorkspace struct {
 	Identity []string
 }
 
-func PrepareGit(ctx context.Context, workdir, root string) (*GitWorkspace, error) {
+func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integrationRefs ...string) (*GitWorkspace, error) {
 	workspace := &GitWorkspace{Dir: filepath.Join(root, "git"), Pointer: filepath.Join(root, "git-pointer")}
 	for _, role := range []string{"AUTHOR", "COMMITTER"} {
 		ident, err := git.Run(ctx, workdir, "var", "GIT_"+role+"_IDENT")
@@ -29,11 +29,11 @@ func PrepareGit(ctx context.Context, workdir, root string) (*GitWorkspace, error
 		}
 		workspace.Identity = append(workspace.Identity, "GIT_"+role+"_NAME="+ident[:start], "GIT_"+role+"_EMAIL="+ident[start+2:end])
 	}
-	if _, err := git.Run(ctx, workdir, "clone", "--mirror", "--no-local", "--template=", "--", workdir, workspace.Dir); err != nil {
-		return nil, err
-	}
 	format, err := git.Run(ctx, workdir, "rev-parse", "--show-object-format")
 	if err != nil {
+		return nil, err
+	}
+	if _, err := git.Run(ctx, workdir, "init", "--bare", "--template=", "--object-format="+format, workspace.Dir); err != nil {
 		return nil, err
 	}
 	config := "[core]\nrepositoryformatversion = 0\nbare = false\n"
@@ -50,14 +50,46 @@ func PrepareGit(ctx context.Context, workdir, root string) (*GitWorkspace, error
 	if err != nil {
 		return nil, err
 	}
-	if err := os.WriteFile(filepath.Join(workspace.Dir, "HEAD"), []byte(head+"\n"), 0600); err != nil {
-		return nil, err
+	revisions := []string{head}
+	var integrationRef, integrationHead string
+	for _, ref := range integrationRefs {
+		if _, err := git.Run(ctx, workdir, "merge-base", head, ref); err != nil {
+			continue
+		}
+		integrationRef, err = git.Run(ctx, workdir, "rev-parse", "--symbolic-full-name", "--verify", ref)
+		if err != nil || !strings.HasPrefix(integrationRef, "refs/") {
+			return nil, fmt.Errorf("resolve isolated Git integration ref: %s", ref)
+		}
+		integrationHead, err = git.Run(ctx, workdir, "rev-parse", "--verify", integrationRef+"^{commit}")
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, integrationHead)
+		break
 	}
-	index, err := git.RunRaw(ctx, workdir, "ls-files", "--stage", "-z")
+	if integrationRef == "" && validHead(fallbackBase) && !git.IsZeroSHA(fallbackBase) {
+		revisions = append(revisions, fallbackBase)
+	}
+	pack, err := git.RunRawWithInput(ctx, workdir, strings.Join(revisions, "\n")+"\n", "pack-objects", "--stdout", "--revs")
 	if err != nil {
 		return nil, err
 	}
-	if _, err := git.RunWithInput(ctx, workdir, string(index), "--git-dir="+workspace.Dir, "update-index", "-z", "--index-info"); err != nil {
+	if _, err := git.RunWithInput(ctx, workdir, string(pack), "--git-dir="+workspace.Dir, "index-pack", "--stdin", "--strict"); err != nil {
+		return nil, err
+	}
+	if err := os.WriteFile(filepath.Join(workspace.Dir, "HEAD"), []byte(head+"\n"), 0600); err != nil {
+		return nil, err
+	}
+	if integrationRef != "" {
+		if _, err := git.Run(ctx, workdir, "--git-dir="+workspace.Dir, "update-ref", integrationRef, integrationHead); err != nil {
+			return nil, err
+		}
+	}
+	index, err := ExportGitIndex(ctx, workdir, head)
+	if err != nil {
+		return nil, err
+	}
+	if err := ImportGitIndex(ctx, workspace.Dir, index); err != nil {
 		return nil, err
 	}
 	if err := os.WriteFile(workspace.Pointer, []byte("gitdir: /nm/git\n"), 0600); err != nil {

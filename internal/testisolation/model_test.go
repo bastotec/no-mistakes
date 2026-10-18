@@ -1,6 +1,7 @@
 package testisolation
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +18,17 @@ func TestModelBridgePinsAuthorityAndRejectsRedirects(t *testing.T) {
 	defer other.Close()
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
+		var fields map[string]json.RawMessage
+		if err := json.NewDecoder(r.Body).Decode(&fields); err != nil {
+			t.Errorf("invalid forwarded JSON: %v", err)
+		}
+		var model, input string
+		if json.Unmarshal(fields["model"], &model) != nil || model != "fixture-model" || len(fields) != 2 {
+			t.Errorf("forwarded model is not pinned: %s", fields)
+		}
+		if json.Unmarshal(fields["input"], &input) != nil || input != "hello" {
+			t.Errorf("request input lost: %s", fields)
+		}
 		if r.Header.Get("Authorization") != "Bearer host-credential" || r.Header.Get("Cookie") != "" || r.Header.Get("X-Api-Key") != "" || r.URL.Path != "/v1/responses" {
 			t.Errorf("unconfined authority: %v %s", r.Header, r.URL)
 		}
@@ -38,7 +50,20 @@ func TestModelBridgePinsAuthorityAndRejectsRedirects(t *testing.T) {
 		{"POST", "/v1/responses?url=external", `{"model":"fixture-model"}`, 403},
 		{"CONNECT", "/v1/responses", `{"model":"fixture-model"}`, 403},
 		{"POST", "/v1/responses", `{"model":"unapproved-model"}`, 403},
-		{"POST", "/v1/responses", `{"model":"fixture-model"}`, 502},
+		{"POST", "/v1/responses", `{"model":"unapproved-model","Model":"fixture-model"}`, 403},
+		{"POST", "/v1/responses", `{"Model":"unapproved-model","model":"fixture-model"}`, 403},
+		{"POST", "/v1/responses", `{"model":"fixture-model","model":"fixture-model"}`, 403},
+		{"POST", "/v1/responses", `{"model":"unapproved-model","model":"fixture-model"}`, 403},
+		{"POST", "/v1/responses", `{"model":"fixture-model","\u006dodel":"fixture-model"}`, 403},
+		{"POST", "/v1/responses", `{"MODEL":"fixture-model"}`, 403},
+		{"POST", "/v1/responses", `{"input":"hello"}`, 403},
+		{"POST", "/v1/responses", `{"model":null}`, 403},
+		{"POST", "/v1/responses", `{"model":["fixture-model"]}`, 403},
+		{"POST", "/v1/responses", `{"model":"fixture-model"} {}`, 403},
+		{"POST", "/v1/responses", `{"model":"fixture-model"`, 403},
+		{"POST", "/v1/responses", `[]`, 403},
+		{"POST", "/v1/responses", `{"model":"fixture-model","input":"hello"}`, 502},
+		{"POST", "/v1/responses", `{"\u006dodel":"fixture-model","input":"hello"}`, 502},
 	} {
 		request := httptest.NewRequest(test.method, test.path, strings.NewReader(test.body))
 		request.Header.Set("Authorization", "Bearer attacker")
@@ -53,7 +78,7 @@ func TestModelBridgePinsAuthorityAndRejectsRedirects(t *testing.T) {
 			t.Fatal("credential exposed in error")
 		}
 	}
-	if requests.Load() != 1 || redirected.Load() != 0 {
+	if requests.Load() != 2 || redirected.Load() != 0 {
 		t.Fatalf("unexpected upstream calls=%d redirects=%d", requests.Load(), redirected.Load())
 	}
 }
