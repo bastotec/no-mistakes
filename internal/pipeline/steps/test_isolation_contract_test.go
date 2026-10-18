@@ -18,6 +18,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/testisolation"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -206,6 +207,86 @@ func TestIsolatedTestWorkerConfiguredPreparationUsesPrivateGit(t *testing.T) {
 	}
 	if got := gitCmd(t, source, "rev-parse", "HEAD"); got != head {
 		t.Fatal("worker changed shared head")
+	}
+}
+
+func TestIsolatedTestNoOpFixPreservesCheckoutNormalization(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("Linux isolation only")
+	}
+	root := t.TempDir()
+	global := filepath.Join(root, "gitconfig")
+	if err := os.WriteFile(global, []byte("[core]\nautocrlf = true\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", global)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+	source, base, _ := setupGitRepo(t)
+	files := map[string][]byte{
+		"normalized.txt": []byte("first line\nsecond line\n"),
+		"binary.dat":     []byte("binary\x00\nunchanged\n"),
+	}
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(source, name), data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	gitCmd(t, source, "add", "normalized.txt", "binary.dat")
+	gitCmd(t, source, "commit", "-m", "normalization fixture")
+	head := gitCmd(t, source, "rev-parse", "HEAD")
+	work := filepath.Join(root, "work")
+	gitCmd(t, source, "worktree", "add", "--detach", work, head)
+	if _, err := os.Stat(filepath.Join(work, ".gitattributes")); !os.IsNotExist(err) {
+		t.Fatalf("fixture must not override normalization with attributes: %v", err)
+	}
+	checkout := map[string][]byte{}
+	for name := range files {
+		data, err := os.ReadFile(filepath.Join(work, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		checkout[name] = data
+	}
+	if !bytes.Equal(checkout["normalized.txt"], []byte("first line\r\nsecond line\r\n")) || !bytes.Equal(checkout["binary.dat"], files["binary.dat"]) {
+		t.Fatalf("unexpected checkout bytes: %q", checkout)
+	}
+	calls := 0
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		calls++
+		return &agent.Result{Output: json.RawMessage(`{"summary":"no changes needed"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, work, base, head, config.Commands{})
+	workspace, err := testisolation.PrepareGit(sctx.Ctx, work, t.TempDir(), base, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(work, ".git"), []byte("gitdir: "+workspace.Dir+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("GIT_CONFIG_GLOBAL", "/dev/null")
+	sctx.GateDir, sctx.IsolatedTestWorker, sctx.Fixing = workspace.Dir, true, true
+	summary, err := executeFixMode(sctx, types.StepTest, fixExecutionOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || summary != noChangesAppliedSummary {
+		t.Fatalf("no-op fixer produced changes: calls=%d summary=%q", calls, summary)
+	}
+	if got := gitCmd(t, work, "rev-parse", "HEAD"); got != head {
+		t.Fatalf("no-op fixer advanced HEAD: %s", got)
+	}
+	for name, want := range files {
+		blob, err := git.RunRawWithInput(sctx.Ctx, work, "", "show", "HEAD:"+name)
+		if err != nil || !bytes.Equal(blob, want) {
+			t.Fatalf("committed blob %s changed: %q %v", name, blob, err)
+		}
+		data, err := os.ReadFile(filepath.Join(work, name))
+		if err != nil || !bytes.Equal(data, checkout[name]) {
+			t.Fatalf("checkout %s rewritten: %q %v", name, data, err)
+		}
+	}
+	if status := gitCmd(t, work, "status", "--porcelain"); status != "" {
+		t.Fatalf("no-op fixer left normalization noise: %s", status)
 	}
 }
 

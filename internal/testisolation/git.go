@@ -2,8 +2,10 @@ package testisolation
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -58,6 +60,25 @@ func PrepareGit(ctx context.Context, workdir, root, fallbackBase string, integra
 	}
 	if _, err := runGit(ctx, workdir, "", "config", "--file", filepath.Join(workspace.Dir, "config"), "core.worktree", workdir); err != nil {
 		return nil, err
+	}
+	checkoutConfig, err := runGitRaw(ctx, workdir, "", "config", "--null", "--get-regexp", `^core\.(autocrlf|eol|safecrlf|filemode|symlinks|ignorecase|precomposeunicode|checkroundtripencoding)$`)
+	if err != nil {
+		var exit *exec.ExitError
+		if !errors.As(err, &exit) || exit.ExitCode() != 1 {
+			return nil, fmt.Errorf("resolve isolated Git checkout configuration: %w", err)
+		}
+	}
+	for _, entry := range strings.Split(string(checkoutConfig), "\x00") {
+		if entry == "" {
+			continue
+		}
+		key, value, hasValue := strings.Cut(entry, "\n")
+		if !hasValue {
+			value = "true"
+		}
+		if _, err := runGit(ctx, workdir, "", "config", "--file", filepath.Join(workspace.Dir, "config"), "--replace-all", key, value); err != nil {
+			return nil, err
+		}
 	}
 	head, err := runGit(ctx, workdir, "", "rev-parse", "HEAD")
 	if err != nil {
