@@ -110,7 +110,11 @@ func (h *Host) repoArgs() []string {
 	if h.repo == "" {
 		return nil
 	}
-	return []string{"--repo", h.repo}
+	repo := h.repo
+	if h.host != "" {
+		repo = h.host + "/" + h.repoSlug()
+	}
+	return []string{"--repo", repo}
 }
 
 // prSelector returns the explicit gh PR selector for pr, preferring the numeric

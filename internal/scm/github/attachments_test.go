@@ -272,7 +272,7 @@ func TestHostUploadUserAssetSkipsInstallationToken(t *testing.T) {
 }
 
 func TestHostUploadUserAssetUploadsWithOAuthToken(t *testing.T) {
-	t.Parallel()
+	t.Setenv("GH_HOST", "mirror.example.test")
 	dir := t.TempDir()
 	png := filepath.Join(dir, "dot.png")
 	if err := os.WriteFile(png, []byte("png"), 0o644); err != nil {
