@@ -84,6 +84,26 @@ func newSyncFixture(t *testing.T) *syncFixture {
 	return &syncFixture{t: t, ctx: ctx, db: database, repo: repo, run: run, service: &Service{DB: database, Repo: repo, WorkDir: local}, local: local, remote: remote, base: base, old: old, pushed: pushed}
 }
 
+func TestClosedPublishedSyncRefusesLifecycleChangeBeforeApply(t *testing.T) {
+	t.Parallel()
+	f := newSyncFixture(t)
+	if err := f.db.UpdateRunPRState(f.run.ID, "closed"); err != nil {
+		t.Fatal(err)
+	}
+	f.service.beforeApply = func() {
+		if err := f.db.UpdateRunPRState(f.run.ID, "merged"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	state := f.service.Apply(f.ctx)
+	if state.Changed || state.Safety != "blocked_assumptions_changed" {
+		t.Fatalf("lifecycle changed before apply: %#v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.old {
+		t.Fatalf("refusal moved HEAD to %s", got)
+	}
+}
+
 type pipelineCommit struct {
 	message string
 	files   map[string]string

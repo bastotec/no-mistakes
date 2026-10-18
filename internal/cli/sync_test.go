@@ -26,6 +26,11 @@ type cliSyncFixture struct {
 
 func newCLISyncFixture(t *testing.T) cliSyncFixture {
 	t.Helper()
+	return newCLISyncFixtureWithStatus(t, types.RunCompleted)
+}
+
+func newCLISyncFixtureWithStatus(t *testing.T, status types.RunStatus) cliSyncFixture {
+	t.Helper()
 	nmHome := filepath.Join(t.TempDir(), "nm-home")
 	t.Setenv("NM_HOME", nmHome)
 	root := t.TempDir()
@@ -90,7 +95,7 @@ func newCLISyncFixture(t *testing.T) cliSyncFixture {
 	if err := database.UpdateRunPushBinding(run.ID, db.PushBinding{HeadSHA: pushed, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(remote), Ref: "refs/heads/feature/sync"}); err != nil {
 		t.Fatal(err)
 	}
-	if err := database.UpdateRunStatus(run.ID, types.RunCompleted); err != nil {
+	if err := database.UpdateRunStatus(run.ID, status); err != nil {
 		t.Fatal(err)
 	}
 	if err := database.Close(); err != nil {
@@ -184,6 +189,125 @@ func TestAxiSyncCheckAndApplyReturnFullStructuredState(t *testing.T) {
 	}
 	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.pushed {
 		t.Fatalf("HEAD = %s", got)
+	}
+}
+
+// Normal PR closure precedes run completion. An intact published binding must
+// still let the caller obtain additive pipeline commits before doing more work.
+func TestAxiSyncClosedCompletedRunFastForwardsPreservingHistory(t *testing.T) {
+	f := newCLISyncFixtureWithStatus(t, types.RunRunning)
+	p, err := paths.New()
+	if err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	if err := database.UpdateRunPRState(f.runID, "closed"); err != nil {
+		t.Fatal(err)
+	}
+	// Neither unpublished-head recovery nor stale-binding release applies to
+	// this intact published binding; do not turn either into a forceful escape.
+	for _, mode := range []string{"--recover", "--release"} {
+		out, err := executeCmd("axi", "sync", mode)
+		if err == nil || strings.Contains(out, "changed: true") {
+			t.Fatalf("%s must refuse intact published binding: %v\n%s", mode, err, out)
+		}
+	}
+	// The production lifecycle writer completes the active run on closure.
+	out, err := executeCmd("axi", "sync", "--check")
+	if err != nil || !strings.Contains(out, "safe_fast_forward") || !strings.Contains(out, "pr_state: closed") {
+		t.Fatalf("completed closed run must offer guarded sync: %v\n%s", err, out)
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.old {
+		t.Fatal("check moved HEAD")
+	}
+	out, err = executeCmd("axi", "sync")
+	if err != nil || !strings.Contains(out, "changed: true") {
+		t.Fatalf("sync: %v\n%s", err, out)
+	}
+	if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != f.pushed {
+		t.Fatalf("HEAD = %s", got)
+	}
+	cliGit(t, f.local, "merge-base", "--is-ancestor", f.old, "HEAD")
+	if got := cliGit(t, f.local, "ls-remote", f.remote, "refs/heads/feature/sync"); !strings.HasPrefix(got, f.pushed) {
+		t.Fatal("sync changed remote")
+	}
+	run, err := database.GetRun(f.runID)
+	if err != nil || run.Status != types.RunCompleted || run.PRState == nil || *run.PRState != "closed" || run.CustodyReturnedAt != nil || run.HeadSHA != f.pushed {
+		t.Fatalf("sync changed run authority: %#v, %v", run, err)
+	}
+	out, err = executeCmd("axi", "sync", "--check")
+	if err != nil || !strings.Contains(out, "already_synchronized") {
+		t.Fatalf("idempotent check: %v\n%s", err, out)
+	}
+}
+
+func TestAxiSyncClosedPublishedWorkRefusesUnsafeAdoption(t *testing.T) {
+	for _, scenario := range []string{"dirty", "diverged", "equivalent_diverged", "remote_advanced", "merged"} {
+		t.Run(scenario, func(t *testing.T) {
+			f := newCLISyncFixtureWithStatus(t, types.RunRunning)
+			p, err := paths.New()
+			if err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			lifecycle := "closed"
+			want := "blocked_" + scenario
+			switch scenario {
+			case "merged":
+				lifecycle = "merged"
+			case "dirty":
+				if err := os.WriteFile(filepath.Join(f.local, "untracked.txt"), []byte("keep me\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				want = "blocked_dirty"
+			case "diverged":
+				if err := os.WriteFile(filepath.Join(f.local, "local.txt"), []byte("local work\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cliGit(t, f.local, "add", "local.txt")
+				cliGit(t, f.local, "commit", "-m", "local work")
+			case "equivalent_diverged":
+				// The same tree under a distinct commit would ordinarily allow
+				// an equivalent advance. Closed-PR sync must not reset history.
+				if err := os.WriteFile(filepath.Join(f.local, "fix.txt"), []byte("fix\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cliGit(t, f.local, "add", "fix.txt")
+				cliGit(t, f.local, "commit", "-m", "independent equivalent fix")
+				want = "blocked_diverged"
+			case "remote_advanced":
+				pipeline := filepath.Join(filepath.Dir(f.local), "pipeline")
+				if err := os.WriteFile(filepath.Join(pipeline, "later.txt"), []byte("later work\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+				cliGit(t, pipeline, "add", "later.txt")
+				cliGit(t, pipeline, "commit", "-m", "external addition")
+				cliGit(t, pipeline, "push", f.remote, "HEAD:refs/heads/feature/sync")
+			}
+			if err := database.UpdateRunPRState(f.runID, lifecycle); err != nil {
+				t.Fatal(err)
+			}
+			before := cliGit(t, f.local, "rev-parse", "HEAD")
+			remoteBefore := cliGit(t, f.local, "ls-remote", f.remote, "refs/heads/feature/sync")
+			out, err := executeCmd("axi", "sync")
+			if err == nil || !strings.Contains(out, want) || strings.Contains(out, "changed: true") {
+				t.Fatalf("unsafe adoption must refuse %s: %v\n%s", scenario, err, out)
+			}
+			if got := cliGit(t, f.local, "rev-parse", "HEAD"); got != before {
+				t.Fatal("refusal moved HEAD")
+			}
+			if got := cliGit(t, f.local, "ls-remote", f.remote, "refs/heads/feature/sync"); got != remoteBefore {
+				t.Fatal("refusal changed remote")
+			}
+		})
 	}
 }
 
