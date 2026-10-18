@@ -397,7 +397,7 @@ func (s *Service) Refresh(ctx context.Context) State {
 		state.NextAction = retiredBranchNextAction(run, true)
 		return state
 	}
-	if state.PRState == "closed" {
+	if state.PRState == "closed" && !closedPublishedWork(run) {
 		state.State = StateClosed
 		state.Safety = "blocked_closed"
 		state.NextAction = retiredBranchNextAction(run, true)
@@ -458,7 +458,8 @@ func (s *Service) Apply(ctx context.Context) State {
 	}
 
 	recheck, _, ok := s.inspect(ctx)
-	if !ok || recheck.Local.Head != plan.Local.Head || !recheck.Local.Clean || recheck.Local.Branch != plan.Local.Branch {
+	if !ok || recheck.Local.Head != plan.Local.Head || !recheck.Local.Clean || recheck.Local.Branch != plan.Local.Branch ||
+		(plan.PRState == "closed" && recheck.PRState != "closed") {
 		return blockedPlan(recheck, StateAmbiguousContext, "blocked_assumptions_changed", "the local branch or worktree changed before synchronization; no files or refs were changed")
 	}
 	if recheck.State == StatePushInProgress || recheck.State == StatePipelineOwned || recheck.State == StateDirty {
@@ -475,7 +476,8 @@ func (s *Service) Apply(ctx context.Context) State {
 	finalRepo, finalRepoErr := s.DB.GetRepo(s.Repo.ID)
 	if !finalOK || finalRun == nil || finalRepoErr != nil || finalRepo == nil || finalRun.PushActive ||
 		value(finalRun.PushGeneration) != plan.Pipeline.PushGeneration || ptr(finalRun.PushTargetFingerprint) != TargetFingerprint(finalRepo.PushURL()) || ptr(finalRun.PushTargetKind) != targetKind(finalRepo) ||
-		finalPrecondition.Local.Branch != plan.Local.Branch || finalPrecondition.Local.Head != plan.Local.Head || !finalPrecondition.Local.Clean {
+		finalPrecondition.Local.Branch != plan.Local.Branch || finalPrecondition.Local.Head != plan.Local.Head || !finalPrecondition.Local.Clean ||
+		(plan.PRState == "closed" && finalPrecondition.PRState != "closed") {
 		return blockedPlan(finalPrecondition, StateAmbiguousContext, "blocked_assumptions_changed", "the push binding, branch, HEAD, or worktree changed immediately before synchronization; no files or refs were changed")
 	}
 	equivalentAdvance := plan.Safety == SafetySafeEquivalentAdvance
@@ -1844,16 +1846,17 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 		s.classifyPipelineOwned(ctx, &state, run, "the pipeline head has not been successfully bound to the push target; do not make local follow-up commits yet")
 		return state, run, false
 	}
-	// Terminal PR lifecycle retires the branch regardless of local dirtiness
-	// or later target configuration. Refresh may classify retained versus
-	// removed only while the exact original target binding still matches.
+	// PR retirement takes precedence over local dirtiness or later target
+	// configuration, except for the published work closedPublishedWork keeps
+	// eligible for additive sync. Refresh classifies retained versus removed
+	// only while the exact original target binding still matches.
 	if state.PRState == "merged" {
 		state.State = StateMergedRemoteRetained
 		state.Safety = "blocked_merged"
 		state.NextAction = retiredBranchNextAction(run, false)
 		return state, run, true
 	}
-	if state.PRState == "closed" {
+	if state.PRState == "closed" && !closedPublishedWork(run) {
 		state.State = StateClosed
 		state.Safety = "blocked_closed"
 		state.NextAction = retiredBranchNextAction(run, false)
@@ -1946,7 +1949,10 @@ func (s *Service) classifyRelation(ctx context.Context, state *State, pushed, ba
 			state.NextAction = &NextAction{Code: "run_pipeline", Command: `no-mistakes axi run --intent "<what the user set out to accomplish>"`}
 			return
 		default:
-			if equivalentDivergence(ctx, s.workDir(), state.Local.Head, pushed, base) {
+			// Closing an unmerged PR does not make its published fixes
+			// disposable. Only an additive fast-forward is authorized here;
+			// even content-equivalent rewrites must retain both histories.
+			if state.PRState != "closed" && equivalentDivergence(ctx, s.workDir(), state.Local.Head, pushed, base) {
 				state.State = StateDiverged
 				state.Relation = RelationDiverged
 				if live {
@@ -2189,9 +2195,20 @@ func staleBindingNextAction(run *db.Run) *NextAction {
 	return &NextAction{Code: "continue_active_run", Command: "no-mistakes axi status"}
 }
 
+// closedPublishedWork lets a terminal, normally closed PR's published pipeline
+// changes reach the caller through ordinary guarded synchronization. Closure
+// retires delivery, not the commits: a new validation run must not be required
+// merely to obtain them. Unpublished work still uses Recover, stale bindings
+// still use Release, and merged PR retirement is unchanged.
+func closedPublishedWork(run *db.Run) bool {
+	return run != nil && terminalRunStatus(run.Status) && run.SubmittedHeadSHA != nil &&
+		run.HeadSHA != ptr(run.SubmittedHeadSHA) && run.HeadSHA == ptr(run.LastPushedSHA)
+}
+
 // retiredBranchNextAction names the exit for a branch retired by its PR
-// lifecycle. Release is defined for a binding the observed remote no longer
-// matches, so a merged or closed PR whose remote still equals the binding -
+// lifecycle; closedPublishedWork bypasses retirement for published changes
+// eligible for additive sync. Release is defined for a binding the observed
+// remote no longer matches, so a retired PR whose remote still equals the binding -
 // or has not been checked against it yet - must not advertise it: release
 // refuses an intact binding and points back at a re-check, which loops.
 // While the run is active it owns the branch. Otherwise an unchecked remote

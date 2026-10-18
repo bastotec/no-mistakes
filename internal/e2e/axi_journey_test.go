@@ -124,7 +124,7 @@ func branchSyncScenario(t *testing.T) string {
       verdict: go
       artifacts: []
       title: "feat: branch sync"
-      body: "branch sync journey"
+      body: "## What Changed\n- Guard the feature while preserving published pipeline fixes."
 `
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write branch sync scenario: %v", err)
