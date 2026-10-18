@@ -319,6 +319,90 @@ func TestExecutor_InterruptedProtectedPathRefusalDoesNotCompleteRepair(t *testin
 	}
 }
 
+func TestExecutor_IsolatedSurvivedWorkSuppressesContentFilters(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("callback fixtures require a POSIX shell")
+	}
+	for _, driver := range []string{"clean", "smudge", "process"} {
+		for _, isolated := range []bool{false, true} {
+			for _, moved := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/isolated=%v/moved=%v", driver, isolated, moved), func(t *testing.T) {
+					database, p, run, _ := setupTest(t)
+					if isolated {
+						if err := database.EnableTestIsolation(run.ID); err != nil {
+							t.Fatal(err)
+						}
+					}
+					dir := survivedWorkRepo(t)
+					writeFile(t, dir, ".gitattributes", "*.txt filter=CustOM diff=CustOM\n")
+					gitRun(t, dir, "add", ".gitattributes")
+					gitRun(t, dir, "commit", "-m", "attributes")
+					leavePartialRepair(t, dir)
+					callbacks := t.TempDir()
+					marker := filepath.Join(callbacks, "filter-called")
+					textconvMarker := filepath.Join(callbacks, "textconv-called")
+					body := "#!/bin/sh\nprintf called >> '" + marker + "'\ncat\n"
+					if driver == "process" {
+						body = "#!/bin/sh\nprintf called >> '" + marker + "'\nexit 1\n"
+					}
+					filter := filepath.Join(callbacks, "filter")
+					if err := os.WriteFile(filter, []byte(body), 0o755); err != nil {
+						t.Fatal(err)
+					}
+					gitRun(t, dir, "config", "filter.CustOM."+driver, filter)
+					gitRun(t, dir, "config", "filter.CustOM.required", fmt.Sprint(isolated))
+					gitRun(t, dir, "config", "diff.CustOM.textconv", "printf called >> '"+textconvMarker+"'; cat")
+					assertCallbacks := func() {
+						t.Helper()
+						_, err := os.Stat(marker)
+						if isolated && !os.IsNotExist(err) || !isolated && err != nil {
+							t.Fatalf("filter callback isolated=%v: %v", isolated, err)
+						}
+						if _, err := os.Stat(textconvMarker); !os.IsNotExist(err) {
+							t.Fatalf("custody invoked textconv: %v", err)
+						}
+					}
+					executor := NewExecutor(database, p, nil, nil, nil, nil)
+					if err := executor.settleSurvivedWork(run.ID, dir, true, func(string) {}); err != nil {
+						t.Fatal(err)
+					}
+					work, err := database.GetRunSurvivedWork(run.ID)
+					if driver == "process" && !isolated {
+						if err != nil || work == nil || work.State != types.SurvivedWorkInPlace || work.InspectionError == "" {
+							t.Fatalf("failed ordinary process filter did not retain work: %+v %v", work, err)
+						}
+						assertCallbacks()
+						return
+					}
+					if err != nil || work == nil || work.State != types.SurvivedWorkCaptured {
+						t.Fatalf("custody capture failed: %+v %v", work, err)
+					}
+					assertCallbacks()
+					if moved {
+						writeFile(t, dir, "unrelated", "moved\n")
+						g := survivedWorkGit{noCallbacks: true}
+						for _, args := range [][]string{{"add", "unrelated"}, {"commit", "-m", "head moved"}} {
+							if _, err := g.Run(context.Background(), dir, args...); err != nil {
+								t.Fatal(err)
+							}
+						}
+					}
+					if _, err := executor.restoreSurvivedWork(run.ID, dir, func(string) {}); err != nil {
+						t.Fatal(err)
+					}
+					assertCallbacks()
+					if got := readFile(t, dir, "tracked.txt"); got != "working version\n" {
+						t.Fatalf("unstaged work lost: %q", got)
+					}
+					if got := gitRun(t, dir, "show", ":tracked.txt"); got != "staged version" {
+						t.Fatalf("index split lost: %q", got)
+					}
+				})
+			}
+		}
+	}
+}
+
 func TestExecutor_IsolatedSurvivedWorkSuppressesGitCallbacks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("callback fixtures require a POSIX shell")

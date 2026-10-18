@@ -37,27 +37,62 @@ type survivedWorkGit struct {
 	noCallbacks bool
 }
 
-func (g survivedWorkGit) args(args []string) []string {
-	if g.noCallbacks {
-		return append([]string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false"}, args...)
+func (g survivedWorkGit) args(ctx context.Context, dir string, args []string) ([]string, error) {
+	if !g.noCallbacks {
+		return args, nil
 	}
-	return args
+	overrides := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false"}
+	keys, err := git.RunRaw(ctx, dir, append(overrides, "config", "--null", "--name-only", "--list")...)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range strings.Split(string(keys), "\x00") {
+		field := key[strings.LastIndexByte(key, '.')+1:]
+		if strings.HasPrefix(key, "filter.") && (field == "clean" || field == "smudge" || field == "process" || field == "required") ||
+			strings.HasPrefix(key, "diff.") && field == "textconv" {
+			if strings.ContainsAny(key, "=\n\r") {
+				return nil, fmt.Errorf("cannot disable unsafe Git callback key")
+			}
+			value := ""
+			if field == "required" {
+				value = "false"
+			}
+			overrides = append(overrides, "-c", key+"="+value)
+		}
+	}
+	return append(overrides, args...), nil
 }
 
 func (g survivedWorkGit) Run(ctx context.Context, dir string, args ...string) (string, error) {
-	return git.Run(ctx, dir, g.args(args)...)
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return "", err
+	}
+	return git.Run(ctx, dir, args...)
 }
 
 func (g survivedWorkGit) RunRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
-	return git.RunRaw(ctx, dir, g.args(args)...)
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return nil, err
+	}
+	return git.RunRaw(ctx, dir, args...)
 }
 
 func (g survivedWorkGit) RunWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
-	return git.RunWithEnv(ctx, dir, env, g.args(args)...)
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return "", err
+	}
+	return git.RunWithEnv(ctx, dir, env, args...)
 }
 
 func (g survivedWorkGit) RunWithInput(ctx context.Context, dir, input string, args ...string) (string, error) {
-	return git.RunWithInput(ctx, dir, input, g.args(args)...)
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return "", err
+	}
+	return git.RunWithInput(ctx, dir, input, args...)
 }
 
 func (e *Executor) survivedWorkGit(runID string) (survivedWorkGit, error) {
@@ -78,7 +113,11 @@ func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.Su
 }
 
 func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
-	return (survivedWorkGit{}).ClearSurvivedWork(database, runID, workDir)
+	isolated, err := database.TestIsolationEnabled(runID)
+	if err != nil {
+		return err
+	}
+	return (survivedWorkGit{noCallbacks: isolated}).ClearSurvivedWork(database, runID, workDir)
 }
 
 // CaptureSurvivedWork moves a cut-short repair's uncommitted work into a
@@ -128,11 +167,11 @@ func (g survivedWorkGit) writeSurvivedWorkMarker(workDir string) {
 // SurvivedWorkMarked reports whether in-place work whose handoff could not be
 // recorded marked this worktree, and drops the marker once the worktree is
 // clean again.
-func SurvivedWorkMarked(workDir string) bool {
-	g := survivedWorkGit{}
+func SurvivedWorkMarked(workDir string, isolated bool) bool {
+	g := survivedWorkGit{noCallbacks: isolated}
 	path := g.survivedWorkMarkerPath(workDir)
 	if path == "" {
-		return false
+		return isolated
 	}
 	if _, err := os.Stat(path); err != nil {
 		return false
@@ -450,8 +489,8 @@ func (g survivedWorkGit) survivedWorkUnclean(workDir string) bool {
 // repair that never settled (a shutdown mid-round) and may have added to it -
 // and the worktree still holds changes. Captured work lives in its ref and
 // never holds the worktree.
-func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string) bool {
-	g := survivedWorkGit{}
+func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string, isolated bool) bool {
+	g := survivedWorkGit{noCallbacks: isolated}
 	return work != nil && work.State != types.SurvivedWorkCaptured && g.survivedWorkUnclean(workDir)
 }
 

@@ -309,7 +309,7 @@ func TestCaptureSurvivedWork_RecordsBeforeCleaningAndKeepsWorkWhenItCannot(t *te
 	if gitRun(t, dir, "status", "--porcelain", "--untracked-files=all") == "" {
 		t.Fatal("work removed from the worktree although its handoff was never recorded")
 	}
-	if !SurvivedWorkHoldsWorktree(work, dir) {
+	if !SurvivedWorkHoldsWorktree(work, dir, false) {
 		t.Fatal("cleanup would release a worktree holding unrecorded work")
 	}
 }
@@ -491,13 +491,13 @@ func TestCaptureSurvivedWork_UnrecordableInPlaceWorkMarksTheWorktree(t *testing.
 	if work == nil || work.State != types.SurvivedWorkInPlace || err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("capture = %+v, %v; want in-place work and the record error", work, err)
 	}
-	if !SurvivedWorkMarked(dir) {
+	if !SurvivedWorkMarked(dir, false) {
 		t.Fatal("unrecorded in-place work left no marker")
 	}
 	if err := os.Remove(filepath.Join(dir, "partial.txt")); err != nil {
 		t.Fatal(err)
 	}
-	if SurvivedWorkMarked(dir) {
+	if SurvivedWorkMarked(dir, false) {
 		t.Fatal("marker held a clean worktree")
 	}
 }
