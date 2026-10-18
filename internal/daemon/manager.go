@@ -2231,7 +2231,9 @@ func (m *RunManager) HandleCancel(runID string) error {
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
 // and waits for their goroutines to finish before returning, preventing
-// concurrent pushes to upstream.
+// concurrent pushes to upstream. Terminal runs can still be cleaning up their
+// worktrees; await them too so git worktree add cannot race the last removal's
+// deletion of the shared worktrees administration directory.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
 func (m *RunManager) cancelActiveRuns(repoID, branch, trigger string) {
@@ -2246,15 +2248,17 @@ func (m *RunManager) cancelActiveRuns(repoID, branch, trigger string) {
 		if run.Branch != branch {
 			continue
 		}
-		if run.Status != types.RunPending && run.Status != types.RunRunning {
-			continue
-		}
-
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
 		quieting := m.quieting[run.ID]
 		m.mu.Unlock()
+		if run.Status != types.RunPending && run.Status != types.RunRunning {
+			if done != nil {
+				toWait = append(toWait, done)
+			}
+			continue
+		}
 		if !ok {
 			continue
 		}
