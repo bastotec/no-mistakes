@@ -726,3 +726,33 @@ no-mistakes daemon status
 ```
 
 Shows the PID if the daemon is running.
+
+## Run-scoped Test isolation
+
+```sh
+no-mistakes axi run --isolate-test --intent "Validate this change without ambient credentials or general network access"
+```
+
+This explicitly opts **one new run's whole Test descendant tree** into
+Linux/bubblewrap isolation with a fresh native PostgreSQL database and a
+constrained Deck model channel. It does not sandbox other steps, enable existing
+runs, configure a shared daemon, or activate by repository config. A new ordinary
+run or rerun remains ordinary unless explicitly launched with this flag.
+
+The launch imports the verified local commit through a distinct RPC, without a
+gate push. An older daemon refuses; there is no fallback to unconstrained Test.
+The invoking feature worktree must be clean. Existing active runs are never
+silently replaced; reattachment requires the same opted-in run, submitted head,
+intent and base. The flag cannot combine with skip, history, PR-association or
+launch-receipt flags; `--base-branch` remains available.
+
+Use the normal `axi status`, `axi respond` and cancellation APIs after launch.
+Recovery preserves the per-run isolation pin and provisions a fresh database.
+An interrupted started repair retains the existing repair-reconciliation gate;
+it is not replayed as an ordinary agent invocation.
+
+See [environment prerequisites](/no-mistakes/reference/environment/#opt-in-test-isolation)
+and the implementation's pre-code invariants and bounded activation proposal in
+[`docs/test-isolation-design.md`](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md).
+Shared activation requires separate approval; this command is not an instruction
+to restart or update any running shared daemon.

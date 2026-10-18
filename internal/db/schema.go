@@ -439,4 +439,5 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_files INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
+	`CREATE TABLE IF NOT EXISTS run_test_isolation (run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE)`,
 }

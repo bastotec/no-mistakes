@@ -43,3 +43,7 @@ demo_raw.gif
 
 # Worktree-local gh release used to pin the user-attachments upload contract.
 .scratch-gh/
+
+# Disposable Test-isolation validation daemon and build scratch.
+.nm-tmp/
+.scratch-test-isolation/

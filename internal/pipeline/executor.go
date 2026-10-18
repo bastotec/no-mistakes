@@ -1183,9 +1183,10 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
 		},
-		CIReadinessChanged: ciReadinessChanged,
-		MarkRunning:        markRunning,
-		OnPRMerged:         e.onPRMerged,
+		CIReadinessChanged:  ciReadinessChanged,
+		MarkRunning:         markRunning,
+		OnPRMerged:          e.onPRMerged,
+		IsolatedRepairRound: func() string { return activeRepairRoundID },
 	}
 	if stepName == types.StepTest {
 		e.mu.Lock()

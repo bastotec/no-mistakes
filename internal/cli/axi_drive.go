@@ -123,6 +123,7 @@ func newAxiRunCmd() *cobra.Command {
 	var preserveHistoryBase string
 	var existingPR string
 	var retireExistingPR bool
+	var isolateTest bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -180,6 +181,12 @@ func newAxiRunCmd() *cobra.Command {
 				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
+				if isolateTest {
+					if retireExistingPR || existingPR != "" || preserveHistoryBase != "" || len(skipSteps) != 0 || launchNonce != "" || validationGeneration != "" {
+						return emitError(cmd, 2, "--isolate-test cannot combine with PR association, history, skip or launch-receipt flags")
+					}
+					return runAxiIsolatedTest(cmd, autoYes, intent, baseBranch, wait)
+				}
 				if retireExistingPR {
 					if conflicting := changedLaunchFlags(cmd); len(conflicting) > 0 {
 						return emitError(cmd, 2, fmt.Sprintf("--retire-existing-pr starts no run, so it cannot be combined with %s", strings.Join(conflicting, ", ")))
@@ -205,6 +212,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&preserveHistoryBase, "preserve-history", "", "pin the exact integration base SHA and submitted history; require --base-branch, forbid rebase/merge and force updates (including CI repair)")
 	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
 	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
+	cmd.Flags().BoolVar(&isolateTest, "isolate-test", false, "opt this run's whole Test descendant tree into Linux/bubblewrap isolation with a private native PostgreSQL database and constrained model channel; refuse unsupported setups")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }

@@ -311,3 +311,29 @@ When set to a disabling value, telemetry stays off even if a runtime or embedded
 When the daemon runs through a managed service (launchd, systemd user service, Task Scheduler), the macOS and Linux service definitions include a default `PATH` with common user and system binary directories. They also bake in any proxy variables (`HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY`, `ALL_PROXY`) that were set when you installed or refreshed the service, so the daemon and the agents it spawns can reach the network through your proxy even when the login-shell probe is unavailable. Once baked in, the values are preserved across later service refreshes and restarts even when the proxy variables are not exported in that shell, so a routine `daemon restart` or a binary upgrade will not strip them; export the variables again only when you need to change or remove them. Both the upper- and lower-case spellings are forwarded exactly as you set them, because tooling is inconsistent about which it reads (curl, for example, honors only the lower-case `http_proxy` for plain-HTTP requests). Because a proxy URL can embed credentials (for example `http://user:pass@host`), the generated service file is restricted to owner-only `0600` permissions whenever proxy values are forwarded into it. When no proxy variables are set, the generated definition is unchanged and keeps the conventional `0644` mode. Windows Task Scheduler inherits your logon environment and needs no forwarding. At daemon startup, the daemon resolves environment once from your login shell on macOS and Linux (`$SHELL -l -i -c 'env -0'` for bash and zsh, run in its own session so an interactive shell never waits on a terminal), preserves your shell `PATH` order, and appends any missing well-known directories such as `~/.local/bin`, `~/go/bin`, `~/.cargo/bin`, `~/bin`, `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, and `/bin`. When the login shell binary itself does not exist yet, which happens on macOS with nix-darwin when the daemon starts at login before `/run/current-system` has been recreated, startup waits for it with backoff for up to a minute before giving up. If login-shell resolution still fails or returns no entries, the daemon logs a warning and uses an augmented process-environment fallback that may omit version-manager directories such as nvm, fnm, or volta. Restart the daemon to pick up a login shell that appeared or changed after startup. On Windows it reuses the current process environment.
 
 If your env vars aren't set in your login shell's rc files (`.zprofile`, `.zshrc`, `.profile`, `.bash_profile`, `.bashrc`, PowerShell profile), the daemon won't see them. Put them somewhere a login shell will load, then restart the daemon to pick them up.
+
+## Opt-in Test isolation
+
+These operator-owned variables configure prerequisites for `axi run --isolate-test`;
+they do not enable isolation on their own or affect ordinary runs. Set them in the
+**isolated daemon's** startup environment. Do not restart or reconfigure a shared
+running daemon merely to try this capability.
+
+| Variable | Required value |
+| --- | --- |
+| `NM_TEST_POSTGRES_ROOT` | Absolute native PostgreSQL installation prefix with executable `bin/initdb`, `bin/postgres`, `bin/psql`, and their libraries/share files. Mounted read-only; cluster data is created only inside the invocation's tmpfs. |
+| `NM_TEST_MODEL_URL` | Exact model gateway base ending in `/v1`, using HTTPS or HTTP on an explicit loopback IP. No embedded credentials, query, fragment, redirects, or ambient proxy. |
+| `NM_TEST_MODEL_KEY_FILE` | Absolute host-only key-file reference, outside every sandbox mount. The daemon reads it; the worker and its descendants never receive it. |
+| `NM_TEST_MODEL` | Exact model route allowed by the bridge. Requests for another model are refused. |
+
+All are required; an unsupported setup refuses rather than executing ordinary
+Test. The worker requires Linux amd64/arm64, bubblewrap, Landlock network ABI 4+
+and a `CGO_ENABLED=0` no-mistakes build. The release builds already disable cgo.
+The child environment is constructed from an empty allowlist, not this startup
+environment. It receives only fixed runtime/home/locale/Git settings, the gate
+marker, generated disposable database connection settings, and the namespace-local
+model URL. PostgreSQL provisioning alone also receives its fixed library path.
+
+The complete boundary, fixed DSN and model channel, recovery behavior, regression
+fixtures, and bounded activation/rollback proposal are recorded in
+[`docs/test-isolation-design.md`](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md).
