@@ -155,11 +155,14 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if s.recovery != nil {
 		// Check immutable intent before an idempotent return, and do not bind,
 		// retarget, rewrite, or restamp an already published PR.
-		if err := s.verifyRecoveryPublication(sctx, s.recovery.BaseSHA, s.recovery.PolicySHA, provider); err != nil {
+		if err := s.verifyRecoveryPublication(sctx, s.recovery.BaseSHA, s.recovery.PolicySHA, provider, host); err != nil {
 			return nil, err
 		}
 		if existing != nil {
 			return s.recoveredExistingPR(existing)
+		}
+		if s.mediaUploader == nil {
+			s.mediaUploader, _ = host.(userAssetUploader)
 		}
 		if sctx.Run.PRURL != nil && strings.TrimSpace(*sctx.Run.PRURL) != "" {
 			return nil, recoveryRefusal("persisted PR identity was not found; no duplicate may be created")
@@ -182,11 +185,11 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	if s.recovery != nil {
-		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider); err != nil {
+		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider, host); err != nil {
 			return nil, err
 		}
 	} else if existing == nil {
-		if err := pinPublication(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider); err != nil {
+		if err := pinPublication(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider, host); err != nil {
 			return nil, fmt.Errorf("pin publication intent: %w", err)
 		}
 	}
@@ -319,7 +322,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return nil, err
 	}
 	if s.recovery != nil {
-		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider); err != nil {
+		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider, host); err != nil {
 			return nil, err
 		}
 		if prior, err := findRecoveryPR(sctx, host); err != nil {
@@ -355,7 +358,7 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if _, err := s.recoveredExistingPR(actual); err != nil {
 			return nil, err
 		}
-		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider); err != nil {
+		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider, host); err != nil {
 			return nil, err
 		}
 	}

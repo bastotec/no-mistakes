@@ -3,7 +3,9 @@ package cli
 import (
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/spf13/cobra"
 	toon "github.com/toon-format/toon-go"
@@ -40,8 +42,12 @@ func newAxiRecoverPublicationCmd() *cobra.Command {
 					return emitError(cmd, 1, err.Error())
 				}
 				defer client.Close()
+				agentTimeout := env.cfg.AgentTimeout
+				if agentTimeout <= 0 {
+					agentTimeout = config.DefaultAgentTimeout
+				}
 				var result ipc.RecoverPublicationResult
-				if err := client.Call(ipc.MethodRecoverPublication, &ipc.RecoverPublicationParams{RepoID: env.repo.ID, RunID: runID}, &result); err != nil {
+				if err := client.CallWithContext(cmd.Context(), ipc.MethodRecoverPublication, &ipc.RecoverPublicationParams{RepoID: env.repo.ID, RunID: runID}, &result, 2*agentTimeout+5*time.Minute); err != nil {
 					return emitError(cmd, 2, fmt.Sprintf("recover publication: %v", err))
 				}
 				emitDoc(cmd, toon.Field{Key: "run_id", Value: result.RunID}, toon.Field{Key: "pr_url", Value: result.PRURL}, toon.Field{Key: "validation", Value: "recorded evidence reused; no new validation or merge authority"})

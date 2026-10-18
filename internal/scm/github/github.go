@@ -97,6 +97,13 @@ func HostPrefixedSlugForHost(remoteURL, host string) string {
 	return host + "/" + slug
 }
 
+func (h *Host) PublicationIdentity() string {
+	if h.host == "" || h.repo == "" {
+		return ""
+	}
+	return h.host + "/" + h.repo + ":" + h.forkOwner
+}
+
 // repoArgs returns the --repo flag pair when the slug is known, so gh commands
 // resolve the right repository regardless of the process working directory.
 func (h *Host) repoArgs() []string {

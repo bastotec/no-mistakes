@@ -63,6 +63,12 @@ func handleFakeCLI(mode string) {
 	}
 
 	switch mode {
+	case "ssh-hostname":
+		host, err := os.ReadFile(os.Getenv("FAKE_CLI_SSH_HOST_FILE"))
+		if err != nil {
+			os.Exit(1)
+		}
+		fmt.Printf("hostname %s\n", strings.TrimSpace(string(host)))
 	case "test-preview-gh":
 		fakeTestPreviewGH(args)
 	case "gh":

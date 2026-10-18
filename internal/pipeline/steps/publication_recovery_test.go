@@ -12,7 +12,9 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -23,16 +25,21 @@ func publicationRecoveryFixture(t *testing.T) (*pipeline.StepContext, string) {
 	return publicationRecoveryFixtureWithClassification(t, true)
 }
 
-func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool) (*pipeline.StepContext, string) {
+func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, configure ...func(*pipeline.StepContext)) (*pipeline.StepContext, string) {
 	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "fixture"}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 	sctx.Env, _ = fakeGH(t, "")
 	sctx.Config.Test.Evidence.AttachMedia = false
+	for _, fn := range configure {
+		fn(sctx)
+	}
+	png := writeEvidenceFile(t, sctx.EvidenceDir, "checkout.png", []byte("png-bytes"))
+	pngJSON, _ := json.Marshal(png)
 	// This is a deterministic recorded run, not a live validation claim.
 	review := `{"findings":[],"summary":"fix-only round completed","risk_level":"medium","risk_rationale":"` + staleRisk + `","round_cap":1,"resolved_by_fix":[{"id":"r1","severity":"error","description":"Restore required parser records","action":"auto-fix"}]}`
-	test := `{"findings":[],"summary":"fixture","tested":["fixture scenario"],"testing_summary":"recorded fixture evidence","artifacts":[],"scenarios":[{"name":"fixture scenario","result":"pass","live":true,"evidence":"fixture recorded observation","reason":""}],"verdict":"go","tested_head_sha":"` + head + `"}`
+	test := `{"findings":[],"summary":"fixture","tested":["fixture scenario"],"testing_summary":"recorded fixture evidence","artifacts":[{"kind":"screenshot","label":"Recorded fixture","path":` + string(pngJSON) + `}],"scenarios":[{"name":"fixture scenario","result":"pass","live":true,"evidence":"fixture recorded observation","reason":""}],"verdict":"go","tested_head_sha":"` + head + `"}`
 	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, base); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +103,7 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool) (
 	}
 	// Exercise real pinning and the ordinary guard, then model executor's
 	// terminal failure persistence. No test manufactures a recovery-only waiver.
-	_, err = (&PRStep{}).Execute(sctx)
+	_, err = (&PRStep{mediaUploader: &stubMediaUploader{err: os.ErrPermission}}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "refusing non-compliant PR publication") {
 		t.Fatalf("ordinary guard error=%v", err)
 	}
@@ -301,5 +308,123 @@ func TestPublicationRecoveryClassifiedMismatchCannotPassWithEmptyIssues(t *testi
 	}
 	if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "refusing non-compliant PR publication") {
 		t.Fatalf("contradictory validator verdict passed: %v", err)
+	}
+}
+
+func TestPublicationRecoveryRefusesTargetAdvanceDuringAgents(t *testing.T) {
+	for _, phase := range []string{"draft", "validation"} {
+		t.Run(phase, func(t *testing.T) {
+			sctx, dir := publicationRecoveryFixture(t)
+			env, log := fakeGH(t, "")
+			sctx.Env = env
+			ag := sctx.Agent.(*mockAgent)
+			advanced := false
+			advance := func() {
+				gitCmd(t, dir, "update-ref", "refs/heads/main", sctx.Run.HeadSHA)
+				advanced = true
+			}
+			if phase == "draft" {
+				ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+					advance()
+					return &agent.Result{Output: []byte(`{"title":"fix: parser","body":"## What Changed\n\n- Restore records"}`)}, nil
+				}
+			} else {
+				validate := ag.validationFn
+				ag.validationFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+					advance()
+					return validate(ctx, opts)
+				}
+			}
+			if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "target branch/base") {
+				t.Fatalf("moved target accepted: %v", err)
+			}
+			if !advanced {
+				t.Fatal("agent did not advance the target")
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "pr create") || strings.Contains(string(data), "pr edit") {
+				t.Fatalf("moved target mutated forge: %s", data)
+			}
+		})
+	}
+}
+
+func TestPublicationRecoveryRefusesSSHAliasReroutingBeforeUploads(t *testing.T) {
+	bin := fakeCLIBinDir(t)
+	linkTestBinary(t, bin, "ssh")
+	hostFile := filepath.Join(t.TempDir(), "ssh-host")
+	if err := os.WriteFile(hostFile, []byte("github.com"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "ssh-hostname")
+	t.Setenv("FAKE_CLI_SSH_HOST_FILE", hostFile)
+	sctx, _ := publicationRecoveryFixtureWithClassification(t, true, func(sctx *pipeline.StepContext) {
+		sctx.Repo.UpstreamURL = "git@work:test/repo.git"
+		sctx.ForgeContext = &forgecontext.Context{Provider: scm.ProviderGitHub}
+		sctx.Config.Test.Evidence.AttachMedia = true
+	})
+	if err := os.WriteFile(hostFile, []byte("mirror.ghe.com"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	env, log := fakeGH(t, "")
+	sctx.Env = env
+	pins, err := ValidatePublicationRecoveryRecords(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploader := &stubMediaUploader{t: t}
+	step := &PRStep{recovery: pins, mediaUploader: uploader}
+	if _, err := step.Execute(sctx); err == nil || !strings.Contains(err.Error(), "target branch/base") {
+		t.Fatalf("rerouted alias accepted: %v", err)
+	}
+	if len(uploader.calls) != 0 {
+		t.Fatalf("rerouted recovery uploaded evidence: %v", uploader.calls)
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "--hostname mirror.ghe.com") || strings.Contains(string(data), "pr create") || strings.Contains(string(data), "pr edit") {
+		t.Fatalf("unexpected rerouted forge operations: %s", data)
+	}
+}
+
+func TestPublicationRecoveryRefusesInsufficientIdentityPinsWithoutRetrofit(t *testing.T) {
+	sctx, _ := publicationRecoveryFixture(t)
+	original, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(original.JSON), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	delete(legacy, "ForgeIdentity")
+	payload, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.PinPublicationIntent(run.ID, run.HeadSHA, string(payload)); err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.RecordPublicationRefusal(run.ID, run.HeadSHA, *original.Refusal); err != nil {
+		t.Fatal(err)
+	}
+	run.Status, run.Error = types.RunFailed, sctx.Run.Error
+	sctx.Run = run
+	if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "invalid publication intent") {
+		t.Fatalf("insufficient pins accepted: %v", err)
+	}
+	after, err := sctx.DB.GetPublicationIntent(run.ID, run.HeadSHA)
+	if err != nil || after.JSON != string(payload) {
+		t.Fatalf("legacy pins retrofitted: %+v %v", after, err)
 	}
 }

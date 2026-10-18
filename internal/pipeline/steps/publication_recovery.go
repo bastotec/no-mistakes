@@ -29,6 +29,7 @@ type publicationPins struct {
 	Provider       scm.Provider
 	PushTarget     string
 	PRTarget       string
+	ForgeIdentity  string
 	ConfigDigest   string
 	EvidenceDigest string
 }
@@ -75,7 +76,7 @@ func publicationEvidence(sctx *pipeline.StepContext) ([]*db.StepResult, map[stri
 	return validation, rounds, digest, err
 }
 
-func currentPublicationPins(sctx *pipeline.StepContext, branch, base, baseSHA, policy string, provider scm.Provider) (publicationPins, error) {
+func currentPublicationPins(sctx *pipeline.StepContext, branch, base, baseSHA, policy string, provider scm.Provider, host scm.Host) (publicationPins, error) {
 	_, _, evidence, err := publicationEvidence(sctx)
 	if err != nil {
 		return publicationPins{}, err
@@ -88,11 +89,29 @@ func currentPublicationPins(sctx *pipeline.StepContext, branch, base, baseSHA, p
 		Commit    any
 		Providers any
 	}{sctx.Config.PR, sctx.Config.Test, sctx.Config.Commit, sctx.Config.Providers})
-	return publicationPins{sctx.Run.HeadSHA, branch, base, baseSHA, policy, provider, branchsync.TargetFingerprint(resolvePushURL(sctx)), branchsync.TargetFingerprint(sctx.Repo.UpstreamURL), cfg, evidence}, err
+	if err != nil {
+		return publicationPins{}, err
+	}
+	identity := ""
+	if target, ok := host.(interface{ PublicationIdentity() string }); ok {
+		if value := target.PublicationIdentity(); value != "" {
+			identity, err = publicationDigest(value)
+			if err != nil {
+				return publicationPins{}, err
+			}
+		}
+	}
+	return publicationPins{
+		HeadSHA: sctx.Run.HeadSHA, Branch: branch, BaseBranch: base,
+		BaseSHA: baseSHA, PolicySHA: policy, Provider: provider,
+		PushTarget:    branchsync.TargetFingerprint(resolvePushURL(sctx)),
+		PRTarget:      branchsync.TargetFingerprint(sctx.Repo.UpstreamURL),
+		ForgeIdentity: identity, ConfigDigest: cfg, EvidenceDigest: evidence,
+	}, nil
 }
 
-func pinPublication(sctx *pipeline.StepContext, branch, base, baseSHA, policy string, provider scm.Provider) error {
-	pins, err := currentPublicationPins(sctx, branch, base, baseSHA, policy, provider)
+func pinPublication(sctx *pipeline.StepContext, branch, base, baseSHA, policy string, provider scm.Provider, host scm.Host) error {
+	pins, err := currentPublicationPins(sctx, branch, base, baseSHA, policy, provider, host)
 	if err != nil {
 		return err
 	}
@@ -132,7 +151,7 @@ func ValidatePublicationRecoveryRecords(sctx *pipeline.StepContext) (*publicatio
 		return nil, recoveryRefusal("terminal run failure does not match the recorded publication refusal")
 	}
 	var pins publicationPins
-	if json.Unmarshal([]byte(pin.JSON), &pins) != nil || pins.PolicySHA == "" || pins.BaseBranch == "" {
+	if json.Unmarshal([]byte(pin.JSON), &pins) != nil || pins.PolicySHA == "" || pins.BaseBranch == "" || pins.ForgeIdentity == "" {
 		return nil, recoveryRefusal("invalid publication intent")
 	}
 	rows, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
@@ -250,12 +269,26 @@ func RecoverPublication(sctx *pipeline.StepContext) (*pipeline.StepOutcome, erro
 	return (&PRStep{recovery: pins}).Execute(sctx)
 }
 
-func (s *PRStep) verifyRecoveryPublication(sctx *pipeline.StepContext, baseSHA, policy string, provider scm.Provider) error {
+func (s *PRStep) verifyRecoveryPublication(sctx *pipeline.StepContext, draftedBase, draftedPolicy string, provider scm.Provider, host scm.Host) error {
 	pins := s.recovery
 	if pins == nil {
 		return nil
 	}
-	current, err := currentPublicationPins(sctx, strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"), effectivePRBaseBranch(sctx), baseSHA, policy, provider)
+	if draftedBase != pins.BaseSHA || draftedPolicy != pins.PolicySHA {
+		return recoveryRefusal("target branch/base or policy differs from original publication intent")
+	}
+	ctx, cancel := contextWithPublicationTimeout(sctx)
+	defer cancel()
+	baseBranch := effectivePRBaseBranch(sctx)
+	policy, err := resolvePRPolicySHA(ctx, sctx, baseBranch)
+	if err != nil {
+		return recoveryRefusal("target branch/base revision could not be verified")
+	}
+	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, baseBranch)
+	if err != nil {
+		return err
+	}
+	current, err := currentPublicationPins(sctx, strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"), baseBranch, baseSHA, policy, provider, host)
 	if err != nil {
 		return err
 	}
@@ -273,8 +306,6 @@ func (s *PRStep) verifyRecoveryPublication(sctx *pipeline.StepContext, baseSHA, 
 	if err := AssertHistoryPolicy(sctx); err != nil {
 		return err
 	}
-	ctx, cancel := contextWithPublicationTimeout(sctx)
-	defer cancel()
 	remote, err := git.LsRemote(ctx, sctx.WorkDir, resolvePushURL(sctx), "refs/heads/"+pins.Branch)
 	if err != nil || remote != sctx.Run.HeadSHA {
 		return recoveryRefusal("live source branch does not equal the recorded head")
