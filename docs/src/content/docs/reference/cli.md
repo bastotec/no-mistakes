@@ -196,6 +196,8 @@ Recovery uses a disposable detached checkout and the ordinary PR renderer and fi
 
 A matching existing PR is returned unchanged, including when it has since closed or merged. A different head/base, ambiguous discovery, or unreadable identity refuses instead of editing, retargeting, or opening a duplicate. Complete open/closed source-identity discovery is currently implemented for GitHub; other providers refuse rather than fall back to incomplete discovery. Forge CI triggered by PR publication runs normally on the same source head. Recovery does not restart the terminal run's CI monitor, waive checks, or grant merge authority.
 
+The CLI waits for the synchronous recovery response for up to twice the configured [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout) plus five minutes, rather than the default short RPC timeout. Cancelling the CLI interrupts that wait, not necessarily the daemon's publication; a cancelled or timed-out wait does not prove that no PR was created. Repeating this same command for the same run uses the existing-PR checks above.
+
 Both CLI and daemon must support this operation. An older daemon's unknown-method refusal has no fallback and does not trigger an automatic service restart.
 
 ### Explicit existing upstream PR

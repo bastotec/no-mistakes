@@ -104,8 +104,9 @@ func (h *Host) PublicationIdentity() string {
 	return h.host + "/" + h.repo + ":" + h.forkOwner
 }
 
-// repoArgs returns the --repo flag pair when the slug is known, so gh commands
-// resolve the right repository regardless of the process working directory.
+// repoArgs binds gh commands to the resolved hostname as well as the repository.
+// Qualify even github.com: an unqualified slug lets ambient GH_HOST redirect
+// publication despite a matching pinned PublicationIdentity.
 func (h *Host) repoArgs() []string {
 	if h.repo == "" {
 		return nil
