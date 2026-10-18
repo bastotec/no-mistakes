@@ -1295,7 +1295,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
-			outcome, err = refusal, nil
+			if cause := context.Cause(sctx.Ctx); cause != nil {
+				err = errors.Join(err, cause)
+			} else if !errors.Is(err, ErrIsolatedTestHandoff) && !errors.Is(err, ErrDaemonShutdown) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				outcome, err = refusal, nil
+			}
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
@@ -1713,7 +1717,11 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	if work == nil || (work.State == types.SurvivedWorkInPlace && work.Ref == "") {
 		return nil, nil
 	}
-	unclean := survivedWorkUnclean(workDir)
+	g, err := e.survivedWorkGit(runID)
+	if err != nil {
+		return nil, err
+	}
+	unclean := g.survivedWorkUnclean(workDir)
 	// Work whose capture could not be removed from the worktree is split:
 	// part in the ref, part still in the worktree. Neither half can be
 	// continued alone without losing the other, so the round stops for a
@@ -1727,7 +1735,7 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	// again onto the head that already holds it.
 	if work.State == types.SurvivedWorkRestored && !unclean {
 		writeLog("interrupted repair work from " + work.Ref + " was already committed")
-		return nil, ClearSurvivedWork(e.db, runID, workDir)
+		return nil, g.ClearSurvivedWork(e.db, runID, workDir)
 	}
 	if work.State == types.SurvivedWorkRestored && unclean {
 		writeLog("continuing interrupted repair work restored from " + work.Ref)
@@ -1743,7 +1751,7 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	}
 	restored := restoring
 	restored.State = types.SurvivedWorkRestored
-	if err := RestoreSurvivedWork(workDir, work); err != nil {
+	if err := g.RestoreSurvivedWork(workDir, work); err != nil {
 		// The round stops rather than running without the work: a capture
 		// it then took would replace this one, which it never contained.
 		captured := *work
@@ -1775,14 +1783,18 @@ func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writ
 	if !timedOut && !wasRestored {
 		return nil
 	}
-	work, err := CaptureSurvivedWork(workDir, runID, SurvivedWorkRecorder(e.db, runID, workDir))
+	g, err := e.survivedWorkGit(runID)
+	if err != nil {
+		return err
+	}
+	work, err := g.CaptureSurvivedWork(workDir, runID, g.SurvivedWorkRecorder(e.db, runID, workDir))
 	switch {
 	case work != nil && timedOut:
 		writeLog("interrupted repair left uncommitted work: " + work.Next)
 	case work != nil:
 		writeLog("restored repair work was not committed this round: " + work.Next)
 	case wasRestored:
-		return ClearSurvivedWork(e.db, runID, workDir)
+		return g.ClearSurvivedWork(e.db, runID, workDir)
 	}
 	return err
 }
@@ -1795,7 +1807,11 @@ func (e *Executor) refuseSurvivedWorkInWorktree(runID, workDir string) error {
 	if err != nil || work == nil || work.State == types.SurvivedWorkCaptured {
 		return err
 	}
-	if !survivedWorkUnclean(workDir) {
+	g, err := e.survivedWorkGit(runID)
+	if err != nil {
+		return err
+	}
+	if !g.survivedWorkUnclean(workDir) {
 		return nil
 	}
 	return fmt.Errorf("interrupted repair work is still in the worktree %s (%s); only a repair may continue it: %s", workDir, work.State, work.Next)

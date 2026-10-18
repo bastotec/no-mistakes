@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"os"
-
-	"github.com/kunchenguid/no-mistakes/internal/config"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/kunchenguid/no-mistakes/internal/config"
 
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -129,8 +132,16 @@ func TestIsolatedTestRepairReplaysTypedFailures(t *testing.T) {
 }
 
 func TestExecutor_IsolatedTestTimeoutCapturesSurvivedWork(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("callback fixture requires a POSIX shell")
+	}
 	database, p, run, repo := setupTest(t)
+	if err := database.EnableTestIsolation(run.ID); err != nil {
+		t.Fatal(err)
+	}
 	dir := survivedWorkRepo(t)
+	marker := filepath.Join(t.TempDir(), "host-hook-called")
+	gitRun(t, dir, "config", "core.hooksPath", ".githooks")
 	step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
 		if !sctx.Fixing {
 			return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"selected","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
@@ -140,6 +151,12 @@ func TestExecutor_IsolatedTestTimeoutCapturesSurvivedWork(t *testing.T) {
 				return nil, err
 			}
 			writeFile(t, dir, "progress.txt", "survived")
+			if err := os.Mkdir(filepath.Join(dir, ".githooks"), 0o755); err != nil {
+				return nil, err
+			}
+			if err := os.WriteFile(filepath.Join(dir, ".githooks", "post-index-change"), []byte("#!/bin/sh\nprintf called >> '"+marker+"'\n"), 0o755); err != nil {
+				return nil, err
+			}
 			encoded, err := json.Marshal(EncodeIsolatedTestError(fmt.Errorf("isolated fix: %w", ErrTestAgentTimeout)))
 			if err != nil {
 				return nil, err
@@ -163,6 +180,9 @@ func TestExecutor_IsolatedTestTimeoutCapturesSurvivedWork(t *testing.T) {
 	}
 	if got := gitRun(t, dir, "show", work.Ref+":progress.txt"); got != "survived" {
 		t.Fatalf("repair lost: %q", got)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("isolated repair hook executed on host: %v", err)
 	}
 }
 
@@ -235,5 +255,150 @@ func TestIsolatedTestIncompleteHandoffRetainsRepairCustody(t *testing.T) {
 	_, err = sctx.RunIsolatedTestRepair(func(func(int) error) (*StepOutcome, error) { called = true; return &StepOutcome{}, nil })
 	if err == nil || !strings.Contains(err.Error(), "refusing to replay") || called {
 		t.Fatalf("incomplete handoff replayed: called=%v err=%v", called, err)
+	}
+}
+
+func TestExecutor_InterruptedProtectedPathRefusalDoesNotCompleteRepair(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		cause  error
+		cancel bool
+	}{
+		{name: "incomplete handoff", cause: ErrIsolatedTestHandoff},
+		{name: "cancelled", cause: context.Canceled},
+		{name: "deadline", cause: context.DeadlineExceeded},
+		{name: "shutdown", cause: ErrDaemonShutdown},
+		{name: "parent cancellation", cancel: true},
+		{name: "shutdown during handoff", cause: errors.Join(ErrDaemonShutdown, ErrIsolatedTestHandoff)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			ctx, stop := context.WithTimeout(context.Background(), 2*time.Second)
+			defer stop()
+			ctx, cancel := context.WithCancel(ctx)
+			defer cancel()
+			var stepID, roundID string
+			step := &adaptiveCallStep{name: types.StepTest, fn: func(sctx *StepContext) (*StepOutcome, error) {
+				if !sctx.Fixing {
+					return &StepOutcome{NeedsApproval: true, AutoFixable: true, Findings: `{"findings":[{"id":"test-1","severity":"error","description":"repair","action":"auto-fix"}]}`}, nil
+				}
+				stepID, roundID = sctx.StepResultID, sctx.IsolatedRepairRound()
+				return sctx.RunIsolatedTestRepair(func(mark func(int) error) (*StepOutcome, error) {
+					if err := mark(os.Getpid()); err != nil {
+						return nil, err
+					}
+					if tc.cancel {
+						cancel()
+					}
+					return nil, errors.Join(&ProtectedPathError{Path: "package.lock", Rule: "*.lock"}, tc.cause)
+				})
+			}}
+			executor := NewExecutor(database, p, &config.Config{AutoFix: config.AutoFix{Test: 1}}, nil, []Step{step}, nil)
+			if err := executor.Execute(ctx, run, repo, t.TempDir()); err == nil {
+				t.Fatal("interrupted repair passed")
+			}
+			rounds, err := database.GetRoundsByStep(stepID)
+			if err != nil || len(rounds) != 1 {
+				t.Fatalf("interrupted refusal recorded as a completed round: %+v %v", rounds, err)
+			}
+			if errors.Is(tc.cause, ErrIsolatedTestHandoff) {
+				invocationID, err := database.RepairInvocationForRound(stepID, roundID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				invocation, err := database.GetRepairInvocation(invocationID)
+				if err != nil || invocation.State != "fixer_started" {
+					t.Fatalf("incomplete handoff lost started custody: %+v %v", invocation, err)
+				}
+				active, err := database.HasStartedRepairDispatch(run.ID)
+				if err != nil || !active {
+					t.Fatalf("interrupted dispatch no longer held: active=%v err=%v", active, err)
+				}
+			}
+		})
+	}
+}
+
+func TestExecutor_IsolatedSurvivedWorkSuppressesGitCallbacks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("callback fixtures require a POSIX shell")
+	}
+	for _, isolated := range []bool{false, true} {
+		for _, moved := range []bool{false, true} {
+			t.Run(fmt.Sprintf("isolated=%v/moved=%v", isolated, moved), func(t *testing.T) {
+				database, p, run, _ := setupTest(t)
+				if isolated {
+					if err := database.EnableTestIsolation(run.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				dir := survivedWorkRepo(t)
+				leavePartialRepair(t, dir)
+				callbacks := t.TempDir()
+				hookMarker := filepath.Join(callbacks, "hook-called")
+				monitorMarker := filepath.Join(callbacks, "monitor-called")
+				for name, body := range map[string]string{
+					"post-index-change":     "#!/bin/sh\nprintf called >> '" + hookMarker + "'\n",
+					"reference-transaction": "#!/bin/sh\nprintf called >> '" + hookMarker + "'\n",
+					"monitor":               "#!/bin/sh\nprintf called >> '" + monitorMarker + "'\nprintf 'token\\000/\\000'\n",
+				} {
+					if err := os.WriteFile(filepath.Join(callbacks, name), []byte(body), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				gitRun(t, dir, "config", "core.hooksPath", callbacks)
+				gitRun(t, dir, "config", "core.fsmonitor", filepath.Join(callbacks, "monitor"))
+				safeGit := func(args ...string) string {
+					return gitRun(t, dir, append([]string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false"}, args...)...)
+				}
+				assertCallbacks := func() {
+					t.Helper()
+					for _, marker := range []string{hookMarker, monitorMarker} {
+						_, err := os.Stat(marker)
+						if isolated && !os.IsNotExist(err) {
+							t.Fatalf("isolated custody ran callback %s: %v", marker, err)
+						}
+						if !isolated && err != nil {
+							t.Fatalf("ordinary custody callback did not run %s: %v", marker, err)
+						}
+					}
+				}
+				executor := NewExecutor(database, p, nil, nil, nil, nil)
+				if err := executor.settleSurvivedWork(run.ID, dir, true, func(string) {}); err != nil {
+					t.Fatal(err)
+				}
+				work, err := database.GetRunSurvivedWork(run.ID)
+				if err != nil || work == nil || work.State != types.SurvivedWorkCaptured {
+					t.Fatalf("custody capture failed: %+v %v", work, err)
+				}
+				if got := safeGit("status", "--porcelain"); got != "" {
+					t.Fatalf("capture left work exposed: %s", got)
+				}
+				assertCallbacks()
+				if moved {
+					writeFile(t, dir, "unrelated.txt", "moved\n")
+					safeGit("add", "unrelated.txt")
+					safeGit("commit", "-m", "head moved")
+				}
+				for _, marker := range []string{hookMarker, monitorMarker} {
+					if err := os.Remove(marker); err != nil && !os.IsNotExist(err) {
+						t.Fatal(err)
+					}
+				}
+				if _, err := executor.restoreSurvivedWork(run.ID, dir, func(string) {}); err != nil {
+					t.Fatal(err)
+				}
+				assertCallbacks()
+				if got := readFile(t, dir, "tracked.txt"); got != "working version\n" {
+					t.Fatalf("unstaged work lost: %q", got)
+				}
+				if got := safeGit("show", ":tracked.txt"); got != "staged version" {
+					t.Fatalf("index split lost: %q", got)
+				}
+				if got := readFile(t, dir, "new.txt"); got != "untracked\n" {
+					t.Fatalf("untracked work lost: %q", got)
+				}
+			})
+		}
 	}
 }
