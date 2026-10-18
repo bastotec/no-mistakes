@@ -165,15 +165,20 @@ daemon database and sockets are not mounted. Config provenance is excluded befor
 snapshot insertion and from prior-branch decision input, not deleted after export.
 
 Shared gate Git metadata is never mounted. Each worker receives an independent
-object/ref/index store with a generated configuration and only the resolved Git
-author/committer identity. It transfers the run head's reachable history, the first
-usable integration ref and its reachable history (or the recorded base when no
-integration ref is usable), and objects referenced by the incoming index. Unrelated
-refs and their otherwise unreachable objects, including other runs' recovery refs,
-are not copied. The worktree's Git pointer is overmounted read-only; no shared
-configuration or hooks are imported. A head update sends an object pack, not a
-metadata path: the parent checks its objects and ancestry, then advances only the
-detached run HEAD and index before acknowledging it.
+object/ref/index store with a generated configuration and resolved Git
+author/committer identity. To preserve checkout and staging normalization, it also
+copies the effective scalar checkout settings selected by `PrepareGit`
+(`internal/testisolation/git.go`) and the external/default and `info/attributes`
+bytes into private files; repository `.gitattributes` keeps its normal precedence.
+Executable Git configuration is not copied. It transfers the run head's reachable
+history, the first usable integration ref and its reachable history (or the
+recorded base when no integration ref is usable), and objects referenced by the
+incoming index. Unrelated refs and their otherwise unreachable objects, including
+other runs' recovery refs, are not copied. The worktree's Git pointer is overmounted
+read-only; shared configuration files and hooks are not mounted. A head update
+sends an object pack, not a metadata path: the parent checks its objects and
+ancestry, then advances only the detached run HEAD and index before acknowledging
+it.
 
 Opted-in Test admits only a single repository: submodules/gitlinks and nested
 repositories (including `.git` files and bare layouts) are unsupported. Admission
@@ -184,6 +189,15 @@ work is retained in place with durable custody; it is not reset, cleaned, delete
 or accepted as a completed handoff. Inspection is limited to 100,000 entries and
 128 directory levels; exceeding either bound refuses admission. Ordinary runs
 retain their existing repository and custody behavior.
+
+Host-side Git handoffs disable hooks and filesystem-monitor callbacks. For
+opted-in runs, interrupted-work capture/restore, cleanup inspection and terminal
+recovery anchoring also suppress clean, smudge, process and textconv callbacks:
+Test-writable scripts must not execute on the host during custody operations.
+These overrides are invocation-local; ordinary runs keep their existing callback
+behavior. `internal/pipeline/survived_work.go` owns the custody policy, with
+regressions in `internal/pipeline/isolated_test_repair_test.go` and running-daemon
+boundary journeys in `internal/e2e/test_isolation_boundaries_test.go`.
 
 Worker errors retain Test timeout and protected-path classifications, including
 terminal repair replay, so interrupted edits keep their existing custody and
