@@ -20,6 +20,46 @@ type PreviewState struct {
 	AutoMerge json.RawMessage `json:"autoMergeRequest"`
 }
 
+func (h *Host) OpenPRBodies(ctx context.Context, branch string) ([]string, error) {
+	owner := h.forkOwner
+	if owner == "" {
+		owner = repoOwner(h.repo)
+	}
+	if owner == "" {
+		return nil, fmt.Errorf("cannot list preview candidates without repository owner")
+	}
+	args := append([]string{"api", "--method", "GET", "repos/" + h.repo + "/pulls",
+		"-f", "state=open", "-f", "head=" + owner + ":" + branch,
+		"-f", "per_page=100", "--paginate", "--slurp"}, h.apiHostArgs()...)
+	out, err := h.cmd(ctx, "gh", args...).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list preview candidates: %w", err)
+	}
+	var pages [][]struct {
+		Body json.RawMessage `json:"body"`
+	}
+	if err := json.Unmarshal(out, &pages); err != nil {
+		return nil, err
+	}
+	if len(pages) == 0 {
+		return nil, fmt.Errorf("missing preview candidate pages")
+	}
+	var bodies []string
+	for _, page := range pages {
+		if page == nil {
+			return nil, fmt.Errorf("missing preview candidate list")
+		}
+		for _, pr := range page {
+			var body string
+			if err := json.Unmarshal(pr.Body, &body); err != nil {
+				return nil, fmt.Errorf("read preview candidate body: %w", err)
+			}
+			bodies = append(bodies, body)
+		}
+	}
+	return bodies, nil
+}
+
 func (h *Host) TestPreviewState(ctx context.Context, pr *scm.PR) (PreviewState, error) {
 	var state PreviewState
 	selector, err := prSelector(pr)

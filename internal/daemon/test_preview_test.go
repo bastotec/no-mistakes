@@ -3,7 +3,6 @@ package daemon
 import (
 	"context"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -34,16 +33,7 @@ func (s *previewParkStep) Execute(ctx *pipeline.StepContext) (*pipeline.StepOutc
 // executor custody and publication together. Only the forge is a tiny fake CLI;
 // no ambient database, service, daemon socket or network is used.
 func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
-	bin := t.TempDir()
-	gh := filepath.Join(bin, "gh")
-	if os.PathSeparator == '\\' {
-		gh += ".exe"
-	}
-	build := exec.Command("go", "build", "-o", gh, "../pipeline/fakecli")
-	if out, err := build.CombinedOutput(); err != nil {
-		t.Fatalf("build fake forge: %v %s", err, out)
-	}
-	body := filepath.Join(t.TempDir(), "body")
+	body := installTestPreviewForge(t)
 	parked := &previewParkStep{}
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&previewReviewStep{}, parked} })
 	repo, head := setupTestGitRepo(t, p, database, "test-preview-rpc")
@@ -52,7 +42,7 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 	gitCmd(t, "", "clone", "--bare", gate, remote)
 	gitCmd(t, gate, "remote", "set-url", "origin", remote)
 	gitCmd(t, gate, "update-ref", "refs/heads/feature", head)
-	parked.env = []string{"PATH=" + bin + string(os.PathListSeparator) + os.Getenv("PATH"), "FAKE_CLI_MODE=test-preview-gh", "FAKE_CLI_PR_BODY_FILE=" + body, "FAKE_CLI_PR_HEAD_SHA=" + head}
+	parked.env = []string{"PATH=" + os.Getenv("PATH"), "FAKE_CLI_MODE=test-preview-gh", "FAKE_CLI_PR_BODY_FILE=" + body, "FAKE_CLI_PR_HEAD_SHA=" + head}
 	client, err := ipc.Dial(p.Socket())
 	if err != nil {
 		t.Fatal(err)
@@ -107,12 +97,21 @@ func TestPublishTestPreviewRPC_IsolatedDaemonKeepsTestParked(t *testing.T) {
 	if err := client.Call(ipc.MethodPublishTestPreview, params, nil); err == nil {
 		t.Fatal("accepted stale head")
 	}
+	// A push must not cancel the parked executor and leave its draft orphaned.
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: gate, Ref: "refs/heads/feature", Old: head, New: head}, nil); err == nil || !strings.Contains(err.Error(), "managed Test preview belongs only to that run") {
+		t.Fatalf("active preview replacement error=%v", err)
+	}
+	stillParked, err := database.GetRun(started.RunID)
+	if err != nil || stillParked.Status != types.RunRunning || stillParked.AwaitingAgentSince == nil {
+		t.Fatalf("replacement cancelled parked owner: %+v, %v", stillParked, err)
+	}
 	if err := client.Call(ipc.MethodCancelRun, &ipc.CancelRunParams{RunID: started.RunID}, nil); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
+	installTestPreviewForge(t)
 	p, database := startTestDaemonWithSteps(t, func() []pipeline.Step {
 		return []pipeline.Step{&mockPassStep{name: types.StepReview}}
 	})
@@ -139,6 +138,10 @@ func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
 	if err := client.Call(ipc.MethodStartFreshRun, &request, &replay); err != nil || replay.Receipt.RunID != original.ID || replay.Receipt.Disposition != "reused" {
 		t.Fatalf("same-run replay=%+v error=%v", replay, err)
 	}
+	var pushedReplay ipc.PushReceivedResult
+	if err := client.Call(ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: head, New: head, Intent: request.Intent, LaunchNonce: request.LaunchNonce, ValidationGeneration: request.ValidationGeneration}, &pushedReplay); err != nil || pushedReplay.RunID != original.ID {
+		t.Fatalf("same-run push replay=%+v error=%v", pushedReplay, err)
+	}
 	before, err := database.GetRunsByRepo(repo.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -150,6 +153,9 @@ func TestReplacementLaunchRefusesManagedTestPreview(t *testing.T) {
 	}{
 		{"rerun", ipc.MethodRerun, &ipc.RerunParams{RepoID: repo.ID, Branch: "main", PreviousRunID: original.ID}},
 		{"proof-mode", ipc.MethodStartFreshRun, &request},
+		{"push", ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: head, New: head}},
+		{"proof-push-with-base", ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: head, New: head, Intent: request.Intent, LaunchNonce: "proof-push-preview", ValidationGeneration: "generation"}},
+		{"proof-push-new-branch", ipc.MethodPushReceived, &ipc.PushReceivedParams{Gate: p.RepoDir(repo.ID), Ref: "refs/heads/main", Old: strings.Repeat("0", 40), New: head, Intent: request.Intent, LaunchNonce: "proof-push-zero-base-preview", ValidationGeneration: "generation"}},
 	} {
 		t.Run(launch.name, func(t *testing.T) {
 			err := client.Call(launch.method, launch.params, nil)

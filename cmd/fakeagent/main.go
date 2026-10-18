@@ -401,6 +401,11 @@ func ghExistingPRAPI(args []string, cfg existingPRStubConfig) int {
 			`"checkSuite":{"app":{"slug":"github-actions"}}}` +
 			`],"pageInfo":{"hasNextPage":false,"endCursor":""}}}}}}}`)
 		return 0
+	case strings.Contains(joined, "/pulls ") && strings.Contains(joined, "--paginate --slurp"):
+		// The source fork has no PRs; the modeled PR lives upstream. As with
+		// workflow discovery, a paginated read must return one empty page.
+		fmt.Println(`[[]]`)
+		return 0
 	case strings.Contains(joined, "/actions/runs"):
 		// This read is `--paginate --slurp`, so its result is an ARRAY OF
 		// PAGES. A bare `[]` is zero pages, which the reader rejects outright

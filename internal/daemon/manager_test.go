@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
@@ -761,7 +762,64 @@ func TestPushReceivedConcurrentDifferentBranchRunsAvoidSharedConfigLock(t *testi
 	}
 }
 
+func TestReplacementWaitsForTerminalRunCleanup(t *testing.T) {
+	database, err := db.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []types.RunStatus{types.RunCompleted, types.RunFailed, types.RunCancelled} {
+		t.Run(string(status), func(t *testing.T) {
+			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, status); err != nil {
+				t.Fatal(err)
+			}
+			manager := NewRunManager(database, nil, nil)
+			ctx, cancel := context.WithCancelCause(context.Background())
+			defer cancel(nil)
+			manager.cancels[run.ID] = cancel
+
+			synctest.Test(t, func(t *testing.T) {
+				// Terminal DB status precedes the run goroutine's worktree
+				// cleanup. Hold that cleanup open without a wall-clock sleep.
+				done := make(chan struct{})
+				manager.dones[run.ID] = done
+				returned := make(chan struct{})
+				go func() {
+					manager.cancelActiveRuns(repo.ID, "feature", "rerun")
+					close(returned)
+				}()
+				synctest.Wait()
+				select {
+				case <-returned:
+					close(done)
+					t.Fatal("replacement proceeded before terminal run cleanup finished")
+				default:
+				}
+				close(done)
+				synctest.Wait()
+				select {
+				case <-returned:
+				default:
+					t.Fatal("replacement did not proceed after cleanup finished")
+				}
+				if ctx.Err() != nil {
+					t.Fatal("terminal run was cancelled instead of only awaited")
+				}
+			})
+		})
+	}
+}
+
 func TestRerunSkipStepsConfiguresExecutor(t *testing.T) {
+	installTestPreviewForge(t) // The completed Test step requires a preview-ownership lookup on rerun.
 	review := &mockPassStep{name: types.StepReview}
 	testStep := &mockPassStep{name: types.StepTest}
 	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step {

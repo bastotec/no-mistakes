@@ -926,7 +926,7 @@ func (m *RunManager) startFreshLaunch(ctx context.Context, repo *db.Repo, branch
 			baseSHA = headSHA
 			if len(runs) > 0 {
 				baseSHA = runs[0].BaseSHA
-				inheritedPRURL, err = m.inheritablePRURL(runs[0])
+				inheritedPRURL, err = m.inheritablePRURL(ctx, runs[0])
 				if err != nil {
 					return "", err
 				}
@@ -1132,7 +1132,7 @@ func (m *RunManager) HandleRerun(ctx context.Context, repoID, branch, previousRu
 	if selectedRun.PreserveHistoryBaseSHA != nil {
 		return "", fmt.Errorf("preserve-history run cannot be implicitly repinned by rerun; recover custody if needed, then use axi run --preserve-history <exact-base-sha> --base-branch <branch> for a new explicit integration")
 	}
-	inheritedPRURL, err := m.inheritablePRURL(selectedRun)
+	inheritedPRURL, err := m.inheritablePRURL(ctx, selectedRun)
 	if err != nil {
 		return "", err
 	}
@@ -1172,7 +1172,44 @@ func (m *RunManager) carrySurvivedWork(ctx context.Context, toRunID, worktree st
 	return m.db.CopyRunSurvivedWork(fromRunID, toRunID, worktree)
 }
 
-func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
+func (m *RunManager) refuseManagedTestPreviewReplacement(ctx context.Context, repoID, branch string) error {
+	// A first launch has no possible preview owner. Leave configuration
+	// validation to run setup so its failure is recorded on the failed run.
+	runs, err := m.db.BranchTestPreviewRuns(repoID, branch)
+	if err != nil || len(runs) == 0 {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	repo, err := m.db.GetRepo(repoID)
+	if err != nil {
+		return err
+	}
+	if repo == nil {
+		return fmt.Errorf("unknown preview repository")
+	}
+	cfg, err := config.LoadGlobal(m.paths.ConfigFile())
+	if err != nil {
+		return err
+	}
+	forge, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
+	if err != nil {
+		return err
+	}
+	owner, err := steps.TestPreviewReplacementOwner(&pipeline.StepContext{
+		Ctx: ctx, DB: m.db, Repo: repo, Run: &db.Run{Branch: branch},
+		WorkDir: m.paths.RepoDir(repoID), ForgeContext: forge,
+	}, runs)
+	if err != nil {
+		return fmt.Errorf("read branch preview ownership: %w", err)
+	}
+	if owner != "" {
+		return fmt.Errorf("cannot replace run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", owner)
+	}
+	return nil
+}
+
+func (m *RunManager) inheritablePRURL(ctx context.Context, run *db.Run) (string, error) {
 	// An explicit cross-repository URL must never escape into a legacy host
 	// selected from origin. Rerun carries its complete constraint separately;
 	// independent launches without --existing-pr retain ordinary discovery.
@@ -1182,6 +1219,16 @@ func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
 	if run.PRURL == nil {
 		return "", nil
 	}
+	preview, err := m.db.TestPreviewPR(run.ID)
+	if err != nil {
+		return "", fmt.Errorf("read run preview ownership: %w", err)
+	}
+	if preview != "" {
+		if err := m.refuseManagedTestPreviewReplacement(ctx, run.RepoID, run.Branch); err != nil {
+			return "", err
+		}
+		return "", nil
+	}
 	state := ""
 	if run.PRState != nil {
 		state = strings.ToLower(strings.TrimSpace(*run.PRState))
@@ -1189,17 +1236,7 @@ func (m *RunManager) inheritablePRURL(run *db.Run) (string, error) {
 	if state == "merged" || state == "closed" {
 		return "", nil
 	}
-	url := strings.TrimSpace(*run.PRURL)
-	if url != "" {
-		preview, err := m.db.TestPreviewPR(run.ID)
-		if err != nil {
-			return "", fmt.Errorf("read run preview ownership: %w", err)
-		}
-		if preview != "" {
-			return "", fmt.Errorf("cannot replace run %s: its managed Test preview belongs only to that run and cannot be inherited by a replacement run", run.ID)
-		}
-	}
-	return url, nil
+	return strings.TrimSpace(*run.PRURL), nil
 }
 
 func resolveRerunHead(ctx context.Context, gateDir, branch string, latest *db.Run, callerHeadSHA string) (string, error) {
@@ -1438,6 +1475,16 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		return "", fmt.Errorf("preserve-history: run %[1]s pins branch %[2]s to its integration, recorded at %[3]s, so no superseding run was started. "+
 			"If a push triggered this launch, it has already moved the gate branch and run %[1]s cannot publish until the gate branch is back at %[3]s: "+
 			"restore it with `git push --force %[4]s %[3]s:refs/heads/%[2]s`, or abort run %[1]s", active.ID, branch, recorded, gate.RemoteName)
+	}
+
+	// Every replacement reaches this boundary under the branch lock, including
+	// pushes with a previous head and launches that inherit no PR URL. Refuse
+	// before cancelling the owner or inserting a run: branch discovery could
+	// otherwise adopt its draft without the run-owned preview binding. Receipt
+	// replay/reattachment returns above this creation path and stays available.
+	if err := m.refuseManagedTestPreviewReplacement(ctx, repo.ID, branch); err != nil {
+		trackStartFailure("managed_test_preview")
+		return "", err
 	}
 
 	// A branch keeps the pull request an explicit association proved, so every
@@ -2184,7 +2231,9 @@ func (m *RunManager) HandleCancel(runID string) error {
 
 // cancelActiveRuns cancels any in-progress runs for the given repo+branch
 // and waits for their goroutines to finish before returning, preventing
-// concurrent pushes to upstream.
+// concurrent pushes to upstream. Terminal runs can still be cleaning up their
+// worktrees; await them too so git worktree add cannot race the last removal's
+// deletion of the shared worktrees administration directory.
 // The cancellation cause is propagated to the executor via context.Cause,
 // which uses it as the run's error message in the DB.
 func (m *RunManager) cancelActiveRuns(repoID, branch, trigger string) {
@@ -2199,15 +2248,17 @@ func (m *RunManager) cancelActiveRuns(repoID, branch, trigger string) {
 		if run.Branch != branch {
 			continue
 		}
-		if run.Status != types.RunPending && run.Status != types.RunRunning {
-			continue
-		}
-
 		m.mu.Lock()
 		cancel, ok := m.cancels[run.ID]
 		done := m.dones[run.ID]
 		quieting := m.quieting[run.ID]
 		m.mu.Unlock()
+		if run.Status != types.RunPending && run.Status != types.RunRunning {
+			if done != nil {
+				toWait = append(toWait, done)
+			}
+			continue
+		}
 		if !ok {
 			continue
 		}

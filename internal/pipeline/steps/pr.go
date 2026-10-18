@@ -189,20 +189,24 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			// the pull request's author, not to this repository's template.
 			if explicit == nil {
 				if previewOnly {
-					draft, err := s.buildPRContentWithPolicy(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider, bodyLimit)
+					var draft prContent
+					var err error
+					if template != "" {
+						draft, err = s.draftTemplateNarrative(sctx, branch, publicationBaseBranch, baseSHA, policySHA, template)
+					} else {
+						draft, err = s.draftPRNarrative(sctx, branch, publicationBaseBranch, baseSHA, policySHA, bodyLimit)
+					}
 					if err != nil {
 						return nil, err
 					}
+					draft = redactPRContent(draft)
 					title = draft.Title
 					headingTranslations = draft.HeadingTranslations
-					if hasPRAppendixMarkers(draft.Body) {
-						drafted, err := parsePROwnedBody(draft.Body)
-						if err != nil {
-							return nil, err
-						}
-						emptyNarrative = drafted.before + drafted.after
-					} else {
-						emptyNarrative = stripGeneratedSections(draft.Body)
+					emptyNarrative = neutralizeAttestationMarkers(draft.Body)
+					if template != "" {
+						// Preserve the separator the previous template composition
+						// left before its stripped appendix, byte for byte.
+						emptyNarrative += "\n\n"
 					}
 				} else if live.Body == "" && template != "" {
 					draft, err := s.draftTemplateNarrative(sctx, branch, publicationBaseBranch, baseSHA, policySHA, template)
@@ -569,13 +573,28 @@ func redactPRContent(content prContent) prContent {
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
+	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
+	content, err := s.draftPRNarrative(sctx, branch, baseBranch, baseSHA, policySHA, bodyLimit)
+	if err != nil {
+		return prContent{}, err
+	}
+	if bodyLimit > 0 {
+		content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
+	} else {
+		content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
+	}
+	return content, nil
+}
+
+// draftPRNarrative performs no evidence rendering or uploads. Owned updates
+// compose their appendix once, without generating sections they will discard.
+func (s *PRStep) draftPRNarrative(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, bodyLimit int) (prContent, error) {
 	ctx := sctx.Ctx
 	diffStat, _ := git.Run(ctx, sctx.WorkDir, "diff", "--stat", baseSHA+".."+sctx.Run.HeadSHA)
 	finalDiff, err := git.Run(ctx, sctx.WorkDir, "diff", "--name-status", baseSHA+".."+sctx.Run.HeadSHA)
 	if err != nil {
 		return prContent{}, fmt.Errorf("read final branch diff: %w", err)
 	}
-	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
 
 	titleRules := prTitlePromptRules(sctx)
 	scopeRules := prTitleScopeRules(sctx)
@@ -638,11 +657,6 @@ Final diff paths and statuses:
 	}
 	if content.Title != originalTitle {
 		slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
-	}
-	if bodyLimit > 0 {
-		content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
-	} else {
-		content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
 	}
 	return content, nil
 }

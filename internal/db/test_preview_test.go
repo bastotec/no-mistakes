@@ -45,6 +45,12 @@ func TestTestPreviewBindingSurvivesReopenAndRefusesReplacement(t *testing.T) {
 	if got, err := d.TestPreviewPR(run.ID); err != nil || got != url {
 		t.Fatalf("binding=%q,%v", got, err)
 	}
+	if runs, err := d.BranchTestPreviewRuns(repo.ID, "feature"); err != nil || len(runs) != 1 || runs[0].RunID != run.ID || runs[0].PRURL != url {
+		t.Fatalf("branch preview after reopen=%+v,%v", runs, err)
+	}
+	if runs, err := d.BranchTestPreviewRuns(repo.ID, "other"); err != nil || len(runs) != 0 {
+		t.Fatalf("unrelated branch previews=%+v,%v", runs, err)
+	}
 	if needed, err := d.TestPreviewNeedsValidation(run.ID); err != nil || needed {
 		t.Fatalf("persisted validation=%v, %v", needed, err)
 	}
@@ -59,5 +65,19 @@ func TestTestPreviewBindingSurvivesReopenAndRefusesReplacement(t *testing.T) {
 	}
 	if needed, err := d.TestPreviewNeedsValidation(run.ID); err != nil || !needed {
 		t.Fatalf("republished validation=%v, %v", needed, err)
+	}
+	for _, state := range []string{"closed", " MERGED "} {
+		if err := d.UpdateRunPRState(run.ID, state); err != nil {
+			t.Fatal(err)
+		}
+		if runs, err := d.BranchTestPreviewRuns(repo.ID, "feature"); err != nil || len(runs) != 1 || runs[0].PRURL != url {
+			t.Fatalf("cached %s lifecycle hid preview: %+v,%v", state, runs, err)
+		}
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.BranchTestPreviewRuns(repo.ID, "feature"); err == nil {
+		t.Fatal("unreadable preview ownership did not fail closed")
 	}
 }

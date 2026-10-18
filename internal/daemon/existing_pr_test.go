@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -76,12 +77,12 @@ func TestExistingPRLaunchPinsTargetAndFailsClosed(t *testing.T) {
 		t.Fatalf("step calls=%d", calls.Load())
 	}
 	manager := &RunManager{db: d}
-	if got, err := manager.inheritablePRURL(run); err != nil || got != "" {
+	if got, err := manager.inheritablePRURL(context.Background(), run); err != nil || got != "" {
 		t.Fatalf("explicit URL leaked into legacy host discovery: %s, %v", got, err)
 	}
 	legacy := *run
 	legacy.ExistingPRURL = nil
-	if got, err := manager.inheritablePRURL(&legacy); err != nil || got != target {
+	if got, err := manager.inheritablePRURL(context.Background(), &legacy); err != nil || got != target {
 		t.Fatalf("legacy inheritance changed: %s, %v", got, err)
 	}
 	// The launch binds the gate branch, so a run that never reached Push - the

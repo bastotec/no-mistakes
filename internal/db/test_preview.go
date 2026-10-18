@@ -35,6 +35,31 @@ func (d *DB) TestPreviewPR(runID string) (string, error) {
 	return url, err
 }
 
+type TestPreviewRun struct {
+	RunID string
+	PRURL string
+}
+
+func (d *DB) BranchTestPreviewRuns(repoID, branch string) ([]TestPreviewRun, error) {
+	rows, err := d.sql.Query(`SELECT r.id, coalesce(p.pr_url, '') FROM runs r LEFT JOIN run_test_previews p ON p.run_id = r.id
+		WHERE r.repo_id = ? AND r.branch = ? AND (p.run_id IS NOT NULL OR EXISTS (
+			SELECT 1 FROM step_results s WHERE s.run_id = r.id AND s.step_name = 'test'))
+		ORDER BY r.created_at DESC, r.id DESC`, repoID, branch)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var runs []TestPreviewRun
+	for rows.Next() {
+		var run TestPreviewRun
+		if err := rows.Scan(&run.RunID, &run.PRURL); err != nil {
+			return nil, err
+		}
+		runs = append(runs, run)
+	}
+	return runs, rows.Err()
+}
+
 func (d *DB) RequireTestPreviewValidation(runID string) error {
 	_, err := d.sql.Exec(`UPDATE run_test_previews SET validated_head = NULL WHERE run_id = ?`, runID)
 	return err
