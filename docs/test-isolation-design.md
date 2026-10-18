@@ -1,7 +1,9 @@
-# Run-scoped Test isolation: pre-implementation invariants
+# Run-scoped Test isolation
 
-Status: proposed contract, recorded before implementation. This document does
-not describe an available feature or authorize activation of a shared daemon.
+Status: implemented as an explicit per-run opt-in. The invariants below were
+recorded before implementation; the selected implementation and activation
+limits describe the current contract. This does not authorize shared daemon
+activation or additional provider or application runs.
 
 ## Boundary
 
@@ -20,10 +22,9 @@ explicit operations, not an unrestricted subprocess or network execution service
 ## Environment allow/deny sets
 
 Build the initial child environment from an empty map, never from `os.Environ`
-with a denylist. The initial proposed allowlist contains only fixed `PATH`,
-`LANG`, `HOME`, `TMPDIR`, `PWD`, the gate-role marker, Git noninteractive settings,
-and generated connection settings for this invocation's disposable database and
-model channel. HOME and temporary storage are fresh, private directories.
+with a denylist. The [environment reference](src/content/docs/reference/environment.md#opt-in-test-isolation)
+owns the worker's allowlist and generated connection settings. HOME and temporary
+storage are fresh, private directories.
 
 Do not inherit cloud, forge, provider, proxy, SSH, database, package-registry,
 agent-session, shell-startup, Git-config, or application credentials. In particular,
@@ -142,8 +143,11 @@ The model channel is one preconnected Unix stream inherited by the worker,
 then closed-on-exec before launching tools. There is no mounted host socket.
 Deck reaches the namespace-local HTTP front end at `http://127.0.0.1:17682/v1`.
 Only `POST /v1/responses` for the daemon-selected model is forwarded to the
-fixed configured upstream. Incoming credentials/cookies and redirects are
-refused or discarded; the host-side bridge supplies the key. A key file under
+fixed configured upstream. The bridge requires exactly one lowercase `model`
+field matching that selection, rejects duplicate or case-variant model keys,
+and canonicalizes the request with the model pinned before forwarding it with
+the host credential. Incoming credentials/cookies and redirects are refused or
+discarded; the host-side bridge supplies the key. A key file under
 any sandbox mount is refused. This transport preserves the native Deck
 Responses API, not an invented Chat Completions compatibility layer.
 
@@ -151,8 +155,9 @@ Responses API, not an invented Chat Completions compatibility layer.
 
 A distinct launch RPC imports the verified local head without pushing a gate
 hook; an older daemon refuses it before an ordinary run can start. The immutable
-`run_test_isolation` row enables only that run. A new run or rerun needs its own
-explicit opt-in; restarting the daemon retains an existing run's pin.
+`run_test_isolation` row enables only that run; restarting the daemon retains
+that pin. See [run-scoped Test isolation](src/content/docs/reference/cli.md#run-scoped-test-isolation)
+for launch, reattachment and new-run opt-in semantics.
 
 The worker receives a disposable snapshot of only its run's advisory database
 records, with remote credentials and raw config provenance removed. The live
@@ -161,10 +166,14 @@ snapshot insertion and from prior-branch decision input, not deleted after expor
 
 Shared gate Git metadata is never mounted. Each worker receives an independent
 object/ref/index store with a generated configuration and only the resolved Git
-author/committer identity. The worktree's Git pointer is overmounted read-only;
-worker configuration, hooks and unrelated refs are disposable. A head update sends
-an object pack, not a metadata path: the parent checks its objects and ancestry,
-then advances only the detached run HEAD and index before acknowledging it.
+author/committer identity. It transfers the run head's reachable history, the first
+usable integration ref and its reachable history (or the recorded base when no
+integration ref is usable), and objects referenced by the incoming index. Unrelated
+refs and their otherwise unreachable objects, including other runs' recovery refs,
+are not copied. The worktree's Git pointer is overmounted read-only; no shared
+configuration or hooks are imported. A head update sends an object pack, not a
+metadata path: the parent checks its objects and ancestry, then advances only the
+detached run HEAD and index before acknowledging it.
 
 Worker errors retain Test timeout and protected-path classifications, including
 terminal repair replay, so interrupted edits keep their existing custody and
@@ -178,8 +187,10 @@ Namespace teardown kills detached descendants and discards PostgreSQL storage.
 The invocation-owned bridge is closed, and successful/error cleanup removes its
 scratch snapshot and policy files after the final index handoff. Staged-only
 repair bytes are imported as Git objects and index entries without checking out
-files. An unexpected worker/daemon death retains private Git state for
-reconciliation instead of deleting it or reusing it as another invocation.
+files, and copied into the next authorized worker even when no commit reaches
+them, including after a protected-path refusal. An unexpected worker/daemon death
+retains private Git state for reconciliation instead of deleting it or reusing
+it as another invocation.
 A subsequent authorized invocation needs fresh storage, a new cluster and a new
 channel; it never imports prior disposable database contents. This does not clean
 intentional worktree edits or roll back application commits.

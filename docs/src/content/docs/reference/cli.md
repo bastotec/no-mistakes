@@ -131,6 +131,7 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
 | `--preserve-history` | `string` | (none) | Full integration-base commit SHA; requires `--base-branch`, preserves the submitted head and forbids automatic integration and forced publication |
 | `--existing-pr` | `string` | (none) | Explicit existing github.com PR URL; validates repository, source ref and head; remembered for the branch; never falls back to another PR |
+| `--isolate-test` | `bool` | `false` | Explicit [run-scoped Test isolation](#run-scoped-test-isolation); refuses unsupported setups |
 | `--retire-existing-pr` | `bool` | `false` | Drop the branch's remembered PR association and start no run |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
@@ -737,7 +738,8 @@ This explicitly opts **one new run's whole Test descendant tree** into
 Linux/bubblewrap isolation with a fresh native PostgreSQL database and a
 constrained Deck model channel. It does not sandbox other steps, enable existing
 runs, configure a shared daemon, or activate by repository config. A new ordinary
-run or rerun remains ordinary unless explicitly launched with this flag.
+run or `rerun` never inherits the opt-in; use `axi run --isolate-test` to request
+another isolated run.
 
 The launch imports the verified local commit through a distinct RPC, without a
 gate push. An older daemon refuses; there is no fallback to unconstrained Test.
@@ -752,7 +754,7 @@ An interrupted started repair retains the existing repair-reconciliation gate;
 it is not replayed as an ordinary agent invocation.
 
 See [environment prerequisites](/no-mistakes/reference/environment/#opt-in-test-isolation)
-and the implementation's pre-code invariants and bounded activation proposal in
+and the implementation's invariants and bounded activation proposal in
 [`docs/test-isolation-design.md`](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md).
 Shared activation requires separate approval; this command is not an instruction
 to restart or update any running shared daemon.

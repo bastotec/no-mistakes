@@ -329,10 +329,16 @@ running daemon merely to try this capability.
 All are required; an unsupported setup refuses rather than executing ordinary
 Test. The worker requires Linux amd64/arm64, bubblewrap, Landlock network ABI 4+
 and a `CGO_ENABLED=0` no-mistakes build. The release builds already disable cgo.
+The daemon must run as an unprivileged UID for PostgreSQL. Only the Deck adapter
+is supported; the worker uses the selected Deck binary but not its host override
+arguments or hooks.
 The child environment is constructed from an empty allowlist, not this startup
-environment. It receives only fixed runtime/home/locale/Git settings, the gate
-marker, generated disposable database connection settings, and the namespace-local
-model URL. PostgreSQL provisioning alone also receives its fixed library path.
+environment. It receives only fixed runtime/home/locale/Git settings, resolved
+Git author/committer names and emails, the gate marker, generated disposable
+database connection settings (`DATABASE_URL` and `NM_TEST_DATABASE_URL` use the
+[fixed DSN](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md#original-client-compatible-database)),
+and the namespace-local model URL (`PROXAI_BASE_URL`). PostgreSQL provisioning
+alone also receives its fixed library path.
 
 The complete boundary, fixed DSN and model channel, recovery behavior, regression
 fixtures, and bounded activation/rollback proposal are recorded in
