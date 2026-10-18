@@ -182,6 +182,22 @@ This is per-run, not repository configuration. It cannot be combined with `--ski
 
 Both the CLI **and running daemon** must support this flag. Constrained launch uses a distinct RPC and imports the exact local commit without a gate push, so an older daemon or receive hook cannot silently start an unconstrained run. There is no legacy fallback or automatic daemon restart. These are pipeline-operation guards, not a sandbox against arbitrary trusted commands or agent tools; agents receive no extra history guidance, and ancestry is rechecked before publication. The mode does not create an attestation for prior work, skip validation, or merge a PR.
 
+### Terminal publication recovery
+
+```sh
+no-mistakes axi recover-publication --run <run-id>
+```
+
+This is a publication-only operation for a run that finished validation and then failed at the final PR-content guard because its risk prose contradicted recorded repaired findings. It is not `rerun`, a new validation run, or permission to merge. Use it from a checkout of the run's registered repository; there is no implicit run selection and no head, branch, base, or waiver flag.
+
+Only runs created with prospective publication-intent pinning are eligible. Historical runs are refused even when their commits and logs survive. Before ordinary PR drafting, the daemon pins the exact head, source branch, destination repository/base, format-policy revision, publication configuration, and a digest of that run's validation evidence. Recovery refuses missing or changed pins, an earlier failed/skipped validation stage, validation overrides, missing exact-head Test evidence with a `go` verdict, an active run on the branch, a missing commit, or a live source branch that no longer equals the recorded head. The normal optional Intent and advisory Jev skips do not invalidate evidence. A changed base/policy or publication configuration also refuses; recovery never guesses the old target from current settings.
+
+Recovery uses a disposable detached checkout and the ordinary PR renderer and final-content guard. It renders repaired findings as **fixed without rereview**, retaining the recorded risk rating and any unresolved notes; it does not claim that those repairs received another review. The guard still refuses misleading prose, including a stale claim repeated in a drafted narrative. The source branch is not pushed or rewritten, validation records are not edited, and the original run remains terminal-failed rather than being relabeled a clean pass. Its PR URL is recorded by ordinary publication. Configured evidence publication still follows the ordinary PR path.
+
+A matching existing PR is returned unchanged, including when it has since closed or merged. A different head/base, ambiguous discovery, or unreadable identity refuses instead of editing, retargeting, or opening a duplicate. Complete open/closed source-identity discovery is currently implemented for GitHub; other providers refuse rather than fall back to incomplete discovery. Forge CI triggered by PR publication runs normally on the same source head. Recovery does not restart the terminal run's CI monitor, waive checks, or grant merge authority.
+
+Both CLI and daemon must support this operation. An older daemon's unknown-method refusal has no fallback and does not trigger an automatic service restart.
+
 ### Explicit existing upstream PR
 
 When `origin` points at your fork but the PR lives upstream, select the existing review object explicitly:

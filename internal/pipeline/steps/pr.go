@@ -20,6 +20,9 @@ import (
 
 // PRStep creates or updates a pull request via the provider CLI or API.
 type PRStep struct {
+	// recovery changes only disposition-aware rendering and adds exact pins;
+	// it never disables the ordinary final-content validator.
+	recovery *publicationPins
 	// mediaUploader uploads image/video evidence at PR render time. Nil uses
 	// the GitHub host's user-attachments client. Tests inject a stub so they
 	// never talk to live GitHub.
@@ -109,6 +112,9 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	}
 	baseBranch := effectivePRBaseBranch(sctx)
 	if branch == baseBranch && explicit == nil {
+		if s.recovery != nil {
+			return nil, recoveryRefusal("source branch is the target base")
+		}
 		sctx.Log(fmt.Sprintf("skipping PR creation on base branch %s", branch))
 		return &pipeline.StepOutcome{Skipped: true}, nil
 	}
@@ -118,10 +124,16 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		var skipReason string
 		host, skipReason = buildHost(sctx, provider)
 		if host == nil {
+			if s.recovery != nil {
+				return nil, recoveryRefusal("provider unavailable: " + skipReason)
+			}
 			sctx.Log(fmt.Sprintf("skipping PR creation: %s", skipReason))
 			return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 		}
 		if err := host.Available(ctx); err != nil {
+			if s.recovery != nil {
+				return nil, fmt.Errorf("publication recovery refused: provider unavailable: %w", err)
+			}
 			sctx.Log(fmt.Sprintf("skipping PR creation: %v", err))
 			return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 		}
@@ -131,9 +143,26 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	sctx.Log(fmt.Sprintf("checking for existing pull request on branch %s...", branch))
 	existing := explicit
 	if existing == nil {
-		existing, err = host.FindPR(ctx, branch, "")
+		if s.recovery != nil {
+			existing, err = findRecoveryPR(sctx, host)
+		} else {
+			existing, err = host.FindPR(ctx, branch, "")
+		}
 		if err != nil {
 			return nil, err
+		}
+	}
+	if s.recovery != nil {
+		// Check immutable intent before an idempotent return, and do not bind,
+		// retarget, rewrite, or restamp an already published PR.
+		if err := s.verifyRecoveryPublication(sctx, s.recovery.BaseSHA, s.recovery.PolicySHA, provider); err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			return s.recoveredExistingPR(existing)
+		}
+		if sctx.Run.PRURL != nil && strings.TrimSpace(*sctx.Run.PRURL) != "" {
+			return nil, recoveryRefusal("persisted PR identity was not found; no duplicate may be created")
 		}
 	}
 	existing, err = bindExistingPR(sctx, host, existing)
@@ -151,6 +180,15 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	baseSHA, err := resolveBranchBaseSHA(ctx, sctx, sctx.Run.BaseSHA, publicationBaseBranch)
 	if err != nil {
 		return nil, err
+	}
+	if s.recovery != nil {
+		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider); err != nil {
+			return nil, err
+		}
+	} else if existing == nil {
+		if err := pinPublication(sctx, branch, publicationBaseBranch, baseSHA, policySHA, provider); err != nil {
+			return nil, fmt.Errorf("pin publication intent: %w", err)
+		}
 	}
 	template, err := resolvePRTemplate(ctx, sctx, policySHA, provider)
 	if err != nil {
@@ -280,6 +318,16 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 	if err != nil {
 		return nil, err
 	}
+	if s.recovery != nil {
+		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider); err != nil {
+			return nil, err
+		}
+		if prior, err := findRecoveryPR(sctx, host); err != nil {
+			return nil, err
+		} else if prior != nil {
+			return s.recoveredExistingPR(prior)
+		}
+	}
 	sctx.Log("creating pull request...")
 	created, err := host.CreatePR(ctx, branch, baseBranch, content.scmContent())
 	if err != nil {
@@ -292,6 +340,25 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		return &pipeline.StepOutcome{}, nil
 	}
 	sctx.Log(fmt.Sprintf("created pull request: %s", created.URL))
+	if s.recovery != nil {
+		// Creation has no compare-and-swap head argument. Re-read the forge
+		// result as well as the source ref; an external race is never reported
+		// as successful validation of a different head. Retry discovers this
+		// same PR rather than opening a second one.
+		actual, err := findRecoveryPR(sctx, host)
+		if err != nil {
+			return nil, err
+		}
+		if actual == nil || actual.URL != created.URL {
+			return nil, recoveryRefusal("created PR identity could not be revalidated")
+		}
+		if _, err := s.recoveredExistingPR(actual); err != nil {
+			return nil, err
+		}
+		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider); err != nil {
+			return nil, err
+		}
+	}
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
@@ -763,6 +830,9 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
 	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
+	if s.recovery != nil {
+		riskLine = recoveryRiskLine(steps, rounds)
+	}
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
 	// Owned templates additionally carry the exact existing declaration as
 	// visible text; the raw consumer/restamper uses the same marker and schema.

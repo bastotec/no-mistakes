@@ -170,7 +170,7 @@ func (d *DB) InsertRunWithIntentAndLaunchNonce(repoID, branch, headSHA, baseSHA 
 		r.PreserveHistoryBaseSHA = &preserveHistoryBase
 	}
 	_, err := d.sql.Exec(
-		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, preserve_history_base_sha, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, submitted_head_sha, no_mistakes_version, no_mistakes_build_sha, status, pr_state, intent, intent_source, intent_session_id, intent_score, launch_nonce, launch_validation_generation, launch_intent_digest, pr_base_branch, preserve_history_base_sha, created_at, updated_at, publication_recovery_eligible) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'none', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)`,
 		r.ID, r.RepoID, r.Branch, r.HeadSHA, r.BaseSHA, headSHA, r.NoMistakesVersion, r.NoMistakesBuildSHA, r.Status, r.Intent, r.IntentSource, r.IntentSessionID, r.IntentScore, r.LaunchNonce, r.LaunchValidationGeneration, r.LaunchIntentDigest, r.PRBaseBranch, r.PreserveHistoryBaseSHA, r.CreatedAt, r.UpdatedAt,
 	)
 	if err != nil {

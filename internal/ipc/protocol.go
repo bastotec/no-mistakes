@@ -13,6 +13,7 @@ const (
 	MethodStartFreshRun      = "start_fresh_run"
 	MethodStartExistingPRRun = "start_existing_pr_run"
 	MethodRetireExistingPR   = "retire_existing_pr"
+	MethodRecoverPublication = "recover_publication"
 	// A distinct method prevents an older daemon from silently ignoring the
 	// history contract. This path imports locally; it never fires a gate hook.
 	MethodStartHistoryRun    = "start_history_run"
@@ -524,4 +525,16 @@ func NewErrorResponse(id int64, code int, message string) *Response {
 		Error:   &RPCError{Code: code, Message: message},
 		ID:      id,
 	}
+}
+
+// RecoverPublicationParams selects one run, never a new head or target.
+// Unknown-method refusal from an older daemon has no fallback.
+type RecoverPublicationParams struct {
+	RepoID string `json:"repo_id"`
+	RunID  string `json:"run_id"`
+}
+
+type RecoverPublicationResult struct {
+	RunID string `json:"run_id"`
+	PRURL string `json:"pr_url"`
 }

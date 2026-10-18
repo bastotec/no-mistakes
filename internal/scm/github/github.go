@@ -237,6 +237,16 @@ func parsePullRequestURL(raw, expectedHost, expectedRepo string) (int, error) {
 }
 
 func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error) {
+	return h.findPublicationPR(ctx, branch, base, false)
+}
+
+// FindPublicationPR includes closed/merged requests: recovery must never create
+// a second PR merely because an earlier publication is no longer open.
+func (h *Host) FindPublicationPR(ctx context.Context, branch string) (*scm.PR, error) {
+	return h.findPublicationPR(ctx, branch, "", true)
+}
+
+func (h *Host) findPublicationPR(ctx context.Context, branch, base string, recovery bool) (*scm.PR, error) {
 	args := []string{"pr", "list", "--head", branch}
 	if strings.TrimSpace(base) != "" {
 		args = append(args, "--base", base)
@@ -246,16 +256,26 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 	if h.forkOwner != "" {
 		jsonFields = "number,url,baseRefName,headRefName,headRepositoryOwner"
 	}
-	args = append(args, "--state", "open", "--json", jsonFields)
+	state := "open"
+	if recovery {
+		state = "all"
+		jsonFields = "number,url,baseRefName,headRefOid,headRefName,headRepositoryOwner,headRepository"
+		args = append(args, "--limit", "1000")
+	}
+	args = append(args, "--state", state, "--json", jsonFields)
 	cmd := h.cmd(ctx, "gh", args...)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("gh pr list: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	var prs []struct {
-		Number              int    `json:"number"`
-		URL                 string `json:"url"`
-		BaseRefName         string `json:"baseRefName"`
+		Number         int    `json:"number"`
+		URL            string `json:"url"`
+		BaseRefName    string `json:"baseRefName"`
+		HeadSHA        string `json:"headRefOid"`
+		HeadRepository *struct {
+			NameWithOwner string `json:"nameWithOwner"`
+		} `json:"headRepository"`
 		HeadRefName         string `json:"headRefName"`
 		HeadRepositoryOwner *struct {
 			Login string `json:"login"`
@@ -296,7 +316,27 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 			}
 		}
 	}
+	if recovery && len(prs) >= 1000 {
+		return nil, errors.New("publication recovery cannot prove complete PR discovery")
+	}
+	var found *scm.PR
 	for i, candidate := range prs {
+		if recovery {
+			if candidate.HeadRepository == nil || candidate.HeadRepository.NameWithOwner == "" || candidate.HeadRefName == "" {
+				return nil, errors.New("publication recovery requires exact PR source repository and branch")
+			}
+			expected := h.repoSlug()
+			if h.forkOwner != "" {
+				parts := strings.SplitN(expected, "/", 2)
+				if len(parts) != 2 {
+					return nil, errors.New("publication recovery requires an exact target repository")
+				}
+				expected = h.forkOwner + "/" + parts[1]
+			}
+			if candidate.HeadRefName != branch || !strings.EqualFold(candidate.HeadRepository.NameWithOwner, expected) {
+				continue
+			}
+		}
 		if !h.matchesHead(candidate.HeadRefName, candidate.HeadRepositoryOwner, branch) {
 			continue
 		}
@@ -304,10 +344,20 @@ func (h *Host) FindPR(ctx context.Context, branch, base string) (*scm.PR, error)
 			Number:     prNumbers[i],
 			URL:        strings.TrimSpace(candidate.URL),
 			BaseBranch: strings.TrimSpace(candidate.BaseRefName),
+			HeadSHA:    strings.TrimSpace(candidate.HeadSHA),
 		}
-		return pr, nil
+		if !recovery {
+			return pr, nil
+		}
+		if found != nil {
+			return nil, errors.New("publication recovery found ambiguous existing PRs")
+		}
+		if pr.HeadSHA == "" || pr.BaseBranch == "" {
+			return nil, errors.New("publication recovery requires exact PR head and base")
+		}
+		found = pr
 	}
-	return nil, nil
+	return found, nil
 }
 
 func (h *Host) matchesHead(headRefName string, owner *struct {

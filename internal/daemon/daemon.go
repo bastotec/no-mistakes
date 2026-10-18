@@ -1313,6 +1313,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.ClaimLaunchReceiptResult{Receipt: &receipt}, nil
 	})
 
+	srv.Handle(ipc.MethodRecoverPublication, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.RecoverPublicationParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return mgr.HandleRecoverPublication(ctx, &p)
+	})
+
 	srv.Handle(ipc.MethodStartHistoryRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
