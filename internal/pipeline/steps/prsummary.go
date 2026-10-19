@@ -1217,6 +1217,13 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 		return buildDetail(line)
 	}
 
+	if sr.StepName == types.StepReview && len(reviewScopeDecisions(rounds)) > 0 {
+		withStatus := buildDetail
+		buildDetail = func(line string) (string, string) {
+			return withStatus(line + "; assessed recorded repair scope, not certification of the original remedy")
+		}
+	}
+
 	// Parse the final findings on the step result (last state).
 	var finalFindings *types.Findings
 	finalFindingsParsed := sr.FindingsJSON == nil
@@ -1356,6 +1363,42 @@ func reviewStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) *types.Fi
 	return nil
 }
 
+// reviewScopeDecisions publishes only instructions attached to a real user
+// selection. The original finding remains historical context, not a revived
+// defect: the decision alone cannot certify that its original remedy landed.
+func reviewScopeDecisions(rounds []*db.StepRound) []string {
+	var lines []string
+	for _, r := range rounds {
+		if r == nil || selectionSourceValue(r.SelectionSource) != db.RoundSelectionSourceUser || r.UserFindingsJSON == nil || r.SelectedFindingIDs == nil {
+			continue
+		}
+		var ids []string
+		if json.Unmarshal([]byte(*r.SelectedFindingIDs), &ids) != nil {
+			continue
+		}
+		f, err := types.ParseFindingsJSON(*r.UserFindingsJSON)
+		if err != nil {
+			continue
+		}
+		for _, item := range f.Items {
+			selected := false
+			for _, id := range ids {
+				selected = selected || id == item.ID
+			}
+			if !selected || strings.TrimSpace(item.UserInstructions) == "" {
+				continue
+			}
+			line, _ := truncateDecisionLine(fmt.Sprintf("round %d, %s: %s (original concern is not certified as repaired by this decision)", r.Round, sanitizePromptText(item.ID), sanitizePromptText(item.UserInstructions)))
+			lines = append(lines, line)
+		}
+	}
+	rendered, note := boundDecisionLines(lines, maxDecisionSectionBytes)
+	if note != "" {
+		rendered = append(rendered, strings.TrimSpace(note))
+	}
+	return rendered
+}
+
 func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepReview {
@@ -1363,16 +1406,20 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) 
 		}
 
 		src := reviewStepFindings(sr, rounds[sr.ID])
+		scope := strings.Join(reviewScopeDecisions(rounds[sr.ID]), "; ")
+		if scope != "" {
+			scope = " Recorded repair scope: " + scope
+		}
 		if src == nil || src.RiskLevel == "" {
-			return ""
+			return strings.TrimSpace(scope)
 		}
 
 		emoji := riskEmoji(src.RiskLevel)
 		label := capitalizeRisk(src.RiskLevel)
 		if src.RiskRationale != "" {
-			return fmt.Sprintf("%s %s: %s", emoji, label, src.RiskRationale)
+			return fmt.Sprintf("%s %s: %s%s", emoji, label, src.RiskRationale, scope)
 		}
-		return fmt.Sprintf("%s %s", emoji, label)
+		return fmt.Sprintf("%s %s%s", emoji, label, scope)
 	}
 	return ""
 }
@@ -1483,6 +1530,18 @@ func buildFixResultText(rounds []*db.StepRound) string {
 // mentally replaying rounds.
 func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) string {
 	var inner strings.Builder
+	scopedReview := sr.StepName == types.StepReview && len(reviewScopeDecisions(rounds)) > 0
+	if scopedReview {
+		inner.WriteString("Recorded repair scope (not proof of the original remedy):\n\n")
+		for _, line := range reviewScopeDecisions(rounds) {
+			inner.WriteString("- " + escapePRText(line, flavor) + "\n")
+		}
+		inner.WriteString("\n")
+	}
+	rechecked := "✅ Re-checked - no issues remain.\n"
+	if scopedReview {
+		rechecked = "Re-checked recorded repair scope; no new findings. The original concern is not certified as repaired.\n"
+	}
 	if len(rounds) == 0 {
 		writeStepStatusDetail(&inner, sr, flavor)
 		return foldPRBlock(summaryLine, inner.String(), flavor)
@@ -1504,7 +1563,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			case missingRoundFindingsData:
 				inner.WriteString("findings not recorded\n\n")
 			case isFixRound:
-				inner.WriteString("✅ Re-checked - no issues remain.\n\n")
+				inner.WriteString(rechecked + "\n")
 			default:
 				inner.WriteString("✅ No issues found.\n\n")
 			}
@@ -1536,7 +1595,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 
 		if len(findings.Items) == 0 {
 			if isFixRound {
-				inner.WriteString("✅ Re-checked - no issues remain.\n")
+				inner.WriteString(rechecked)
 			} else {
 				inner.WriteString("✅ No issues found.\n")
 			}
