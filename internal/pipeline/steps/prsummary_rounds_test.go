@@ -353,6 +353,9 @@ func TestBuildPipelineSummary_FixedLabelNeedsEvidence(t *testing.T) {
 		"same file, new wording": {
 			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`,
 			`{"findings":[{"id":"t9","severity":"error","file":"a.go","line":9,"description":"map written before make"}]}`, &applied},
+		"fix without rereview at the cap": {
+			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`,
+			`{"findings":[],"round_cap":2,"resolved_by_fix":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`, &applied},
 		"unreported fix": {
 			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`, "", &described},
 	} {

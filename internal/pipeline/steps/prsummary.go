@@ -1690,7 +1690,10 @@ func fixedByNextRound(r *db.StepRound, later []*db.StepRound, items []types.Find
 	var reraised []types.Finding
 	if next.FindingsJSON != nil {
 		parsed, err := types.ParseFindingsJSON(*next.FindingsJSON)
-		if err != nil {
+		// A fix accepted at review.max_rounds is not reviewed again: its
+		// empty findings are not a clean rereview, and the round already
+		// discloses it as fixed without rereview.
+		if err != nil || parsed.RoundCap > 0 {
 			return nil
 		}
 		reraised = parsed.Items
