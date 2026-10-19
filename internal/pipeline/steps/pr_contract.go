@@ -170,6 +170,7 @@ The SHA-256 binds your verdict to the exact title and body below. Return it unch
 - content_sha256: %s
 - english is true only when every natural-language passage below is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, and machine metadata.
 - An empty title below means this run wrote no title; there is nothing to judge there.
+- The Pipeline section is generated round-by-round history, not a set of current claims. A finding listed before a later fix round, or after a "Fixed in round N" status, quotes what a reviewer reported before that fix. Never report such a quote as contradicting the fix, the final step status, or another section.
 %s
 - List every concrete violation in issues. Do not edit or translate the content.
 
