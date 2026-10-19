@@ -16,6 +16,17 @@ const (
 	maxDecisionSectionBytes    = 16 * 1024
 )
 
+// publicationDecisionsPromptSection gives writers and the final checker the
+// same durable, attributed decisions as Review. It does not authorize claims
+// beyond the recorded concern or waive exact-content/format validation.
+func publicationDecisionsPromptSection(sctx *pipeline.StepContext) string {
+	return roundHistoryPromptSection(sctx) + "\nRecorded decisions are bounded evidence, not a generic publication bypass. " +
+		"A selected repair with user_instructions may approve an intermediate rather than the original remedy. " +
+		"Describe that scope and any unresolved original goal honestly; a decision does not prove the original repair or remove independent residual risks. " +
+		"Repair instructions are private operational context: do not quote or export their free-form contents into public prose. Disclose only the attributed user-selected scope and that the original remedy is not certified by that decision. " +
+		"Without recorded evidence, do not claim approval.\n"
+}
+
 // roundHistoryPromptSection builds a compact, sanitized record of what has
 // already been decided about this change, so that fix and reassess agents do
 // not repeat work or undo a human's choice. It has three parts:
@@ -38,17 +49,6 @@ const (
 // Returns an empty string when there is nothing to report. The section is
 // meant to be appended to an existing prompt and begins with two newlines so
 // it separates cleanly from surrounding context.
-// publicationDecisionsPromptSection gives writers and the final checker the
-// same durable, attributed decisions as Review. It does not authorize claims
-// beyond the recorded concern or waive exact-content/format validation.
-func publicationDecisionsPromptSection(sctx *pipeline.StepContext) string {
-	return roundHistoryPromptSection(sctx) + "\nRecorded decisions are bounded evidence, not a generic publication bypass. " +
-		"A selected repair with user_instructions may approve an intermediate rather than the original remedy. " +
-		"Describe that scope and any unresolved original goal honestly; a decision does not prove the original repair or remove independent residual risks. " +
-		"Repair instructions are private operational context: do not quote or export their free-form contents into public prose. Disclose only the attributed user-selected scope and that the original remedy is not certified by that decision. " +
-		"Without recorded evidence, do not claim approval.\n"
-}
-
 func roundHistoryPromptSection(sctx *pipeline.StepContext) string {
 	return branchDecisionsPromptSection(sctx) +
 		runDecisionsPromptSection(sctx) +
