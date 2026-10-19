@@ -1886,6 +1886,7 @@ func withCarriedReviewNotes(raw string, notes []types.Finding) string {
 		findings = parsed
 	}
 	findings.UnresolvedNotes = append(append([]types.Finding(nil), notes...), findings.UnresolvedNotes...)
+	appendReviewDispositionMetadata(&findings, notes)
 	merged, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
 		return raw
@@ -1969,6 +1970,9 @@ func (e *Executor) resolveReviewFixWithoutRereview(outcome *StepOutcome, gateFin
 		resolved = types.Findings{}
 	}
 	resolved.Items = nil
+	// The gate's prose describes the pre-fix head, not this disposition.
+	resolved.Summary = "Review completed without rereview."
+	resolved.RiskLevel, resolved.RiskRationale = "", ""
 	if fixed, err := types.ParseFindingsJSON(fixedFindings); err == nil {
 		if committed {
 			resolved.ResolvedByFix = append(resolved.ResolvedByFix, fixed.Items...)
@@ -1981,6 +1985,7 @@ func (e *Executor) resolveReviewFixWithoutRereview(outcome *StepOutcome, gateFin
 			resolved.UnresolvedNotes = append(resolved.UnresolvedNotes, deferred.Items...)
 		}
 	}
+	appendReviewDispositionMetadata(&resolved, resolved.UnresolvedNotes)
 	raw, err := types.MarshalFindingsJSON(resolved)
 	if err != nil {
 		slog.Warn("failed to record review fix without rereview", "error", err)
@@ -2748,24 +2753,37 @@ func selectedFindingCount(raw string, ids []string) int {
 	return findingsCount(raw)
 }
 
-// withReviewRoundMetadata stamps the fresh rereview's own review metadata -
-// its level and the angles it went on without - onto the payload merged with
-// the held findings. The merge can fall back to the held round's payload
-// whole, which describes an earlier review.
+// withReviewRoundMetadata uses the fresh rereview's prose and review metadata,
+// never the held round's assessment of the pre-repair head. Held findings retain
+// their authority and contribute explicitly to the final risk assessment.
 func withReviewRoundMetadata(merged, fresh string) string {
-	if merged == "" || fresh == "" {
+	if merged == "" {
 		return merged
 	}
-	freshFindings, err := types.ParseFindingsJSON(fresh)
-	if err != nil {
-		return merged
+	freshFindings := types.Findings{}
+	if fresh != "" {
+		var err error
+		freshFindings, err = types.ParseFindingsJSON(fresh)
+		if err != nil {
+			return merged
+		}
 	}
 	findings, err := types.ParseFindingsJSON(merged)
 	if err != nil {
 		return merged
 	}
+	findings.Summary = freshFindings.Summary
+	findings.RiskLevel, findings.RiskRationale, findings.RiskScope = freshFindings.RiskLevel, freshFindings.RiskRationale, freshFindings.RiskScope
 	findings.ReviewEffort, findings.ReviewEffortReason = freshFindings.ReviewEffort, freshFindings.ReviewEffortReason
 	findings.ReviewUnreviewed = freshFindings.ReviewUnreviewed
+	// Include only claims not already represented by the fresh assessment.
+	held := append([]types.Finding(nil), findings.UnresolvedNotes...)
+	for _, item := range findings.Items {
+		if !slices.Contains(freshFindings.Items, item) {
+			held = append(held, item)
+		}
+	}
+	appendReviewDispositionMetadata(&findings, held)
 	raw, err := types.MarshalFindingsJSON(findings)
 	if err != nil {
 		return merged
