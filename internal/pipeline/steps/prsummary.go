@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -1492,7 +1493,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 	// them - a data gap we must not paper over as "no issues found".
 	missingRoundFindingsData := sr.FindingsJSON != nil && !roundsHaveFindings(rounds) && !roundsHaveParseFailure(rounds)
 
-	for _, r := range rounds {
+	for i, r := range rounds {
 		isFixRound := r.IsFixRound()
 		if isFixRound {
 			inner.WriteString(fixRoundLine(r))
@@ -1550,7 +1551,7 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 		if isFixRound {
 			inner.WriteString(fmt.Sprintf("%s still open:\n\n", countFindingsBySeverity(&findings)))
 		}
-		writeFindingItems(&inner, sr, &findings, flavor)
+		writeRoundFindingItems(&inner, sr, &findings, fixedByNextRound(r, rounds[i+1:], findings.Items), flavor)
 		inner.WriteString("\n")
 	}
 	writeUnresolvedNotes(&inner, sr, flavor)
@@ -1663,6 +1664,106 @@ func fixRoundLine(r *db.StepRound) string {
 	default:
 		return "🔧 Fix attempted; result not reported."
 	}
+}
+
+// fixedByNextRound returns the round's findings that the fix round right
+// after it resolved: selected for that fix, which recorded that it changed
+// the code, and with nothing like them raised by its rereview. Only those
+// read as fixed; anything else stays as the reviewer wrote it, because it is
+// open or its resolution is not established.
+func fixedByNextRound(r *db.StepRound, later []*db.StepRound, items []types.Finding) map[int]int {
+	if len(later) == 0 || !later[0].IsFixRound() || fixRoundOutcome(later[0]) != fixOutcomeApplied {
+		return nil
+	}
+	next := later[0]
+	var selected map[string]bool
+	if r.SelectedFindingIDs != nil {
+		var ids []string
+		if err := json.Unmarshal([]byte(*r.SelectedFindingIDs), &ids); err != nil {
+			return nil
+		}
+		selected = map[string]bool{}
+		for _, id := range ids {
+			selected[id] = true
+		}
+	}
+	var reraised []types.Finding
+	if next.FindingsJSON != nil {
+		parsed, err := types.ParseFindingsJSON(*next.FindingsJSON)
+		// A fix accepted at review.max_rounds is not reviewed again: its
+		// empty findings are not a clean rereview, and the round already
+		// discloses it as fixed without rereview.
+		if err != nil || parsed.RoundCap > 0 {
+			return nil
+		}
+		reraised = parsed.Items
+	}
+	fixed := map[int]int{}
+	for idx, f := range items {
+		if selected != nil && !selected[f.ID] {
+			continue
+		}
+		if slices.ContainsFunc(reraised, func(g types.Finding) bool { return mayBeSameIssue(f, g) }) {
+			continue
+		}
+		fixed[idx] = next.Round
+	}
+	return fixed
+}
+
+// mayBeSameIssue reports whether a rereview finding could be the same issue
+// as an earlier one. Descriptions drift between rounds (a failing command's
+// exit code, a reworded explanation), so anything sharing an ID, file, or
+// check - or, for findings without a location, a category - counts.
+// Erring this way only withholds a "Fixed" label.
+func mayBeSameIssue(a, b types.Finding) bool {
+	switch {
+	case a.Description == b.Description:
+		return true
+	case a.ID != "" && a.ID == b.ID:
+		return true
+	case a.File != "" && a.File == b.File:
+		return true
+	case a.CheckID != "" && a.CheckID == b.CheckID, a.Check != "" && a.Check == b.Check:
+		return true
+	case a.File == "" && b.File == "" && a.Category == b.Category:
+		return true
+	}
+	return false
+}
+
+// writeRoundFindingItems renders one round's findings: a finding a later fix
+// resolved leads with that final status and marks its text as the report
+// from before the fix. Bare, the old text - "remains unresolved", "still
+// duplicates" - read as a current claim that contradicts the fix after it,
+// and the publication check refused the body for it.
+func writeRoundFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Findings, fixed map[int]int, flavor prBodyFlavor) {
+	if len(fixed) == 0 {
+		writeFindingItems(b, sr, findings, flavor)
+		return
+	}
+	var open []types.Finding
+	for idx, f := range findings.Items {
+		round, ok := fixed[idx]
+		if !ok {
+			open = append(open, f)
+			continue
+		}
+		loc := ""
+		if f.File != "" {
+			loc = fmt.Sprintf(": `%s", escapePRText(f.File, flavor))
+			if f.Line > 0 {
+				loc += fmt.Sprintf(":%d", f.Line)
+			}
+			loc += "`"
+		}
+		severity := types.NormalizeFindingSeverity(f.Severity)
+		if severity == "" {
+			severity = "finding"
+		}
+		b.WriteString(fmt.Sprintf("- ✅ Fixed in round %d (%s)%s - reported before the fix: %s\n", round, severity, loc, escapePRText(f.Description, flavor)))
+	}
+	writeFindingItems(b, sr, &types.Findings{Items: open, Scenarios: findings.Scenarios, Verdict: findings.Verdict, Tested: findings.Tested}, flavor)
 }
 
 // writeFindingItems renders each finding as a `file:line - description` bullet,

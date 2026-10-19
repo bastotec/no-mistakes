@@ -291,3 +291,86 @@ func TestBuildPipelineSummary_FailedTestRoundIncludesTestedDetails(t *testing.T)
 		t.Fatalf("expected failed test round to include tested command details, got:\n%s", md)
 	}
 }
+
+// A finding a fix resolved leads with that final status, and its text reads
+// as the report from before the fix. Bare, wording like "remains unresolved"
+// contradicted the "Fix applied" after it and failed PR publication.
+func TestBuildPipelineSummary_FixedFindingStatesItsFinalStatus(t *testing.T) {
+	t.Parallel()
+	first := `{"findings":[{"id":"d1","severity":"warning","file":"bin/fm-dod-lib.sh","line":85,"description":"The contract remains unresolved: it still duplicates the classification criteria."},{"id":"d2","severity":"warning","file":"docs/x.md","line":3,"description":"Left for a decision: the guide still describes the old flag."}],"summary":"2 issues"}`
+	selected := `["d1"]`
+	fix := changesAppliedSummary
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepDocument, Status: types.StepStatusCompleted}}
+	rounds := map[string][]*db.StepRound{"s1": {
+		{Round: 1, Trigger: "initial", FindingsJSON: &first, SelectedFindingIDs: &selected},
+		{Round: 2, Trigger: "auto_fix", FixSummary: &fix},
+	}}
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	want := "- ✅ Fixed in round 2 (warning): `bin/fm-dod-lib.sh:85` - reported before the fix: The contract remains unresolved"
+	if !strings.Contains(md, want) {
+		t.Fatalf("fixed finding does not lead with its final status, want %q in:\n%s", want, md)
+	}
+	if strings.Contains(md, "- ⚠️ `bin/fm-dod-lib.sh:85`") {
+		t.Fatalf("fixed finding still rendered as an open one:\n%s", md)
+	}
+	// The unselected finding was never fixed: it keeps its open form.
+	if !strings.Contains(md, "- ⚠️ `docs/x.md:3` - Left for a decision") {
+		t.Fatalf("unselected finding lost its open form:\n%s", md)
+	}
+}
+
+// A finding the rereview raises again is not fixed, whatever the fix said.
+func TestBuildPipelineSummary_ReraisedFindingStaysOpen(t *testing.T) {
+	t.Parallel()
+	first := `{"findings":[{"id":"r1","severity":"error","file":"a.go","line":1,"description":"nil map write remains unresolved"}],"summary":"1 issue"}`
+	again := `{"findings":[{"id":"r1","severity":"error","file":"a.go","line":1,"description":"nil map write remains unresolved"}],"summary":"1 issue"}`
+	fix := changesAppliedSummary
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepReview, Status: types.StepStatusCompleted}}
+	rounds := map[string][]*db.StepRound{"s1": {
+		{Round: 1, Trigger: "initial", FindingsJSON: &first},
+		{Round: 2, Trigger: "auto_fix", FindingsJSON: &again, FixSummary: &fix},
+	}}
+	md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+	if strings.Contains(md, "Fixed in round") {
+		t.Fatalf("re-raised finding read as fixed:\n%s", md)
+	}
+}
+
+// A rereview finding that may be the same issue - same file, or a reworded
+// failing command - withholds the "Fixed" label; so does a fix that did not
+// record applying changes.
+func TestBuildPipelineSummary_FixedLabelNeedsEvidence(t *testing.T) {
+	t.Parallel()
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted}}
+	applied, described := changesAppliedSummary, "patched the handler"
+	for name, tc := range map[string]struct {
+		first, next string
+		fix         *string
+	}{
+		"reworded command failure": {
+			`{"findings":[{"id":"t1","severity":"error","description":"commands.test exited 1"}]}`,
+			`{"findings":[{"id":"t9","severity":"error","description":"commands.test exited 2"}]}`, &applied},
+		"same file, new wording": {
+			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`,
+			`{"findings":[{"id":"t9","severity":"error","file":"a.go","line":9,"description":"map written before make"}]}`, &applied},
+		"fix without rereview at the cap": {
+			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`,
+			`{"findings":[],"round_cap":2,"resolved_by_fix":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`, &applied},
+		"unreported fix": {
+			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`, "", &described},
+	} {
+		var next *string
+		if tc.next != "" {
+			next = &tc.next
+		}
+		first := tc.first
+		rounds := map[string][]*db.StepRound{"s1": {
+			{Round: 1, Trigger: "initial", FindingsJSON: &first},
+			{Round: 2, Trigger: "auto_fix", FindingsJSON: next, FixSummary: tc.fix},
+		}}
+		md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+		if strings.Contains(md, "Fixed in round") {
+			t.Errorf("%s: claimed a fix without evidence:\n%s", name, md)
+		}
+	}
+}

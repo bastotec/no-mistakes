@@ -2752,3 +2752,32 @@ func TestPRStep_ForeignAttestationsInEveryComponentDoNotShadowTheRealOne(t *test
 		}
 	}
 }
+
+// The publication check is told that the Pipeline section is round history:
+// a finding quoted from before a fix is not a current claim to contradict.
+func TestPRStep_ValidatorTreatsPipelineRoundHistoryAsHistory(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	env, _ := fakeGH(t, "")
+	ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"title":"repair widget","body":"## What Changed\n\n- repair widget"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = env
+	var prompt string
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		prompt = opts.Prompt
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}})
+		return &agent.Result{Output: payload}, nil
+	}
+	if _, err := (&PRStep{}).Execute(sctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(prompt, "The Pipeline section is generated round-by-round history, not a set of current claims") {
+		t.Fatalf("validator prompt lacks the round-history rule:\n%s", prompt)
+	}
+}
