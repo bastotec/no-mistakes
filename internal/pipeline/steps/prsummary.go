@@ -1667,11 +1667,12 @@ func fixRoundLine(r *db.StepRound) string {
 }
 
 // fixedByNextRound returns the round's findings that the fix round right
-// after it resolved: selected for that fix, which changed the code, and not
-// raised again by its rereview. Only those read as fixed; anything else stays
-// as the reviewer wrote it, because it is still open.
+// after it resolved: selected for that fix, which recorded that it changed
+// the code, and with nothing like them raised by its rereview. Only those
+// read as fixed; anything else stays as the reviewer wrote it, because it is
+// open or its resolution is not established.
 func fixedByNextRound(r *db.StepRound, later []*db.StepRound, items []types.Finding) map[int]int {
-	if len(later) == 0 || !later[0].IsFixRound() || fixRoundOutcome(later[0]) == fixOutcomeNoChange {
+	if len(later) == 0 || !later[0].IsFixRound() || fixRoundOutcome(later[0]) != fixOutcomeApplied {
 		return nil
 	}
 	next := later[0]
@@ -1699,12 +1700,33 @@ func fixedByNextRound(r *db.StepRound, later []*db.StepRound, items []types.Find
 		if selected != nil && !selected[f.ID] {
 			continue
 		}
-		if slices.ContainsFunc(reraised, func(g types.Finding) bool { return g.Description == f.Description }) {
+		if slices.ContainsFunc(reraised, func(g types.Finding) bool { return mayBeSameIssue(f, g) }) {
 			continue
 		}
 		fixed[idx] = next.Round
 	}
 	return fixed
+}
+
+// mayBeSameIssue reports whether a rereview finding could be the same issue
+// as an earlier one. Descriptions drift between rounds (a failing command's
+// exit code, a reworded explanation), so anything sharing an ID, file, or
+// check - or, for findings without a location, a category - counts.
+// Erring this way only withholds a "Fixed" label.
+func mayBeSameIssue(a, b types.Finding) bool {
+	switch {
+	case a.Description == b.Description:
+		return true
+	case a.ID != "" && a.ID == b.ID:
+		return true
+	case a.File != "" && a.File == b.File:
+		return true
+	case a.CheckID != "" && a.CheckID == b.CheckID, a.Check != "" && a.Check == b.Check:
+		return true
+	case a.File == "" && b.File == "" && a.Category == b.Category:
+		return true
+	}
+	return false
 }
 
 // writeRoundFindingItems renders one round's findings: a finding a later fix

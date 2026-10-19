@@ -335,3 +335,39 @@ func TestBuildPipelineSummary_ReraisedFindingStaysOpen(t *testing.T) {
 		t.Fatalf("re-raised finding read as fixed:\n%s", md)
 	}
 }
+
+// A rereview finding that may be the same issue - same file, or a reworded
+// failing command - withholds the "Fixed" label; so does a fix that did not
+// record applying changes.
+func TestBuildPipelineSummary_FixedLabelNeedsEvidence(t *testing.T) {
+	t.Parallel()
+	steps := []*db.StepResult{{ID: "s1", StepName: types.StepTest, Status: types.StepStatusCompleted}}
+	applied, described := changesAppliedSummary, "patched the handler"
+	for name, tc := range map[string]struct {
+		first, next string
+		fix         *string
+	}{
+		"reworded command failure": {
+			`{"findings":[{"id":"t1","severity":"error","description":"commands.test exited 1"}]}`,
+			`{"findings":[{"id":"t9","severity":"error","description":"commands.test exited 2"}]}`, &applied},
+		"same file, new wording": {
+			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`,
+			`{"findings":[{"id":"t9","severity":"error","file":"a.go","line":9,"description":"map written before make"}]}`, &applied},
+		"unreported fix": {
+			`{"findings":[{"id":"t1","severity":"error","file":"a.go","line":4,"description":"nil map write"}]}`, "", &described},
+	} {
+		var next *string
+		if tc.next != "" {
+			next = &tc.next
+		}
+		first := tc.first
+		rounds := map[string][]*db.StepRound{"s1": {
+			{Round: 1, Trigger: "initial", FindingsJSON: &first},
+			{Round: 2, Trigger: "auto_fix", FindingsJSON: next, FixSummary: tc.fix},
+		}}
+		md, _ := BuildPipelineSummary(steps, rounds, testPipelineHeadSHA)
+		if strings.Contains(md, "Fixed in round") {
+			t.Errorf("%s: claimed a fix without evidence:\n%s", name, md)
+		}
+	}
+}
