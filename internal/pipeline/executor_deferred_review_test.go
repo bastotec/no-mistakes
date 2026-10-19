@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -28,7 +29,7 @@ func TestExecutor_ReviewPartialResponsePreservesDeferredFinding(t *testing.T) {
 			if tc.single {
 				items = []types.Finding{held}
 			}
-			raw, err := types.MarshalFindingsJSON(types.Findings{Items: items})
+			raw, err := types.MarshalFindingsJSON(types.Findings{Items: items, Summary: "repair this remains", RiskLevel: "high", RiskRationale: "repair this remains"})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -50,7 +51,7 @@ func TestExecutor_ReviewPartialResponsePreservesDeferredFinding(t *testing.T) {
 					reported, err := types.MarshalFindingsJSON(types.Findings{Items: []types.Finding{duplicate}})
 					return &StepOutcome{Findings: reported, ReviewApprovedHeadSHA: run.HeadSHA}, err
 				}
-				return &StepOutcome{ReviewApprovedHeadSHA: run.HeadSHA}, nil
+				return &StepOutcome{Findings: `{"findings":[],"summary":"fresh rereview","risk_level":"low","risk_rationale":"no new findings"}`, ReviewApprovedHeadSHA: run.HeadSHA}, nil
 			}}
 			exec := NewExecutor(database, p, nil, nil, []Step{step}, nil)
 			ctx, cancel := context.WithCancel(context.Background())
@@ -84,6 +85,9 @@ func TestExecutor_ReviewPartialResponsePreservesDeferredFinding(t *testing.T) {
 					findings, err := types.ParseFindingsJSON(*results[0].FindingsJSON)
 					if err != nil || len(findings.Items) != 1 || findings.Items[0] != held {
 						t.Fatalf("held finding changed or lost: %+v, %v", findings, err)
+					}
+					if strings.Contains(findings.Summary+findings.RiskRationale, "repair this remains") || findings.RiskLevel != "medium" || !strings.Contains(findings.RiskRationale, held.Description) {
+						t.Fatalf("durable final metadata misstates the disposition: %+v", findings)
 					}
 					rounds, err := database.GetRoundsByStep(results[0].ID)
 					if err != nil || len(rounds) != 2 || rounds[1].FindingsJSON == nil || *rounds[1].FindingsJSON != *results[0].FindingsJSON {
