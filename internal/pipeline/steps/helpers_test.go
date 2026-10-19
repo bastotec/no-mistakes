@@ -63,6 +63,29 @@ func addEmptyUnsupportedRules(result *agent.Result, schema json.RawMessage) *age
 	return &copy
 }
 
+// Legacy writer fixtures use English intent unchanged. Language regressions
+// supply their own public_intent explicitly, including deliberate omissions.
+func addTestPublicIntent(result *agent.Result, opts agent.RunOpts) *agent.Result {
+	if result == nil || string(opts.JSONSchema) != string(prContentSchema) {
+		return result
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(result.Output, &object) != nil {
+		return result
+	}
+	if _, ok := object["public_intent"]; ok {
+		return result
+	}
+	text := ""
+	if parts := strings.SplitN(opts.Prompt, "-----BEGIN USER INTENT-----\n", 2); len(parts) == 2 {
+		text = strings.SplitN(parts[1], "\n-----END USER INTENT-----", 2)[0]
+	}
+	object["public_intent"], _ = json.Marshal(text)
+	copy := *result
+	copy.Output, _ = json.Marshal(object)
+	return &copy
+}
+
 func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
 	if opts.Purpose == prContentValidationPurpose {
 		if m.validationFn != nil {
@@ -78,7 +101,8 @@ func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result,
 	m.calls = append(m.calls, opts)
 	if m.runFn != nil {
 		result, err := m.runFn(ctx, opts)
-		return addEmptyUnsupportedRules(result, opts.JSONSchema), err
+		result = addEmptyUnsupportedRules(result, opts.JSONSchema)
+		return addTestPublicIntent(result, opts), err
 	}
 	if string(opts.JSONSchema) == string(prContentSchema) {
 		return &agent.Result{Output: []byte(`{"title":"chore: update pull request","body":"## What Changed\n\n- update the pull request","unsupported_rules":[]}`)}, nil

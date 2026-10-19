@@ -151,6 +151,17 @@ func (a Action) withPromptDefaults(prompt string) Action {
 			structured["unsupported_rules"] = []any{}
 		}
 	}
+	if strings.Contains(prompt, "public_intent") {
+		if _, ok := structured["public_intent"]; !ok {
+			// The canned English fixture has no translator; preserve its
+			// synthetic intent as the writer's explicit public projection.
+			text := ""
+			if parts := strings.SplitN(prompt, "-----BEGIN USER INTENT-----\n", 2); len(parts) == 2 {
+				text = strings.SplitN(parts[1], "\n-----END USER INTENT-----", 2)[0]
+			}
+			structured["public_intent"] = text
+		}
+	}
 	const digestPrefix = "- content_sha256: "
 	if start := strings.Index(prompt, digestPrefix); start >= 0 {
 		digest := strings.TrimSpace(strings.SplitN(prompt[start+len(digestPrefix):], "\n", 2)[0])
