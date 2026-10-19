@@ -3,13 +3,13 @@ package steps
 import (
 	"context"
 	"encoding/json"
-	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
@@ -199,7 +199,9 @@ func TestReviewBoundedApprovalLifecycleReachesPublicationGuard(t *testing.T) {
 		case <-time.After(10 * time.Millisecond):
 		}
 	}
-	if err := executor.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"repair"}, map[string]string{"repair": "Accept diagnostic intermediate only; original product repair remains out of scope and unresolved."}, nil); err != nil {
+	const privateSentinel = "private-customer-incident-4892"
+	instructions := "Accept diagnostic intermediate only; original product repair remains out of scope and unresolved. " + privateSentinel
+	if err := executor.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"repair"}, map[string]string{"repair": instructions}, nil); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -230,7 +232,7 @@ func TestReviewBoundedApprovalLifecycleReachesPublicationGuard(t *testing.T) {
 		t.Fatalf("original defect falsely revived: %+v", final)
 	}
 	md, risk := BuildPipelineSummary(results, map[string][]*db.StepRound{results[0].ID: rounds}, run.HeadSHA)
-	if !strings.Contains(risk, "diagnostic intermediate") || !strings.Contains(risk, "independent residual risk") || strings.Contains(md, "Re-checked - no issues remain") || !strings.Contains(md, "original concern is not certified as repaired") {
+	if !strings.Contains(risk, "user-selected repair scope recorded") || !strings.Contains(risk, "independent residual risk") || strings.Contains(md, "Re-checked - no issues remain") || !strings.Contains(md, "original concern is not certified as repaired") || strings.Contains(md+risk, privateSentinel) || strings.Contains(md+risk, instructions) {
 		t.Fatalf("bounded approval misrepresented:\n%s\nRisk: %s", md, risk)
 	}
 	// Reopen SQLite: publication must consume durable decisions, not an
@@ -243,44 +245,91 @@ func TestReviewBoundedApprovalLifecycleReachesPublicationGuard(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	for _, approved := range []bool{true, false} {
-		checker := &mockAgent{name: "controlled-checker", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			// The writer must see the same attributed evidence as the checker.
-			evidence := strings.Contains(opts.Prompt, `user_instructions`) && strings.Contains(opts.Prompt, "Accept diagnostic intermediate only")
-			if evidence != approved {
-				t.Fatalf("writer decision context: evidence=%v approved=%v", evidence, approved)
+	firstRunID := run.ID
+	for _, laterRun := range []bool{false, true} {
+		if laterRun {
+			if err := os.WriteFile(filepath.Join(work, "followup.txt"), []byte("unrelated follow-up\n"), 0600); err != nil {
+				t.Fatal(err)
 			}
-			return &agent.Result{Output: json.RawMessage(`{"title":"fix: diagnostic intermediate","body":"## What Changed\n\nApproved diagnostic intermediate, not the original repair.","unsupported_rules":[]}`)}, nil
-		}, validationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
-			digest, err := validationDigestFromPrompt(opts.Prompt)
+			if _, err := git.Run(ctx, work, "add", "followup.txt"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := git.Run(ctx, work, "commit", "-m", "test: unrelated follow-up"); err != nil {
+				t.Fatal(err)
+			}
+			newHead, err := git.Run(ctx, work, "rev-parse", "HEAD")
 			if err != nil {
-				return nil, err
+				t.Fatal(err)
 			}
-			// A deterministic stand-in for the real semantic checker: only
-			// attributed recorded instructions support this bounded claim.
-			evidence := strings.Contains(opts.Prompt, "user chose to fix:") && strings.Contains(opts.Prompt, `user_instructions`) && strings.Contains(opts.Prompt, "Accept diagnostic intermediate only")
-			issues := []string{}
-			if !evidence {
-				issues = append(issues, "approval claim lacks recorded evidence")
+			run, err = reopened.InsertRun(repo.ID, "feature", strings.TrimSpace(newHead), base)
+			if err != nil {
+				t.Fatal(err)
 			}
-			payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: issues})
-			return &agent.Result{Output: payload}, nil
-		}}
-		sctx := newTestContext(t, checker, work, base, run.HeadSHA, config.Commands{})
-		if approved {
-			sctx.DB, sctx.Run, sctx.Repo = reopened, run, repo
+			laterReview := dispositionReview{execute: func(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+				if !strings.Contains(branchDecisionsPromptSection(sctx), privateSentinel) {
+					t.Error("later reviewer lost the recorded scope")
+				}
+				return &pipeline.StepOutcome{Findings: `{"findings":[],"summary":"no new findings","risk_level":"low","risk_rationale":"current follow-up risk"}`, ReviewApprovedHeadSHA: sctx.Run.HeadSHA}, nil
+			}}
+			laterExecutor := pipeline.NewExecutor(reopened, p, &config.Config{}, nil, []pipeline.Step{laterReview}, nil)
+			if err := laterExecutor.Execute(ctx, run, repo, work); err != nil {
+				t.Fatal(err)
+			}
+			if run.HeadSHA == head {
+				t.Fatal("follow-up must assess a different head")
+			}
 		}
-		_, err := (&PRStep{}).buildPRContentWithPolicy(sctx, "feature", "main", base, base, scm.ProviderGitHub, githubPullRequestBodyHardLimitChars)
-		if (err == nil) != approved {
-			t.Fatalf("approved=%v: publication guard: %v", approved, err)
+		for _, approved := range []bool{true, false} {
+			checker := &mockAgent{name: "controlled-checker", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				evidence := strings.Contains(opts.Prompt, `user_instructions`) && strings.Contains(opts.Prompt, instructions)
+				if evidence != approved {
+					t.Fatalf("writer decision context: evidence=%v approved=%v", evidence, approved)
+				}
+				return &agent.Result{Output: json.RawMessage(`{"title":"fix: diagnostic intermediate","body":"## What Changed\n\nApproved diagnostic intermediate, not the original repair.","unsupported_rules":[]}`)}, nil
+			}, validationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				digest, err := validationDigestFromPrompt(opts.Prompt)
+				if err != nil {
+					return nil, err
+				}
+				evidence := strings.Contains(opts.Prompt, "user chose to fix:") && strings.Contains(opts.Prompt, `user_instructions`) && strings.Contains(opts.Prompt, instructions)
+				issues := []string{}
+				if !evidence {
+					issues = append(issues, "approval claim lacks recorded evidence")
+				}
+				payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: issues})
+				return &agent.Result{Output: payload}, nil
+			}}
+			sctx := newTestContext(t, checker, work, base, run.HeadSHA, config.Commands{})
+			if approved {
+				sctx.DB, sctx.Run, sctx.Repo = reopened, run, repo
+				pipeline.BindBranchDecisions(sctx)
+				for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+					for _, owned := range []bool{false, true} {
+						pipelineMD, riskLine, _ := (&PRStep{}).buildPipelineSections(sctx, provider, owned, false)
+						if !strings.Contains(pipelineMD, "original concern is not certified as repaired") || !strings.Contains(riskLine, "original concern is not certified as repaired") || strings.Contains(pipelineMD+riskLine, privateSentinel) || strings.Contains(pipelineMD+riskLine, "Accept diagnostic intermediate only") {
+							t.Fatalf("later=%v provider=%s owned=%v: inaccurate public scope:\n%s\nRisk: %s", laterRun, provider, owned, pipelineMD, riskLine)
+						}
+						if laterRun && (!strings.Contains(pipelineMD, "earlier run "+firstRunID) || !strings.Contains(riskLine, "earlier run "+firstRunID) || !strings.Contains(riskLine, "not certification of the current head") || !strings.Contains(riskLine, "current follow-up risk") || strings.Contains(riskLine, "independent residual risk") || strings.Contains(pipelineMD, "✅ No issues found.")) {
+							t.Fatalf("historical decision became current certification:\n%s\nRisk: %s", pipelineMD, riskLine)
+						}
+					}
+				}
+			}
+			content, err := (&PRStep{}).buildPRContentWithPolicy(sctx, "feature", "main", base, base, scm.ProviderGitHub, githubPullRequestBodyHardLimitChars)
+			if (err == nil) != approved {
+				t.Fatalf("later=%v approved=%v: publication guard: %v", laterRun, approved, err)
+			}
+			if approved && (strings.Contains(content.Body, privateSentinel) || strings.Contains(content.Body, "Accept diagnostic intermediate only") || !strings.Contains(content.Body, "user-selected repair scope recorded")) {
+				t.Fatalf("unsafe public body: %s", content.Body)
+			}
 		}
 	}
-
-	t.Logf("Synthetic publication evidence at %s:\n%s\nRisk: %s", run.HeadSHA, md, risk)
 }
 
 func TestReviewScopeRequiresRecordedSelectedUserInstructions(t *testing.T) {
 	selected := `["repair"]`
+	unselected := `["other"]`
+	invalid := `invalid`
 	user := db.RoundSelectionSourceUser
 	auto := db.RoundSelectionSourceAutoFix
 	declined := db.RoundSelectionSourceUserDeclined
@@ -296,6 +345,8 @@ func TestReviewScopeRequiresRecordedSelectedUserInstructions(t *testing.T) {
 		{"declined is not selected approval", &declined, &selected, 0},
 		{"no decision", nil, &selected, 0},
 		{"missing selection", &user, nil, 0},
+		{"unselected instructions", &user, &unselected, 0},
+		{"invalid selection", &user, &invalid, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			got := reviewScopeDecisions([]*db.StepRound{{Round: 1, SelectionSource: tc.source, SelectedFindingIDs: tc.ids, UserFindingsJSON: &payload}})

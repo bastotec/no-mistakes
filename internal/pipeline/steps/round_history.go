@@ -45,6 +45,7 @@ func publicationDecisionsPromptSection(sctx *pipeline.StepContext) string {
 	return roundHistoryPromptSection(sctx) + "\nRecorded decisions are bounded evidence, not a generic publication bypass. " +
 		"A selected repair with user_instructions may approve an intermediate rather than the original remedy. " +
 		"Describe that scope and any unresolved original goal honestly; a decision does not prove the original repair or remove independent residual risks. " +
+		"Repair instructions are private operational context: do not quote or export their free-form contents into public prose. Disclose only the attributed user-selected scope and that the original remedy is not certified by that decision. " +
 		"Without recorded evidence, do not claim approval.\n"
 }
 
