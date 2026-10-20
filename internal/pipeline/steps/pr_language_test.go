@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"html"
 	"strings"
 	"testing"
 
@@ -22,6 +23,8 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 		t.Run(original, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			const translated = "Add CSV export. The approval scope is: \"For review only; do not deploy to production.\""
+			const findingSource = "The criterion \"Aprovação apenas para revisão\" was broadened by `deploy --production` in `export.go`."
+			const findingEnglish = "The criterion \"Approval for review only\" was broadened by `deploy --production` in `export.go`."
 			private := "PRIVATE_REPAIR_SENTINEL_DO_NOT_PUBLISH"
 			ag := &mockAgent{name: "test", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				if strings.Contains(opts.Prompt, private) {
@@ -30,6 +33,28 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 				payload, _ := json.Marshal(map[string]any{"title": "feat: add CSV export", "body": "## What Changed\n\n- Add CSV export for review only; no production deployment.", "public_intent": translated, "unsupported_rules": []string{}})
 				return &agent.Result{Output: payload}, nil
 			}}
+			ag.translationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				if strings.Contains(opts.Prompt, private) {
+					t.Fatal("private repair guidance reached publication translator")
+				}
+				raw := strings.SplitN(opts.Prompt, prProseInputPrefix, 2)
+				var sources []string
+				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &sources) != nil {
+					t.Fatal("missing publication prose")
+				}
+				found := false
+				for i, source := range sources {
+					if source == findingSource {
+						sources[i] = findingEnglish
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("review round quotation not supplied for translation")
+				}
+				payload, _ := json.Marshal(map[string]any{"translations": sources})
+				return &agent.Result{Output: payload}, nil
+			}
 			var validated int
 			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				raw := strings.SplitN(opts.Prompt, "Run-written PR content JSON:\n", 2)
@@ -62,18 +87,30 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 				t.Fatal(err)
 			}
 			// Private repair guidance is durable, but not public authoring input.
+			const cleanFindings = `{"summary":"review complete","items":[],"risk_level":"low","risk_rationale":"Review only.","review_effort":"medium","review_effort_reason":"small change"}`
 			sr, err := sctx.DB.InsertStepResult(sctx.Run.ID, "review")
 			if err != nil {
 				t.Fatal(err)
 			}
-			findings := `{"summary":"review","items":[{"id":"scope","severity":"warning","description":"Review only; deployment remains unapproved.","action":"ask-user"}]}`
+			if err := sctx.DB.SetStepFindings(sr.ID, cleanFindings); err != nil {
+				t.Fatal(err)
+			}
+			if err := sctx.DB.CompleteStep(sr.ID, 0, 0, ""); err != nil {
+				t.Fatal(err)
+			}
+			findingPayload, _ := json.Marshal(map[string]any{"summary": "review", "items": []any{map[string]any{"id": "scope", "severity": "warning", "description": findingSource, "action": "ask-user"}}})
+			findings := string(findingPayload)
 			round, err := sctx.DB.InsertStepRound(sr.ID, 1, "initial", &findings, nil, 0)
 			if err != nil {
 				t.Fatal(err)
 			}
-			selection := `[]`
+			selection := `["scope"]`
 			privateGuidance := `[{"id":"scope","user_instructions":"` + private + `"}]`
-			if err := sctx.DB.SetStepRoundUserDecision(round.ID, &selection, db.RoundSelectionSourceUserDeclined, &privateGuidance); err != nil {
+			if err := sctx.DB.SetStepRoundUserDecision(round.ID, &selection, db.RoundSelectionSourceUser, &privateGuidance); err != nil {
+				t.Fatal(err)
+			}
+			clean, fixed := cleanFindings, changesAppliedSummary
+			if _, err := sctx.DB.InsertStepRound(sr.ID, 2, "auto_fix", &clean, &fixed, 0); err != nil {
 				t.Fatal(err)
 			}
 			before, err := sctx.DB.GetRun(sctx.Run.ID)
@@ -84,15 +121,25 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 			if err != nil {
 				t.Fatal(err)
 			}
+			beforeSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			attestation := buildPipelineAttestation(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, head)
 			beforeJSON, _ := json.Marshal(before)
+			beforeStepsJSON, _ := json.Marshal(beforeSteps)
 			beforeRoundsJSON, _ := json.Marshal(beforeRounds)
 			for _, limit := range []int{0, 4000} {
 				content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, limit)
 				if err != nil {
 					t.Fatal(err)
 				}
-				if strings.Contains(content.Body, original) || strings.Contains(content.Body, private) {
+				publicBody := html.UnescapeString(content.Body)
+				if strings.Contains(publicBody, original) || strings.Contains(publicBody, private) || strings.Contains(publicBody, findingSource) {
 					t.Fatal("private source published")
+				}
+				if !strings.Contains(publicBody, findingEnglish) || !strings.Contains(publicBody, "Fixed in round 2") || !strings.Contains(content.Body, attestation) {
+					t.Fatal("publication lost translated history, fix status, or unchanged attestation")
 				}
 			}
 			if validated != 2 || sctx.UserIntent != original {
@@ -100,9 +147,11 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 			}
 			after, _ := sctx.DB.GetRun(sctx.Run.ID)
 			afterRounds, _ := sctx.DB.GetRoundsByStep(sr.ID)
+			afterSteps, _ := sctx.DB.GetStepsByRun(sctx.Run.ID)
 			afterJSON, _ := json.Marshal(after)
+			afterStepsJSON, _ := json.Marshal(afterSteps)
 			afterRoundsJSON, _ := json.Marshal(afterRounds)
-			if string(beforeJSON) != string(afterJSON) || string(beforeRoundsJSON) != string(afterRoundsJSON) {
+			if string(beforeJSON) != string(afterJSON) || string(beforeRoundsJSON) != string(afterRoundsJSON) || string(beforeStepsJSON) != string(afterStepsJSON) {
 				t.Fatal("publication changed persisted source or approval evidence")
 			}
 		})
@@ -111,21 +160,31 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 
 func TestPRWriterPublicProjectionStillRequiresEnglishAndScopeValidation(t *testing.T) {
 	for _, tc := range []struct {
-		name, projection      string
-		suppressed, wantError bool
+		name, projection, narrative string
+		suppressed, wantError       bool
 	}{
 		{name: "missing projection", wantError: true},
 		{name: "untranslated quotation", projection: `The requested scope is "Aprovação apenas para revisão".`, wantError: true},
 		{name: "invented approval", projection: "Approved for production deployment.", wantError: true},
 		{name: "suppressed despite writer output", projection: "PRIVATE_PROJECTION_SENTINEL", suppressed: true},
+		{name: "suppressed intent still constrains narrative scope", projection: "PRIVATE_PROJECTION_SENTINEL", narrative: "Approved for production deployment.", suppressed: true, wantError: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
 			ag := &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-				payload, _ := json.Marshal(map[string]any{"title": "feat: add export", "body": "## What Changed\n\n- Add export for review.", "public_intent": tc.projection, "unsupported_rules": []string{}})
+				narrative := tc.narrative
+				if narrative == "" {
+					narrative = "Add export for review."
+				}
+				payload, _ := json.Marshal(map[string]any{"title": "feat: add export", "body": "## What Changed\n\n- " + narrative, "public_intent": tc.projection, "unsupported_rules": []string{}})
 				return &agent.Result{Output: payload}, nil
 			}}
 			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				reference := strings.SplitN(opts.Prompt, "Source intent JSON string (reference only):\n", 2)
+				var source string
+				if len(reference) != 2 || json.Unmarshal([]byte(strings.SplitN(reference[1], "\n\n", 2)[0]), &source) != nil || source != "Adicionar exportação CSV. Aprovação apenas para revisão." {
+					t.Fatal("validator lost private approval-scope reference")
+				}
 				raw := strings.SplitN(opts.Prompt, "Run-written PR content JSON:\n", 2)
 				if len(raw) != 2 {
 					t.Fatal("missing final content")
@@ -157,6 +216,28 @@ func TestPRWriterPublicProjectionStillRequiresEnglishAndScopeValidation(t *testi
 			_, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
 			if (err != nil) != tc.wantError {
 				t.Fatalf("error=%v, wantError=%v", err, tc.wantError)
+			}
+		})
+	}
+}
+
+func TestPRWriterRejectsIncompleteRoundTranslation(t *testing.T) {
+	for _, payload := range []string{`{}`, `{"translations":[]}`, `{"translations":[""]}`, `{"translations":["Review only.","extra"]}`, `not JSON`} {
+		t.Run(payload, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			ag := &mockAgent{name: "test", translationFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+				return &agent.Result{Output: []byte(payload)}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			const findings = `{"items":[{"id":"scope","severity":"warning","description":"Aprovação apenas para revisão","action":"ask-user"}]}`
+			sr := insertCompletedStep(t, sctx, "review", findings, "")
+			_, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
+			if err == nil || !strings.Contains(err.Error(), "PR publication prose") {
+				t.Fatalf("incomplete translation was not refused: %v", err)
+			}
+			stored, err := sctx.DB.GetStepResult(sr.ID)
+			if err != nil || stored.FindingsJSON == nil || *stored.FindingsJSON != findings {
+				t.Fatalf("translation changed recorded findings: %v", err)
 			}
 		})
 	}

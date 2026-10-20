@@ -162,6 +162,15 @@ func (a Action) withPromptDefaults(prompt string) Action {
 			structured["public_intent"] = text
 		}
 	}
+	const prosePrefix = "PR publication prose JSON:\n"
+	if _, raw, ok := strings.Cut(prompt, prosePrefix); ok {
+		if _, exists := structured["translations"]; !exists {
+			var sources []string
+			if json.Unmarshal([]byte(raw), &sources) == nil {
+				structured["translations"] = sources
+			}
+		}
+	}
 	const digestPrefix = "- content_sha256: "
 	if start := strings.Index(prompt, digestPrefix); start >= 0 {
 		digest := strings.TrimSpace(strings.SplitN(prompt[start+len(digestPrefix):], "\n", 2)[0])

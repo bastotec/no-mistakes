@@ -39,7 +39,10 @@ func TestPRStep_PreviewTransitionDraftsNarrativeWithoutDiscardedUploads(t *testi
 			if err := s.DB.RecordTestPreviewValidation(s.Run.ID, s.Run.HeadSHA); err != nil {
 				t.Fatal(err)
 			}
-			summary, _, _ := (&PRStep{}).buildPipelineSections(s, scm.ProviderGitHub, false, false)
+			summary, _, _, err := (&PRStep{}).buildPipelineSections(s, scm.ProviderGitHub, false, false, false)
+			if err != nil {
+				t.Fatal(err)
+			}
 			preview, err := composeOwnedPRContent(prOwnedBody{}, "PR validation preview", testPreviewMarker(s.Run.ID)+"\n\nTest is still pending.\n\n"+summary, scm.MaxPRBodyChars(scm.ProviderGitHub))
 			if err != nil {
 				t.Fatal(err)

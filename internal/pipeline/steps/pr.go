@@ -613,7 +613,10 @@ func redactPublicationText(text string) string {
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
-	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
+	pipelineMD, riskLine, testingMD, err := s.buildPipelineSection(sctx, provider)
+	if err != nil {
+		return prContent{}, err
+	}
 	content, err := s.draftPRNarrative(sctx, branch, baseBranch, baseSHA, policySHA, bodyLimit)
 	if err != nil {
 		return prContent{}, err
@@ -789,15 +792,15 @@ func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
 // produces the deterministic pipeline, risk, and testing sections. These are
 // scoped to this run's own steps and rounds, so they already describe only
 // the final terminal state each step reached in this run.
-func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.Provider) (pipelineMD, riskLine, testingMD string) {
-	return s.buildPipelineSections(sctx, provider, false, true)
+func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.Provider) (pipelineMD, riskLine, testingMD string, err error) {
+	return s.buildPipelineSections(sctx, provider, false, true, true)
 }
 
-func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting bool) (pipelineMD, riskLine, testingMD string) {
+func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting, projectProse bool) (pipelineMD, riskLine, testingMD string, err error) {
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
 		slog.Warn("failed to query step results for pipeline summary", "error", err)
-		return "", "", ""
+		return "", "", "", nil
 	}
 
 	rounds := make(map[string][]*db.StepRound, len(steps))
@@ -808,6 +811,11 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 			continue
 		}
 		rounds[sr.ID] = r
+	}
+	if projectProse {
+		if err := translatePRRenderProse(sctx, steps, rounds); err != nil {
+			return "", "", "", err
+		}
 	}
 
 	policy := pipelineAttestationPolicy{}
@@ -824,7 +832,7 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 	if includeTesting {
 		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
 	}
-	return pipelineMD, riskLine, testingMD
+	return pipelineMD, riskLine, testingMD, nil
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a

@@ -170,7 +170,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	if !runWroteNarrative {
 		formatRule = "- format_compliant covers only prose this run wrote: the content below is only this run's title (empty when it wrote none) and its machine-generated no-mistakes evidence appendix, so there is no run-written body prose for a repository body-format rule to govern. Do not report prose-only or ambiguous body-format rules as issues; judge only English and fabrication in the run-written text."
 	}
-	sourceIntentJSON, _ := json.Marshal(publicPRIntent(sctx))
+	sourceIntentJSON, _ := json.Marshal(cleanedUserIntent(sctx))
 	prompt := fmt.Sprintf(`Validate the pull-request title and body written by this run, below, before publication. Text owned by the pull request's author is preserved separately and is out of scope.
 %s
 The SHA-256 binds your verdict to the exact title and body below. Return it unchanged.

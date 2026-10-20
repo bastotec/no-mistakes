@@ -28,10 +28,11 @@ import (
 var testGitExecutable, testGitErr = testgit.RealGit()
 
 type mockAgent struct {
-	name         string
-	runFn        func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
-	validationFn func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
-	calls        []agent.RunOpts
+	name          string
+	runFn         func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
+	validationFn  func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
+	translationFn func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error)
+	calls         []agent.RunOpts
 }
 
 func (m *mockAgent) Name() string { return m.name }
@@ -87,6 +88,21 @@ func addTestPublicIntent(result *agent.Result, opts agent.RunOpts) *agent.Result
 }
 
 func (m *mockAgent) Run(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+	if opts.Purpose == prProseTranslationPurpose {
+		if m.translationFn != nil {
+			return m.translationFn(ctx, opts)
+		}
+		raw := strings.SplitN(opts.Prompt, prProseInputPrefix, 2)
+		var sources []string
+		if len(raw) != 2 {
+			return nil, fmt.Errorf("missing PR publication prose")
+		}
+		if err := json.Unmarshal([]byte(raw[1]), &sources); err != nil {
+			return nil, err
+		}
+		payload, err := json.Marshal(map[string]any{"translations": sources})
+		return &agent.Result{Output: payload}, err
+	}
 	if opts.Purpose == prContentValidationPurpose {
 		if m.validationFn != nil {
 			return m.validationFn(ctx, opts)
