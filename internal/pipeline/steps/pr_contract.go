@@ -9,6 +9,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 )
 
 const prContentValidationPurpose = "pr-content-validation"
@@ -45,15 +46,17 @@ var prContentValidationSchema = json.RawMessage(`{
   "content_sha256":{"type":"string","pattern":"^[0-9a-f]{64}$"},
   "english":{"type":"boolean"},
   "format_compliant":{"type":"boolean"},
+  "risk_disposition_mismatch":{"type":"boolean"},
   "issues":{"type":"array","items":{"type":"string"}}
- },"required":["content_sha256","english","format_compliant","issues"]
+ },"required":["content_sha256","english","format_compliant","risk_disposition_mismatch","issues"]
 }`)
 
 type prContentValidation struct {
-	ContentSHA256   string   `json:"content_sha256"`
-	English         bool     `json:"english"`
-	FormatCompliant bool     `json:"format_compliant"`
-	Issues          []string `json:"issues"`
+	ContentSHA256           string   `json:"content_sha256"`
+	English                 bool     `json:"english"`
+	FormatCompliant         bool     `json:"format_compliant"`
+	RiskDispositionMismatch bool     `json:"risk_disposition_mismatch"`
+	Issues                  []string `json:"issues"`
 }
 
 func defaultSectionsWithoutIntent(body string, sctx *pipeline.StepContext) string {
@@ -149,6 +152,10 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 	contentJSON, _ := json.Marshal(runWritten)
 	templateJSON, _ := json.Marshal(template)
 	requiredHeadingsJSON, _ := json.Marshal(requiredHeadings)
+	dispositions, repaired, err := recordedPRDispositions(sctx)
+	if err != nil {
+		return fmt.Errorf("read recorded dispositions before publication guard: %w", err)
+	}
 	skill := prCreationSkillHeader + prCreationSkillEnglishClauses
 	switch {
 	case template != "":
@@ -172,7 +179,11 @@ The SHA-256 binds your verdict to the exact title and body below. Return it unch
 - An empty title below means this run wrote no title; there is nothing to judge there.
 - The Pipeline section is generated round-by-round history, not a set of current claims. A finding listed before a later fix round, or after a "Fixed in round N" status, quotes what a reviewer reported before that fix. Never report such a quote as contradicting the fix, the final step status, or another section.
 %s
+- risk_disposition_mismatch is true only when current risk prose contradicts the recorded review dispositions supplied below. Historical quoted findings are not current claims. A fixed-without-rereview disposition is not a clean rereview or independent revalidation; remaining notes must stay visible.
 - List every concrete violation in issues. Do not edit or translate the content.
+
+Recorded review dispositions JSON (authoritative):
+%s
 
 Committed template JSON string:
 %s
@@ -181,7 +192,7 @@ required_heading_translations_json:
 %s
 
 Run-written PR content JSON:
-%s`, skill, baseSHA, digest, formatRule, templateJSON, requiredHeadingsJSON, contentJSON)
+%s`, skill, baseSHA, digest, formatRule, dispositions, templateJSON, requiredHeadingsJSON, contentJSON)
 	prompt += publicationDecisionsPromptSection(sctx)
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -200,12 +211,18 @@ Run-written PR content JSON:
 	if validation.ContentSHA256 != digest {
 		return fmt.Errorf("validator verdict does not bind the final PR content")
 	}
-	if !validation.English || (runWroteNarrative && !validation.FormatCompliant) || len(validation.Issues) != 0 {
+	if !validation.English || (runWroteNarrative && !validation.FormatCompliant) || validation.RiskDispositionMismatch || len(validation.Issues) != 0 {
 		detail := strings.Join(validation.Issues, "; ")
 		if detail == "" {
 			detail = "English or repository-format compliance was not proven"
 		}
-		return fmt.Errorf("refusing non-compliant PR publication: %s", detail)
+		refusal := fmt.Errorf("refusing non-compliant PR publication: %s", detail)
+		if s.recovery == nil && repaired && validation.RiskDispositionMismatch && len(validation.Issues) > 0 && sctx.DB != nil {
+			if err := sctx.DB.RecordPublicationRefusal(sctx.Run.ID, sctx.Run.HeadSHA, safeurl.RedactText(refusal.Error())); err != nil {
+				return fmt.Errorf("record publication refusal: %w", err)
+			}
+		}
+		return refusal
 	}
 	return nil
 }
