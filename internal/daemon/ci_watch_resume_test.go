@@ -123,9 +123,19 @@ func TestCIWatchSurvivesDaemonRestartWithRealCIStep(t *testing.T) {
 	if err := os.WriteFile(p.ConfigFile(), []byte("agent: claude\npush_quiet_window: \"0s\"\nagent_path_override:\n  claude: "+mockClaude+"\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	repo, headSHA := setupTestGitRepo(t, p, d, "ci-watch-restart")
 	ghDir := t.TempDir()
 	stateFile := filepath.Join(ghDir, "state")
 	ghLog := filepath.Join(ghDir, "gh.log")
+	headFile := filepath.Join(ghDir, "head")
+	if err := os.WriteFile(headFile, []byte(headSHA), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(stateFile, []byte("OPEN"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +143,9 @@ func TestCIWatchSurvivesDaemonRestartWithRealCIStep(t *testing.T) {
 printf '%s\n' "$*" >>` + shellQuoteForTest(ghLog) + `
 case "$*" in
   "auth status"*) exit 0 ;;
+  "pr view 42 "*headRefOid*) cat ` + shellQuoteForTest(headFile) + `; exit 0 ;;
+  "pr view 42 "*mergeable*) printf '%s\n' MERGEABLE; exit 0 ;;
+  "api "*actions/runs*) printf '%s\n' '[{"total_count":0,"workflow_runs":[]}]'; exit 0 ;;
   "api "*graphql*) printf '%s\n' '{"data":{"repository":{"object":{"statusCheckRollup":{"contexts":{"nodes":[{"__typename":"CheckRun","databaseId":1,"name":"build","status":"IN_PROGRESS","conclusion":"","startedAt":"2026-10-20T00:00:00Z"}],"pageInfo":{"hasNextPage":false}}}}}}}'; exit 0 ;;
   "pr view 42 "*) cat ` + shellQuoteForTest(stateFile) + `; exit 0 ;;
 esac
@@ -143,12 +156,6 @@ exit 1
 	}
 	t.Setenv("PATH", ghDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 
-	d, err := db.Open(p.DB())
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer d.Close()
-	repo, headSHA := setupTestGitRepo(t, p, d, "ci-watch-restart")
 	run, err := d.InsertRun(repo.ID, "feature", headSHA, headSHA)
 	if err != nil {
 		t.Fatal(err)
@@ -195,15 +202,26 @@ exit 1
 			}
 		}
 	}
-	waitForChecksPoll := func() {
+	// waitForWatching waits for several successful checks polls: each poll
+	// reads the checks, and none of them may have failed to read.
+	waitForWatching := func() {
 		t.Helper()
+		before, _ := os.ReadFile(ghLog)
+		logBefore, _ := os.ReadFile(filepath.Join(p.RunLogDir(run.ID), "ci.log"))
 		deadline := time.Now().Add(15 * time.Second)
 		for time.Now().Before(deadline) {
-			before, _ := os.ReadFile(ghLog)
-			time.Sleep(300 * time.Millisecond)
-			if data, _ := os.ReadFile(ghLog); len(data) > len(before) && strings.Contains(string(data[len(before):]), "graphql") {
+			data, _ := os.ReadFile(ghLog)
+			if strings.Count(string(data[len(before):]), "graphql") >= 3 {
+				stepLog, _ := os.ReadFile(filepath.Join(p.RunLogDir(run.ID), "ci.log"))
+				if len(stepLog) >= len(logBefore) && strings.Contains(string(stepLog[len(logBefore):]), "could not check") {
+					t.Fatalf("CI step could not read its checks:\n%s", stepLog)
+				}
+				if sr, err := d.GetStepResult(ci.ID); err != nil || sr.Status != types.StepStatusRunning {
+					t.Fatalf("CI step is not watching: %v (%v)", sr, err)
+				}
 				return
 			}
+			time.Sleep(50 * time.Millisecond)
 		}
 		data, _ := os.ReadFile(ghLog)
 		stepLog, _ := os.ReadFile(filepath.Join(p.RunLogDir(run.ID), "ci.log"))
@@ -211,7 +229,7 @@ exit 1
 	}
 
 	stop := startDaemon()
-	waitForChecksPoll()
+	waitForWatching()
 	stop()
 	cut, err := d.GetRun(run.ID)
 	if err != nil {
@@ -223,7 +241,7 @@ exit 1
 
 	stop = startDaemon()
 	defer stop()
-	waitForChecksPoll()
+	waitForWatching()
 	if err := os.WriteFile(stateFile, []byte("MERGED"), 0o644); err != nil {
 		t.Fatal(err)
 	}

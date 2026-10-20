@@ -531,6 +531,11 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 		findings = *sr.FindingsJSON
 	}
 	settled, reconcileErr := e.reconcileApprovalGate(ctx, step, sctx, findings)
+	if ctx.Err() != nil {
+		// A shutdown during reconciliation leaves the watch running for the
+		// next daemon, exactly as a shutdown during the watch itself does.
+		return e.failRun(run, repo, context.Cause(ctx), ctx)
+	}
 	if reconcileErr != nil && errors.Is(reconcileErr, ErrFatalGateReconciliation) {
 		duration := recoveredStepDuration(sr)
 		if dbErr := e.db.FailStep(sr.ID, reconcileErr.Error(), duration); dbErr != nil {
@@ -540,7 +545,11 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 		return e.failRun(run, repo, fmt.Errorf("step %s: reconcile resumed ci watch: %w", step.Name(), reconcileErr), ctx)
 	}
 	if reconcileErr != nil {
-		slog.Warn("could not settle resumed ci watch from PR state; watching again", "run_id", run.ID, "error", reconcileErr)
+		// Reading the PR's state is the proof the forge is reachable. Without
+		// it the watch cannot resume, so it ends the way an unresumed watch
+		// ends rather than failing or parking on unreadable checks.
+		slog.Warn("resumed ci watch cannot read its PR; ending it as interrupted", "run_id", run.ID, "error", reconcileErr)
+		return e.interruptCIWatch(run, repo, sr.ID)
 	}
 	if settled {
 		duration := recoveredStepDuration(sr)
@@ -559,14 +568,15 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 	if err != nil {
 		return e.failRun(run, repo, err, ctx)
 	}
-	// A resumed watch that could not watch (provider unavailable, credentials
-	// gone) must not read as a finished run: that would complete it and reclaim
-	// its worktree. End it the way an unresumed watch ends.
+	// A resumed watch the CI step skipped on its own (provider unavailable,
+	// credentials gone) must not read as a finished run: that would complete
+	// it and reclaim its worktree. End it the way an unresumed watch ends. An
+	// operator's skip records no skip reason and stands as recorded.
 	after, err := e.db.GetStepResult(sr.ID)
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("read resumed ci step: %w", err), ctx)
 	}
-	if after != nil && after.Status == types.StepStatusSkipped {
+	if after != nil && after.Status == types.StepStatusSkipped && after.SkipReason != nil && *after.SkipReason != "" {
 		return e.interruptCIWatch(run, repo, sr.ID)
 	}
 	if skipRemaining {

@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -86,16 +87,21 @@ func TestRecoverableCIWatch(t *testing.T) {
 	}
 }
 
-// settlingCIStep is a CI step whose PR is already merged or closed: its gate
-// reconciliation settles the watch, so Execute must never run.
-type settlingCIStep struct{ executed bool }
+// reconcilingCIStep is a CI step whose PR-state read is scripted by
+// reconcile; settled reports a merged or closed PR.
+type reconcilingCIStep struct {
+	reconcile func(*StepContext) (bool, error)
+	executed  bool
+}
 
-func (s *settlingCIStep) Name() types.StepName { return types.StepCI }
-func (s *settlingCIStep) Execute(*StepContext) (*StepOutcome, error) {
+func (s *reconcilingCIStep) Name() types.StepName { return types.StepCI }
+func (s *reconcilingCIStep) Execute(*StepContext) (*StepOutcome, error) {
 	s.executed = true
 	return &StepOutcome{}, nil
 }
-func (s *settlingCIStep) ReconcileApprovalGate(*StepContext) (bool, error) { return true, nil }
+func (s *reconcilingCIStep) ReconcileApprovalGate(sctx *StepContext) (bool, error) {
+	return s.reconcile(sctx)
+}
 
 func setupCIWatch(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo) {
 	t.Helper()
@@ -156,7 +162,7 @@ func TestResumeCIWatch_SkippedWatchEndsInterrupted(t *testing.T) {
 // is already done.
 func TestResumeCIWatch_SettledPRCompletesWithoutWatching(t *testing.T) {
 	database, p, run, repo := setupCIWatch(t)
-	ci := &settlingCIStep{}
+	ci := &reconcilingCIStep{reconcile: func(*StepContext) (bool, error) { return true, nil }}
 	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
 	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
 		t.Fatal(err)
@@ -173,5 +179,67 @@ func TestResumeCIWatch_SettledPRCompletesWithoutWatching(t *testing.T) {
 	}
 	if sr := stepResultByName(t, database, run.ID, types.StepCI); sr.Status != types.StepStatusCompleted {
 		t.Fatalf("ci step = %s, want completed", sr.Status)
+	}
+}
+
+// A resumed watch that cannot read its PR (credentials expired, forge
+// unreachable) ends as ci_monitor_interrupted before it starts watching,
+// instead of failing on an --existing-pr re-validation or parking on
+// unreadable checks.
+func TestResumeCIWatch_UnreadablePREndsInterrupted(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	ci := &reconcilingCIStep{reconcile: func(*StepContext) (bool, error) {
+		return false, errors.New("gh auth status: not logged in")
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
+	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if ci.executed {
+		t.Fatal("the watch started without reading its PR")
+	}
+	if got, err := database.GetRun(run.ID); err != nil || got.Status != types.RunCIMonitorInterrupted {
+		t.Fatalf("run = %v (%v), want %s", got.Status, err, types.RunCIMonitorInterrupted)
+	}
+}
+
+// An operator's skip of a resumed watch is a decision, not an interruption,
+// and stands as recorded.
+func TestResumeCIWatch_OperatorSkipStands(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{Skipped: true}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
+	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := database.GetRun(run.ID); err != nil || got.Status != types.RunCompleted {
+		t.Fatalf("run = %v (%v), want completed", got.Status, err)
+	}
+	if sr := stepResultByName(t, database, run.ID, types.StepCI); sr.Status != types.StepStatusSkipped {
+		t.Fatalf("ci step = %s, want skipped", sr.Status)
+	}
+}
+
+// A shutdown while the resumed watch is still reading its PR leaves the watch
+// running for the next daemon, even when the cut-off read reports as fatal.
+func TestResumeCIWatch_ShutdownDuringReconcileKeepsWatch(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	ci := &reconcilingCIStep{reconcile: func(*StepContext) (bool, error) {
+		cancel(ErrDaemonShutdown)
+		return false, fmt.Errorf("%w: read head: context canceled", ErrFatalGateReconciliation)
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
+	if err := exec.ResumeCIWatch(ctx, run, repo, t.TempDir()); !errors.Is(err, ErrDaemonShutdown) {
+		t.Fatalf("ResumeCIWatch() = %v, want ErrDaemonShutdown", err)
+	}
+	if got, err := database.GetRun(run.ID); err != nil || got.Status != types.RunRunning {
+		t.Fatalf("run = %v (%v), want running", got.Status, err)
+	}
+	if sr := stepResultByName(t, database, run.ID, types.StepCI); sr.Status != types.StepStatusRunning {
+		t.Fatalf("ci step = %s, want running", sr.Status)
 	}
 }
