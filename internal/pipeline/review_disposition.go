@@ -17,12 +17,27 @@ func appendReviewDispositionMetadata(f *types.Findings, unresolved []types.Findi
 			f.RiskLevel = level
 		}
 	}
-	appendReason := func(reason string) {
-		if f.RiskRationale != "" {
-			f.RiskRationale += "; "
+	// The latest rereview's own rationale describes only what it found
+	// itself. Bare beside carried findings, a clean one ("no actionable
+	// finding survived verification") contradicts them, so the disposition
+	// leads and that assessment follows, scoped to the rereview.
+	current := strings.TrimSpace(f.RiskRationale)
+	var reasons []string
+	appendReason := func(reason string) { reasons = append(reasons, reason) }
+	defer func() {
+		if len(reasons) == 0 {
+			return
 		}
-		f.RiskRationale += reason
-	}
+		rationale := strings.Join(reasons, "; ")
+		switch {
+		case current == "":
+		case isCleanRereviewRationale(current):
+			rationale += "; the latest rereview raised no new actionable finding"
+		default:
+			rationale += "; the latest rereview: " + current
+		}
+		f.RiskRationale = rationale
+	}()
 	if len(unresolved) > 0 {
 		f.Summary = strings.TrimSpace(f.Summary + fmt.Sprintf(" Carried review findings still unresolved (not fixed): %d.", len(unresolved)))
 		for _, item := range unresolved {
@@ -51,4 +66,10 @@ func appendReviewDispositionMetadata(f *types.Findings, unresolved []types.Findi
 		f.RiskLevel = "low"
 	}
 	f.RiskScope = types.FindingsRiskScopeSourceOrExternal
+}
+
+// isCleanRereviewRationale reports a rereview rationale that says it found
+// nothing actionable, as the multi-angle review writes it.
+func isCleanRereviewRationale(rationale string) bool {
+	return strings.EqualFold(strings.TrimSpace(rationale), types.NoActionableFindingRationale)
 }

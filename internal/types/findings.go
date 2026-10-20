@@ -81,6 +81,10 @@ const (
 	FindingsRiskScopePipelineOwnedDelivery = "pipeline-owned-delivery"
 )
 
+// NoActionableFindingRationale is the risk rationale a review writes when it
+// found nothing actionable itself; carried findings are added beside it.
+const NoActionableFindingRationale = "no actionable finding survived verification"
+
 // Finding category constants for the combined document+lint housekeeping
 // pass. An empty Category on a housekeeping finding is treated as
 // documentation (the stricter gate).

@@ -492,7 +492,7 @@ func verifiedRisk(f *Findings) {
 	f.RiskLevel = riskByRank[level]
 	f.RiskScope = types.FindingsRiskScopeSourceOrExternal
 	if level == 0 {
-		f.RiskRationale = "no actionable finding survived verification"
+		f.RiskRationale = types.NoActionableFindingRationale
 		return
 	}
 	f.RiskRationale = fmt.Sprintf("a verified %s finding remains: %s", worst.Severity, truncateRunes(firstLine(worst.Description), 160))
