@@ -2,6 +2,7 @@ package steps
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -29,7 +30,16 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, c
 	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "fixture"}
-	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx := newTestContext(t, ag, dir, base, head, config.Commands{})
+	var err error
+	sctx.Repo, err = sctx.DB.InsertRepo(dir, sctx.Repo.UpstreamURL, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sctx.Run, err = sctx.DB.InsertRun(sctx.Repo.ID, "feature", head, base)
+	if err != nil {
+		t.Fatal(err)
+	}
 	sctx.Env, _ = fakeGH(t, "")
 	sctx.Config.Test.Evidence.AttachMedia = false
 	for _, fn := range configure {
@@ -84,7 +94,6 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, c
 	if err := sctx.DB.UpdateRunPublication(sctx.Run.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: branchsync.TargetFingerprint(resolvePushURL(sctx)), Ref: "refs/heads/feature"}); err != nil {
 		t.Fatal(err)
 	}
-	var err error
 	sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -211,11 +220,26 @@ func TestOrdinaryPublicationResumeRetainsPinsAndUsesCurrentPolicy(t *testing.T) 
 }
 
 func TestPublicationRecoveryInterruptedCreatePersistsSamePR(t *testing.T) {
-	sctx, _ := publicationRecoveryFixture(t)
+	for _, state := range []scm.PRState{scm.PRStateOpen, scm.PRStateClosed, scm.PRStateMerged} {
+		t.Run(string(state), func(t *testing.T) {
+			testPublicationRecoveryInterruptedCreate(t, state)
+		})
+	}
+}
+
+func testPublicationRecoveryInterruptedCreate(t *testing.T, lifecycle scm.PRState) {
+	t.Helper()
+	sctx, dir := publicationRecoveryFixture(t)
 	env, log := fakeGH(t, "")
 	state := filepath.Join(t.TempDir(), "forge-state.json")
 	body := filepath.Join(t.TempDir(), "pr-body.md")
-	sctx.Env = append(env, "FAKE_CLI_PUBLICATION_STATE="+state, "FAKE_CLI_PR_BODY_FILE="+body, "FAKE_CLI_PR_HEAD_SHA="+sctx.Run.HeadSHA, "FAKE_CLI_PR_CREATE_ERR=response interrupted")
+	sctx.Env = append(env, "FAKE_CLI_PUBLICATION_STATE="+state, "FAKE_CLI_PR_BODY_FILE="+body, "FAKE_CLI_PR_HEAD_SHA="+sctx.Run.HeadSHA, "FAKE_CLI_PR_CREATE_ERR=response interrupted", "FAKE_CLI_PR_STATE="+string(lifecycle))
+	originalRun := *sctx.Run
+	originalRefs := gitCmd(t, dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/")
+	originalPins, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, _, evidence, err := publicationEvidence(sctx)
 	if err != nil {
 		t.Fatal(err)
@@ -244,6 +268,19 @@ func TestPublicationRecoveryInterruptedCreatePersistsSamePR(t *testing.T) {
 		t.Fatal("existing PR retry invoked content validator")
 		return nil, nil
 	}
+	for _, fault := range []string{"FAKE_CLI_PR_STATE_ERR=state unavailable", "FAKE_CLI_PR_STATE=UNKNOWN"} {
+		env := sctx.Env
+		sctx.Env = append(append([]string(nil), env...), fault)
+		outcome, err := RecoverPublication(sctx)
+		sctx.Env = env
+		if err == nil || outcome != nil {
+			t.Fatalf("unreadable lifecycle reported success: fault=%s outcome=%+v error=%v", fault, outcome, err)
+		}
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil || sctx.Run.PRURL != nil || sctx.Run.PRState == nil || *sctx.Run.PRState != "none" || sctx.Run.PRStateObservedAt != nil {
+			t.Fatalf("unreadable lifecycle manufactured PR state: %+v %v", sctx.Run, err)
+		}
+	}
 	for attempt := 0; attempt < 2; attempt++ {
 		outcome, err := RecoverPublication(sctx)
 		if err != nil || outcome == nil || outcome.PRURL != "https://github.com/test/repo/pull/99" {
@@ -253,6 +290,29 @@ func TestPublicationRecoveryInterruptedCreatePersistsSamePR(t *testing.T) {
 		if err != nil || sctx.Run.PRURL == nil || *sctx.Run.PRURL != outcome.PRURL || sctx.Run.Status != types.RunFailed {
 			t.Fatalf("retry did not retain terminal run and PR association: %+v %v", sctx.Run, err)
 		}
+		if sctx.Run.PRState == nil || *sctx.Run.PRState != strings.ToLower(string(lifecycle)) {
+			t.Fatalf("retry did not persist actual provider lifecycle %s: %+v", lifecycle, sctx.Run)
+		}
+		if sctx.Run.Error == nil || *sctx.Run.Error != *originalRun.Error || sctx.Run.HeadSHA != originalRun.HeadSHA || sctx.Run.BaseSHA != originalRun.BaseSHA {
+			t.Fatalf("retry changed original validation verdict or heads: %+v", sctx.Run)
+		}
+		cached := (&branchsync.Service{DB: sctx.DB, Repo: sctx.Repo, WorkDir: dir}).InspectCached(sctx.Ctx)
+		if cached.Pipeline.RunID != sctx.Run.ID || cached.PRState != strings.ToLower(string(lifecycle)) {
+			t.Fatalf("branch sync lost recovered lifecycle: %+v", cached)
+		}
+		if lifecycle == scm.PRStateMerged && cached.Safety != "blocked_merged" {
+			t.Fatalf("branch sync did not retire merged publication: %+v", cached)
+		}
+		if lifecycle == scm.PRStateClosed && cached.Safety != "blocked_closed" {
+			t.Fatalf("branch sync did not retire closed publication: %+v", cached)
+		}
+	}
+	if got := gitCmd(t, dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"); got != originalRefs {
+		t.Fatalf("recovery changed source/target refs: before=%s after=%s", originalRefs, got)
+	}
+	afterPins, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+	if err != nil || afterPins == nil || afterPins.JSON != originalPins.JSON || afterPins.Refusal == nil || *afterPins.Refusal != *originalPins.Refusal {
+		t.Fatalf("retry changed original pins: %+v %v", afterPins, err)
 	}
 	data, err := os.ReadFile(log)
 	if err != nil {
@@ -276,18 +336,52 @@ func TestPublicationRecoveryInterruptedCreatePersistsSamePR(t *testing.T) {
 }
 
 func TestPublicationRecoveryExistingPRPersistenceFailureRefusesSuccess(t *testing.T) {
-	sctx, _ := publicationRecoveryFixture(t)
-	pins, err := ValidatePublicationRecoveryRecords(sctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := sctx.DB.Close(); err != nil {
-		t.Fatal(err)
-	}
-	pr := &scm.PR{URL: "https://github.com/test/repo/pull/99", HeadSHA: pins.HeadSHA, BaseBranch: pins.BaseBranch}
-	outcome, err := (&PRStep{recovery: pins}).recoveredExistingPR(sctx, pr)
-	if err == nil || !strings.Contains(err.Error(), "persist recovered PR URL") || outcome != nil {
-		t.Fatalf("persistence failure reported success: outcome=%+v error=%v", outcome, err)
+	for _, column := range []string{"pr_state", "pr_url"} {
+		t.Run(column, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "state.db")
+			database, err := db.Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { database.Close() })
+			repo, err := database.InsertRepo(t.TempDir(), "https://github.com/test/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunErrorStatus(run.ID, "original publication refusal", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			// Reject exactly one lifecycle/URL write, not earlier eligibility reads.
+			conn, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer conn.Close()
+			if _, err := conn.Exec("CREATE TRIGGER refuse_write BEFORE UPDATE OF " + column + " ON runs BEGIN SELECT RAISE(FAIL, 'write refused'); END"); err != nil {
+				t.Fatal(err)
+			}
+			sctx := &pipeline.StepContext{Ctx: context.Background(), DB: database, Run: run}
+			pr := &scm.PR{URL: "https://github.com/test/repo/pull/99", HeadSHA: "head", BaseBranch: "main"}
+			step := &PRStep{recovery: &publicationPins{HeadSHA: "head", BaseBranch: "main"}}
+			outcome, err := step.recoveredExistingPR(sctx, &recordingRetargetHost{state: scm.PRStateClosed}, pr)
+			if err == nil || !strings.Contains(err.Error(), "write refused") || outcome != nil {
+				t.Fatalf("persistence failure reported success: outcome=%+v error=%v", outcome, err)
+			}
+			stored, err := database.GetRun(run.ID)
+			if err != nil || stored.PRURL != nil || stored.Status != types.RunFailed || stored.Error == nil || *stored.Error != "original publication refusal" {
+				t.Fatalf("persistence failure changed original verdict or URL: %+v %v", stored, err)
+			}
+			if column == "pr_state" && (stored.PRState == nil || *stored.PRState != "none" || stored.PRStateObservedAt != nil) {
+				t.Fatalf("failed state write manufactured lifecycle: %v", stored.PRState)
+			}
+			if column == "pr_url" && (stored.PRState == nil || *stored.PRState != "closed") {
+				t.Fatalf("failed URL write lost actual lifecycle: %v", stored.PRState)
+			}
+		})
 	}
 }
 
