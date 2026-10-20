@@ -501,11 +501,21 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 	if err != nil {
 		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
 	}
-	step, sr := e.steps[index], results[index]
+	state, err := e.durableExecutionState(results[index].ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", e.steps[index].Name(), err), ctx)
+	}
+	return e.resumeWatch(ctx, run, repo, workDir, logDir, index, results[index], state)
+}
 
-	// The PR may have merged or closed while the daemon was down. Settle that
-	// first, the same way a parked CI gate is settled, so the watch does not
-	// start against a PR that is already done.
+// resumeWatch restarts a CI step that was watching its PR when the daemon
+// stopped. It reads the PR first: a merged or closed PR settles the step
+// without watching, and a PR it cannot read (expired credentials, unreachable
+// forge) ends the run as ci_monitor_interrupted instead of letting the step
+// skip, fail or park on unreadable checks. Once the watch is running again it
+// behaves exactly like an uninterrupted watch.
+func (e *Executor) resumeWatch(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, index int, sr *db.StepResult, state stepExecutionState) error {
+	step := e.steps[index]
 	sctx := &StepContext{
 		Ctx:          ctx,
 		Run:          run,
@@ -545,9 +555,6 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 		return e.failRun(run, repo, fmt.Errorf("step %s: reconcile resumed ci watch: %w", step.Name(), reconcileErr), ctx)
 	}
 	if reconcileErr != nil {
-		// Reading the PR's state is the proof the forge is reachable. Without
-		// it the watch cannot resume, so it ends the way an unresumed watch
-		// ends rather than failing or parking on unreadable checks.
 		slog.Warn("resumed ci watch cannot read its PR; ending it as interrupted", "run_id", run.ID, "error", reconcileErr)
 		return e.interruptCIWatch(run, repo, sr.ID)
 	}
@@ -560,24 +567,9 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index+1, false)
 	}
 
-	state, err := e.durableExecutionState(sr.ID)
-	if err != nil {
-		return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", step.Name(), err), ctx)
-	}
 	skipRemaining, restartFrom, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, state)
 	if err != nil {
 		return e.failRun(run, repo, err, ctx)
-	}
-	// A resumed watch the CI step skipped on its own (provider unavailable,
-	// credentials gone) must not read as a finished run: that would complete
-	// it and reclaim its worktree. End it the way an unresumed watch ends. An
-	// operator's skip records no skip reason and stands as recorded.
-	after, err := e.db.GetStepResult(sr.ID)
-	if err != nil {
-		return e.failRun(run, repo, fmt.Errorf("read resumed ci step: %w", err), ctx)
-	}
-	if after != nil && after.Status == types.StepStatusSkipped && after.SkipReason != nil && *after.SkipReason != "" {
-		return e.interruptCIWatch(run, repo, sr.ID)
 	}
 	if skipRemaining {
 		return e.skipRecoveredRemainder(run, repo, index+1)
@@ -681,26 +673,12 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		}
 	}
 	if gate.postRepairMonitor {
-		skipRemaining, restartFrom, execErr := e.executeStep(ctx, gate.step, gate.stepResult, run, repo, workDir, logDir, stepExecutionState{
+		return e.resumeWatch(ctx, run, repo, workDir, logDir, gate.index, gate.stepResult, stepExecutionState{
 			resumeRunning:  true,
 			roundNum:       gate.round,
 			executionMS:    recoveredStepDuration(gate.stepResult),
 			currentRoundID: gate.lastRoundID,
 		})
-		if execErr != nil {
-			return e.failRun(run, repo, execErr, ctx)
-		}
-		if skipRemaining {
-			return e.skipRecoveredRemainder(run, repo, gate.index+1)
-		}
-		if restartFrom != "" {
-			restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, gate.index)
-			if indexErr != nil {
-				return e.failRun(run, repo, indexErr, ctx)
-			}
-			return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
-		}
-		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	}
 	if gate.repairUnresolved {
 		gate.findings = repairReconciliationFindings(gate.findings, gate.step.Name(), gate.stepResult.AgentPID)

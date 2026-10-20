@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -2655,5 +2656,33 @@ func TestCIStep_DelayedSameNameCheckRetainsLegacyNameBehavior(t *testing.T) {
 	}
 	if step.TransientRerunRecorded("build") {
 		t.Fatal("new conclusive link did not retire the rerun record")
+	}
+}
+
+// A shutdown that cuts off the forge availability check is not an unavailable
+// forge: the step returns the cancellation, so the executor leaves the watch
+// running for the next daemon instead of recording a skip.
+func TestCIStep_CancelledAvailabilityCheckIsNotASkip(t *testing.T) {
+	t.Parallel()
+	if runtime.GOOS == "windows" {
+		t.Skip("the hanging gh is a shell script")
+	}
+	dir, baseSHA, headSHA := stepstest.SetupGitRepo(t)
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "gh"), []byte("#!/bin/sh\nexec sleep 30\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	prURL := "https://github.com/test/repo/pull/42"
+	sctx := stepstest.NewTestContext(t, &stepstest.MockAgent{AgentName: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.Env = stepstest.FakeCLIEnv(binDir, nil)
+	sctx.Run.PRURL = &prURL
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	time.AfterFunc(300*time.Millisecond, cancel)
+
+	outcome, err := (&steps.CIStep{}).Execute(sctx)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Execute() = %+v, %v; want the cancellation", outcome, err)
 	}
 }

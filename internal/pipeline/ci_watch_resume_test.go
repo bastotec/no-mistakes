@@ -132,31 +132,6 @@ func setupCIWatch(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo) {
 	return database, p, run, repo
 }
 
-// A resumed watch that cannot watch (provider gone, credentials expired)
-// skips; that must end the run as ci_monitor_interrupted, not complete it
-// and reclaim the worktree.
-func TestResumeCIWatch_SkippedWatchEndsInterrupted(t *testing.T) {
-	database, p, run, repo := setupCIWatch(t)
-	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
-		return &StepOutcome{Skipped: true, SkipReason: "gh not authenticated"}, nil
-	}}
-	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
-	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
-		t.Fatal(err)
-	}
-	got, err := database.GetRun(run.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got.Status != types.RunCIMonitorInterrupted {
-		t.Fatalf("run = %s, want %s", got.Status, types.RunCIMonitorInterrupted)
-	}
-	sr := stepResultByName(t, database, run.ID, types.StepCI)
-	if sr.Status != types.StepStatusSkipped || sr.Error == nil || *sr.Error != types.RunCIMonitorInterruptedReason {
-		t.Fatalf("ci step = %s (%v), want skipped with the interrupted reason", sr.Status, sr.Error)
-	}
-}
-
 // A PR that merged or closed while the daemon was down settles the watch
 // before it starts, so an --existing-pr watch never re-validates a PR that
 // is already done.
@@ -241,5 +216,47 @@ func TestResumeCIWatch_ShutdownDuringReconcileKeepsWatch(t *testing.T) {
 	}
 	if sr := stepResultByName(t, database, run.ID, types.StepCI); sr.Status != types.StepStatusRunning {
 		t.Fatalf("ci step = %s, want running", sr.Status)
+	}
+}
+
+// A watch that resumes after a published CI repair reads its PR first too:
+// an unreadable PR ends it as ci_monitor_interrupted rather than letting the
+// step skip and complete the run.
+func TestResume_PostRepairMonitorUnreadablePREndsInterrupted(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	ci := stepResultByName(t, database, run.ID, types.StepCI)
+	findings := `{"findings":[{"id":"ci-1","severity":"error","description":"build failed","action":"auto-fix"}],"summary":"build failed"}`
+	if err := database.SetStepFindings(ci.ID, findings); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateStepStatusWithDuration(ci.ID, types.StepStatusRunning, 1); err != nil {
+		t.Fatal(err)
+	}
+	round, err := database.InsertStepRound(ci.ID, 1, "auto_fix", &findings, nil, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inv, err := database.RegisterRepairInvocation(ci.ID, round.ID, 1, t.TempDir(), "claude", "ci", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.FinishRepairInvocation(inv.ID, []byte(`{}`), true, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.MarkRepairPostMonitor(ci.ID, round.ID); err != nil {
+		t.Fatal(err)
+	}
+	step := &reconcilingCIStep{reconcile: func(*StepContext) (bool, error) {
+		return false, errors.New("gh auth status: not logged in")
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, step}, nil)
+	if err := exec.Resume(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if step.executed {
+		t.Fatal("the post-repair watch started without reading its PR")
+	}
+	if got, err := database.GetRun(run.ID); err != nil || got.Status != types.RunCIMonitorInterrupted {
+		t.Fatalf("run = %v (%v), want %s", got.Status, err, types.RunCIMonitorInterrupted)
 	}
 }

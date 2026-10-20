@@ -333,6 +333,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			return &pipeline.StepOutcome{Skipped: true, SkipReason: skipReason}, nil
 		}
 		if err := host.Available(ctx); err != nil {
+			if ctx.Err() != nil {
+				// A cancelled check is not an unavailable forge: a skip here
+				// would end a watch that shutdown means to leave resumable.
+				return nil, ctx.Err()
+			}
 			sctx.Log(fmt.Sprintf("skipping CI: %v", err))
 			return &pipeline.StepOutcome{Skipped: true, SkipReason: err.Error()}, nil
 		}
