@@ -1111,3 +1111,30 @@ func (d *DB) SetRunCIRerunState(id, state string) error {
 	}
 	return nil
 }
+
+// InterruptCIMonitor ends a resumed CI watch that could not watch its pull
+// request, in exactly the shape RecoverStaleRunsExcept gives an interrupted
+// CI monitor: the CI step skipped and the run ci_monitor_interrupted, both
+// carrying RunCIMonitorInterruptedReason, so the worktree cleanup and
+// protected-path checks treat it the same way.
+func (d *DB) InterruptCIMonitor(runID, stepID string) error {
+	ts := now()
+	tx, err := d.sql.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`UPDATE step_results SET status = ?, error = ?, completed_at = ?, agent_pid = NULL WHERE id = ? AND run_id = ?`,
+		types.StepStatusSkipped, types.RunCIMonitorInterruptedReason, ts, stepID, runID,
+	); err != nil {
+		return fmt.Errorf("interrupt ci monitor step: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE runs SET status = ?, error = ?, awaiting_agent_since = NULL, push_active = 0, updated_at = ? WHERE id = ?`,
+		types.RunCIMonitorInterrupted, types.RunCIMonitorInterruptedReason, ts, runID,
+	); err != nil {
+		return fmt.Errorf("interrupt ci monitor run: %w", err)
+	}
+	return tx.Commit()
+}

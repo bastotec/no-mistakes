@@ -497,7 +497,100 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
 	}
 	e.initializeRunScopes(run.ID)
-	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
+	results, err := e.db.GetStepsByRun(run.ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("get recovered steps: %w", err), ctx)
+	}
+	step, sr := e.steps[index], results[index]
+
+	// The PR may have merged or closed while the daemon was down. Settle that
+	// first, the same way a parked CI gate is settled, so the watch does not
+	// start against a PR that is already done.
+	sctx := &StepContext{
+		Ctx:          ctx,
+		Run:          run,
+		Repo:         repo,
+		WorkDir:      workDir,
+		GateDir:      e.paths.RepoDir(repo.ID),
+		Config:       e.config,
+		ForgeContext: e.forge,
+		DB:           e.db,
+		StepResultID: sr.ID,
+		Agent:        e.agent,
+		Sessions:     e.sessions,
+		Shared:       e.shared,
+		Log: func(message string) {
+			slog.Info("resumed ci watch reconciliation", "run_id", run.ID, "message", message)
+		},
+		LogChunk:   func(string) {},
+		LogFile:    func(string) {},
+		OnPRMerged: e.onPRMerged,
+	}
+	findings := ""
+	if sr.FindingsJSON != nil {
+		findings = *sr.FindingsJSON
+	}
+	settled, reconcileErr := e.reconcileApprovalGate(ctx, step, sctx, findings)
+	if reconcileErr != nil && errors.Is(reconcileErr, ErrFatalGateReconciliation) {
+		duration := recoveredStepDuration(sr)
+		if dbErr := e.db.FailStep(sr.ID, reconcileErr.Error(), duration); dbErr != nil {
+			slog.Warn("failed to mark resumed ci step as failed in db", "run_id", run.ID, "error", dbErr)
+		}
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusFailed), "", reconcileErr.Error(), &duration)
+		return e.failRun(run, repo, fmt.Errorf("step %s: reconcile resumed ci watch: %w", step.Name(), reconcileErr), ctx)
+	}
+	if reconcileErr != nil {
+		slog.Warn("could not settle resumed ci watch from PR state; watching again", "run_id", run.ID, "error", reconcileErr)
+	}
+	if settled {
+		duration := recoveredStepDuration(sr)
+		if err := e.db.CompleteStepWithStatus(sr.ID, types.StepStatusCompleted, recoveredExitCode(sr), duration, recoveredLogPath(sr)); err != nil {
+			return e.failRun(run, repo, fmt.Errorf("complete settled ci watch: %w", err), ctx)
+		}
+		e.emitStepEventWithFindingsAndError(ipc.EventStepCompleted, run, repo, step.Name(), string(types.StepStatusCompleted), "", "", &duration)
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index+1, false)
+	}
+
+	state, err := e.durableExecutionState(sr.ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("restore step %s execution state: %w", step.Name(), err), ctx)
+	}
+	skipRemaining, restartFrom, err := e.executeStep(ctx, step, sr, run, repo, workDir, logDir, state)
+	if err != nil {
+		return e.failRun(run, repo, err, ctx)
+	}
+	// A resumed watch that could not watch (provider unavailable, credentials
+	// gone) must not read as a finished run: that would complete it and reclaim
+	// its worktree. End it the way an unresumed watch ends.
+	after, err := e.db.GetStepResult(sr.ID)
+	if err != nil {
+		return e.failRun(run, repo, fmt.Errorf("read resumed ci step: %w", err), ctx)
+	}
+	if after != nil && after.Status == types.StepStatusSkipped {
+		return e.interruptCIWatch(run, repo, sr.ID)
+	}
+	if skipRemaining {
+		return e.skipRecoveredRemainder(run, repo, index+1)
+	}
+	if restartFrom != "" {
+		restartIndex, indexErr := e.prepareRestart(run.ID, restartFrom, index)
+		if indexErr != nil {
+			return e.failRun(run, repo, fmt.Errorf("step %s requested invalid restart from %s", step.Name(), restartFrom), ctx)
+		}
+		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, restartIndex, true)
+	}
+	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index+1, false)
+}
+
+func (e *Executor) interruptCIWatch(run *db.Run, repo *db.Repo, stepID string) error {
+	if err := e.db.InterruptCIMonitor(run.ID, stepID); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("interrupt resumed ci watch: %w", err))
+	}
+	reason := types.RunCIMonitorInterruptedReason
+	run.Status = types.RunCIMonitorInterrupted
+	run.Error = &reason
+	e.emitRunEvent(ipc.EventRunCompleted, run, repo)
+	return nil
 }
 
 // Resume restores a run that was durably parked at an approval gate when the

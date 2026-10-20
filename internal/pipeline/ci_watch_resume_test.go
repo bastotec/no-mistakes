@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -81,5 +83,95 @@ func TestRecoverableCIWatch(t *testing.T) {
 	reload()
 	if _, err := RecoverableCIWatch(database, run, steps); err == nil {
 		t.Fatal("a run parked at a gate counted as a CI watch")
+	}
+}
+
+// settlingCIStep is a CI step whose PR is already merged or closed: its gate
+// reconciliation settles the watch, so Execute must never run.
+type settlingCIStep struct{ executed bool }
+
+func (s *settlingCIStep) Name() types.StepName { return types.StepCI }
+func (s *settlingCIStep) Execute(*StepContext) (*StepOutcome, error) {
+	s.executed = true
+	return &StepOutcome{}, nil
+}
+func (s *settlingCIStep) ReconcileApprovalGate(*StepContext) (bool, error) { return true, nil }
+
+func setupCIWatch(t *testing.T) (*db.DB, *paths.Paths, *db.Run, *db.Repo) {
+	t.Helper()
+	database, p, run, repo := setupTest(t)
+	review, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStep(review.ID, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(ci.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(run.ID, "https://github.com/test/repo/pull/1"); err != nil {
+		t.Fatal(err)
+	}
+	if run, err = database.GetRun(run.ID); err != nil {
+		t.Fatal(err)
+	}
+	return database, p, run, repo
+}
+
+// A resumed watch that cannot watch (provider gone, credentials expired)
+// skips; that must end the run as ci_monitor_interrupted, not complete it
+// and reclaim the worktree.
+func TestResumeCIWatch_SkippedWatchEndsInterrupted(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(*StepContext) (*StepOutcome, error) {
+		return &StepOutcome{Skipped: true, SkipReason: "gh not authenticated"}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
+	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCIMonitorInterrupted {
+		t.Fatalf("run = %s, want %s", got.Status, types.RunCIMonitorInterrupted)
+	}
+	sr := stepResultByName(t, database, run.ID, types.StepCI)
+	if sr.Status != types.StepStatusSkipped || sr.Error == nil || *sr.Error != types.RunCIMonitorInterruptedReason {
+		t.Fatalf("ci step = %s (%v), want skipped with the interrupted reason", sr.Status, sr.Error)
+	}
+}
+
+// A PR that merged or closed while the daemon was down settles the watch
+// before it starts, so an --existing-pr watch never re-validates a PR that
+// is already done.
+func TestResumeCIWatch_SettledPRCompletesWithoutWatching(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	ci := &settlingCIStep{}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
+	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if ci.executed {
+		t.Fatal("the watch ran against a PR that was already settled")
+	}
+	got, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != types.RunCompleted {
+		t.Fatalf("run = %s, want completed", got.Status)
+	}
+	if sr := stepResultByName(t, database, run.ID, types.StepCI); sr.Status != types.StepStatusCompleted {
+		t.Fatalf("ci step = %s, want completed", sr.Status)
 	}
 }
