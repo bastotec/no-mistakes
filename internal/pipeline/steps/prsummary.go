@@ -134,7 +134,7 @@ type pipelineAttestationPolicy struct {
 	AllowTestCommandOverride string
 }
 
-func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy) (string, string) {
+func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, provider scm.Provider, policy pipelineAttestationPolicy, priorDecisions ...*db.BranchDecisionRound) (string, string) {
 	if len(steps) == 0 {
 		return "", ""
 	}
@@ -147,7 +147,11 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 			continue
 		}
 		stepRounds := rounds[sr.ID]
-		line, detail := buildStepEntry(sr, stepRounds, flavor)
+		var scope []string
+		if sr.StepName == types.StepReview {
+			scope = reviewScopeDecisions(stepRounds, priorDecisions...)
+		}
+		line, detail := buildStepEntry(sr, stepRounds, flavor, scope...)
 		if line != "" && detail != "" {
 			// Step details quote agent text (findings, fix summaries, tested
 			// commands). A foreign attestation comment in one lands after the
@@ -179,7 +183,7 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 		b.WriteString(detail)
 	}
 
-	riskLine := extractRiskLine(steps, rounds)
+	riskLine := extractRiskLine(steps, rounds, priorDecisions...)
 	return b.String(), riskLine
 }
 
@@ -1189,10 +1193,10 @@ func formatTestingDuration(ms int64) string {
 	return d.Round(time.Second).String()
 }
 
-func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) (statusLine, detailBlock string) {
+func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor, scope ...string) (statusLine, detailBlock string) {
 	name := stepDisplayName(sr.StepName)
 	buildDetail := func(line string) (string, string) {
-		return line, buildStepDetails(line, sr, rounds, flavor)
+		return line, buildStepDetails(line, sr, rounds, flavor, scope)
 	}
 
 	switch sr.Status {
@@ -1216,6 +1220,13 @@ func buildStepEntry(sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlav
 			line = fmt.Sprintf("%s: %s", line, escapePRText(strings.TrimSpace(*sr.SkipReason), flavor))
 		}
 		return buildDetail(line)
+	}
+
+	if len(scope) > 0 {
+		withStatus := buildDetail
+		buildDetail = func(line string) (string, string) {
+			return withStatus(line + "; recorded user-selected repair scope does not certify the original remedy")
+		}
 	}
 
 	// Parse the final findings on the step result (last state).
@@ -1357,23 +1368,69 @@ func reviewStepFindings(sr *db.StepResult, stepRounds []*db.StepRound) *types.Fi
 	return nil
 }
 
-func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound) string {
+func reviewScopeDecisions(rounds []*db.StepRound, priorDecisions ...*db.BranchDecisionRound) []string {
+	var lines []string
+	appendRound := func(r *db.StepRound, attribution string) {
+		if r == nil || selectionSourceValue(r.SelectionSource) != db.RoundSelectionSourceUser || r.UserFindingsJSON == nil || r.SelectedFindingIDs == nil {
+			return
+		}
+		var ids []string
+		if json.Unmarshal([]byte(*r.SelectedFindingIDs), &ids) != nil {
+			return
+		}
+		f, err := types.ParseFindingsJSON(*r.UserFindingsJSON)
+		if err != nil {
+			return
+		}
+		for _, item := range f.Items {
+			selected := false
+			for _, id := range ids {
+				selected = selected || id == item.ID
+			}
+			if !selected || strings.TrimSpace(item.UserInstructions) == "" {
+				continue
+			}
+			lines = append(lines, fmt.Sprintf("%sround %d, %s: user-selected repair scope recorded (instructions private; original concern is not certified as repaired by this decision)", attribution, r.Round, sanitizePromptText(item.ID)))
+		}
+	}
+	for i := len(priorDecisions) - 1; i >= 0; i-- {
+		entry := priorDecisions[i]
+		if entry == nil || entry.StepName != types.StepReview {
+			continue
+		}
+		appendRound(entry.Round, fmt.Sprintf("earlier run %s (historical decision, not certification of the current head), Review ", sanitizePromptText(entry.RunID)))
+	}
+	for _, r := range rounds {
+		appendRound(r, "")
+	}
+	rendered, note := boundDecisionLines(lines, maxDecisionSectionBytes)
+	if note != "" {
+		rendered = append(rendered, strings.TrimSpace(note))
+	}
+	return rendered
+}
+
+func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound, priorDecisions ...*db.BranchDecisionRound) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepReview {
 			continue
 		}
 
 		src := reviewStepFindings(sr, rounds[sr.ID])
+		scope := strings.Join(reviewScopeDecisions(rounds[sr.ID], priorDecisions...), "; ")
+		if scope != "" {
+			scope = " Recorded repair scope: " + scope
+		}
 		if src == nil || src.RiskLevel == "" {
-			return ""
+			return strings.TrimSpace(scope)
 		}
 
 		emoji := riskEmoji(src.RiskLevel)
 		label := capitalizeRisk(src.RiskLevel)
 		if src.RiskRationale != "" {
-			return fmt.Sprintf("%s %s: %s", emoji, label, src.RiskRationale)
+			return fmt.Sprintf("%s %s: %s%s", emoji, label, src.RiskRationale, scope)
 		}
-		return fmt.Sprintf("%s %s", emoji, label)
+		return fmt.Sprintf("%s %s%s", emoji, label, scope)
 	}
 	return ""
 }
@@ -1482,8 +1539,22 @@ func buildFixResultText(rounds []*db.StepRound) string {
 // round is shown as the review state observed at its end; a fix round is
 // prefixed with its recorded outcome so a reader can follow the result without
 // mentally replaying rounds.
-func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor) string {
+func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRound, flavor prBodyFlavor, scope []string) string {
 	var inner strings.Builder
+	scopedReview := len(scope) > 0
+	if scopedReview {
+		inner.WriteString("Recorded repair scope (not proof of the original remedy):\n\n")
+		for _, line := range scope {
+			inner.WriteString("- " + escapePRText(line, flavor) + "\n")
+		}
+		inner.WriteString("\n")
+	}
+	rechecked := "✅ Re-checked - no issues remain.\n"
+	noIssues := "✅ No issues found.\n"
+	if scopedReview {
+		rechecked = "Re-checked recorded repair scope; no new findings. The original concern is not certified as repaired.\n"
+		noIssues = "No new findings; recorded repair decisions do not certify the original remedy.\n"
+	}
 	if len(rounds) == 0 {
 		writeStepStatusDetail(&inner, sr, flavor)
 		return foldPRBlock(summaryLine, inner.String(), flavor)
@@ -1505,9 +1576,9 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 			case missingRoundFindingsData:
 				inner.WriteString("findings not recorded\n\n")
 			case isFixRound:
-				inner.WriteString("✅ Re-checked - no issues remain.\n\n")
+				inner.WriteString(rechecked + "\n")
 			default:
-				inner.WriteString("✅ No issues found.\n\n")
+				inner.WriteString(noIssues + "\n")
 			}
 			continue
 		}
@@ -1537,9 +1608,9 @@ func buildStepDetails(summaryLine string, sr *db.StepResult, rounds []*db.StepRo
 
 		if len(findings.Items) == 0 {
 			if isFixRound {
-				inner.WriteString("✅ Re-checked - no issues remain.\n")
+				inner.WriteString(rechecked)
 			} else {
-				inner.WriteString("✅ No issues found.\n")
+				inner.WriteString(noIssues)
 			}
 			writeTestedDetails(&inner, sr, &findings, flavor)
 			inner.WriteString("\n")

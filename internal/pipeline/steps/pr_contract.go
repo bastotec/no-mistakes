@@ -182,6 +182,7 @@ required_heading_translations_json:
 
 Run-written PR content JSON:
 %s`, skill, baseSHA, digest, formatRule, templateJSON, requiredHeadingsJSON, contentJSON)
+	prompt += publicationDecisionsPromptSection(sctx)
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,

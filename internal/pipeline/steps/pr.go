@@ -623,7 +623,7 @@ Diff stat:
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, policySHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
-	prompt += prCreationSkill + prBodyBudgetPromptSection(bodyLimit)
+	prompt += prCreationSkill + prBodyBudgetPromptSection(bodyLimit) + publicationDecisionsPromptSection(sctx)
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -683,7 +683,7 @@ Rules:
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, policySHA, sctx.Run.HeadSHA, baseBranch, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCreationSkillTitle
+	prompt += prCreationSkillTitle + publicationDecisionsPromptSection(sctx)
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -762,7 +762,7 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 	if sctx.Config != nil {
 		policy.AllowTestCommandOverride = strings.TrimSpace(sctx.Config.Test.AllowApproveOverFailure)
 	}
-	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy)
+	pipelineMD, riskLine = buildPipelineSummaryFor(steps, rounds, sctx.Run.HeadSHA, provider, policy, sctx.PriorBranchDecisions...)
 	// Ordinary Bitbucket descriptions keep their existing Markdown-only skin.
 	// Owned templates additionally carry the exact existing declaration as
 	// visible text; the raw consumer/restamper uses the same marker and schema.

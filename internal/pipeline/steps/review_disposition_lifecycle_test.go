@@ -2,17 +2,20 @@ package steps
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -134,4 +137,222 @@ func TestReviewDispositionLifecycleRendersOnlyCurrentRisk(t *testing.T) {
 		t.Fatalf("public disposition is inaccurate:\n%s\nRisk: %s", md, risk)
 	}
 	t.Logf("Synthetic publication evidence at %s:\n%s\nRisk: %s", run.HeadSHA, md, risk)
+}
+
+func TestReviewBoundedApprovalLifecycleReachesPublicationGuard(t *testing.T) {
+	work, base, head := setupGitRepo(t)
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepoWithID("disposition", work, work, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", head, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	step := dispositionReview{execute: func(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+		if !sctx.Fixing {
+			return &pipeline.StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"repair","severity":"error","description":"original product repair is absent","action":"auto-fix"}],"summary":"selected routing defect remains","risk_level":"high","risk_rationale":"selected routing defect remains"}`}, nil
+		}
+		// The accepted intermediate requires diagnosis only: deliberately
+		// leave the product tree unchanged, as in a supported no-op repair.
+		if !strings.Contains(sctx.PreviousFindings, "Accept diagnostic intermediate only") {
+			t.Fatal("fixer lost bounded instructions")
+		}
+		return &pipeline.StepOutcome{Findings: `{"findings":[],"summary":"diagnostic scope assessed","risk_level":"medium","risk_rationale":"independent residual risk"}`, FixSummary: "diagnostic assessment only; no source change", ReviewApprovedHeadSHA: sctx.Run.HeadSHA}, nil
+	}}
+	executor := pipeline.NewExecutor(database, p, &config.Config{Review: config.Review{MaxRounds: 2}}, nil, []pipeline.Step{step}, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- executor.Execute(ctx, run, repo, work) }()
+	defer func() {
+		cancel()
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+			t.Error("executor did not exit")
+		}
+	}()
+	for {
+		results, err := database.GetStepsByRun(run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(results) > 0 && results[0].Status == types.StepStatusAwaitingApproval {
+			break
+		}
+		select {
+		case err := <-done:
+			done <- err
+			t.Fatalf("executor exited before gate: %v", err)
+		case <-ctx.Done():
+			t.Fatal(ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	const privateSentinel = "private-customer-incident-4892"
+	instructions := "Accept diagnostic intermediate only; original product repair remains out of scope and unresolved. " + privateSentinel
+	if err := executor.RespondWithOverrides(types.StepReview, types.ActionFix, []string{"repair"}, map[string]string{"repair": instructions}, nil); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-done:
+		done <- err
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rounds, err := database.GetRoundsByStep(results[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if results[0].Status != types.StepStatusCompleted || len(rounds) != 2 || run.HeadSHA != head {
+		t.Fatalf("unexpected lifecycle: %+v rounds=%d head=%s", results[0], len(rounds), run.HeadSHA)
+	}
+	final, err := types.ParseFindingsJSON(*results[0].FindingsJSON)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(final.Items) != 0 || len(final.UnresolvedNotes) != 0 {
+		t.Fatalf("original defect falsely revived: %+v", final)
+	}
+	md, risk := BuildPipelineSummary(results, map[string][]*db.StepRound{results[0].ID: rounds}, run.HeadSHA)
+	if !strings.Contains(risk, "user-selected repair scope recorded") || !strings.Contains(risk, "independent residual risk") || strings.Contains(md, "Re-checked - no issues remain") || !strings.Contains(md, "original concern is not certified as repaired") || strings.Contains(md+risk, privateSentinel) || strings.Contains(md+risk, instructions) {
+		t.Fatalf("bounded approval misrepresented:\n%s\nRisk: %s", md, risk)
+	}
+	// Reopen SQLite: publication must consume durable decisions, not an
+	// in-memory response or the reviewer's own prose claiming approval.
+	if err := database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	firstRunID := run.ID
+	for _, laterRun := range []bool{false, true} {
+		if laterRun {
+			if err := os.WriteFile(filepath.Join(work, "followup.txt"), []byte("unrelated follow-up\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := git.Run(ctx, work, "add", "followup.txt"); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := git.Run(ctx, work, "commit", "-m", "test: unrelated follow-up"); err != nil {
+				t.Fatal(err)
+			}
+			newHead, err := git.Run(ctx, work, "rev-parse", "HEAD")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err = reopened.InsertRun(repo.ID, "feature", strings.TrimSpace(newHead), base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			laterReview := dispositionReview{execute: func(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+				if !strings.Contains(branchDecisionsPromptSection(sctx), privateSentinel) {
+					t.Error("later reviewer lost the recorded scope")
+				}
+				return &pipeline.StepOutcome{Findings: `{"findings":[],"summary":"no new findings","risk_level":"low","risk_rationale":"current follow-up risk"}`, ReviewApprovedHeadSHA: sctx.Run.HeadSHA}, nil
+			}}
+			laterExecutor := pipeline.NewExecutor(reopened, p, &config.Config{}, nil, []pipeline.Step{laterReview}, nil)
+			if err := laterExecutor.Execute(ctx, run, repo, work); err != nil {
+				t.Fatal(err)
+			}
+			if run.HeadSHA == head {
+				t.Fatal("follow-up must assess a different head")
+			}
+		}
+		for _, approved := range []bool{true, false} {
+			checker := &mockAgent{name: "controlled-checker", runFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				evidence := strings.Contains(opts.Prompt, `user_instructions`) && strings.Contains(opts.Prompt, instructions)
+				if evidence != approved {
+					t.Fatalf("writer decision context: evidence=%v approved=%v", evidence, approved)
+				}
+				return &agent.Result{Output: json.RawMessage(`{"title":"fix: diagnostic intermediate","body":"## What Changed\n\nApproved diagnostic intermediate, not the original repair.","unsupported_rules":[]}`)}, nil
+			}, validationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				digest, err := validationDigestFromPrompt(opts.Prompt)
+				if err != nil {
+					return nil, err
+				}
+				evidence := strings.Contains(opts.Prompt, "user chose to fix:") && strings.Contains(opts.Prompt, `user_instructions`) && strings.Contains(opts.Prompt, instructions)
+				issues := []string{}
+				if !evidence {
+					issues = append(issues, "approval claim lacks recorded evidence")
+				}
+				payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: issues})
+				return &agent.Result{Output: payload}, nil
+			}}
+			sctx := newTestContext(t, checker, work, base, run.HeadSHA, config.Commands{})
+			if approved {
+				sctx.DB, sctx.Run, sctx.Repo = reopened, run, repo
+				pipeline.BindBranchDecisions(sctx)
+				for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+					for _, owned := range []bool{false, true} {
+						pipelineMD, riskLine, _ := (&PRStep{}).buildPipelineSections(sctx, provider, owned, false)
+						if !strings.Contains(pipelineMD, "original concern is not certified as repaired") || !strings.Contains(riskLine, "original concern is not certified as repaired") || strings.Contains(pipelineMD+riskLine, privateSentinel) || strings.Contains(pipelineMD+riskLine, "Accept diagnostic intermediate only") {
+							t.Fatalf("later=%v provider=%s owned=%v: inaccurate public scope:\n%s\nRisk: %s", laterRun, provider, owned, pipelineMD, riskLine)
+						}
+						if laterRun && (!strings.Contains(pipelineMD, "earlier run "+firstRunID) || !strings.Contains(riskLine, "earlier run "+firstRunID) || !strings.Contains(riskLine, "not certification of the current head") || !strings.Contains(riskLine, "current follow-up risk") || strings.Contains(riskLine, "independent residual risk") || strings.Contains(pipelineMD, "✅ No issues found.")) {
+							t.Fatalf("historical decision became current certification:\n%s\nRisk: %s", pipelineMD, riskLine)
+						}
+					}
+				}
+			}
+			content, err := (&PRStep{}).buildPRContentWithPolicy(sctx, "feature", "main", base, base, scm.ProviderGitHub, githubPullRequestBodyHardLimitChars)
+			if (err == nil) != approved {
+				t.Fatalf("later=%v approved=%v: publication guard: %v", laterRun, approved, err)
+			}
+			if approved && (strings.Contains(content.Body, privateSentinel) || strings.Contains(content.Body, "Accept diagnostic intermediate only") || !strings.Contains(content.Body, "user-selected repair scope recorded")) {
+				t.Fatalf("unsafe public body: %s", content.Body)
+			}
+		}
+	}
+}
+
+func TestReviewScopeRequiresRecordedSelectedUserInstructions(t *testing.T) {
+	selected := `["repair"]`
+	unselected := `["other"]`
+	invalid := `invalid`
+	user := db.RoundSelectionSourceUser
+	auto := db.RoundSelectionSourceAutoFix
+	declined := db.RoundSelectionSourceUserDeclined
+	payload := `{"findings":[{"id":"repair","severity":"error","description":"original remedy","user_instructions":"diagnostic only"}]}`
+	for _, tc := range []struct {
+		name   string
+		source *string
+		ids    *string
+		want   int
+	}{
+		{"selected user scope", &user, &selected, 1},
+		{"automatic selection is not approval", &auto, &selected, 0},
+		{"declined is not selected approval", &declined, &selected, 0},
+		{"no decision", nil, &selected, 0},
+		{"missing selection", &user, nil, 0},
+		{"unselected instructions", &user, &unselected, 0},
+		{"invalid selection", &user, &invalid, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := reviewScopeDecisions([]*db.StepRound{{Round: 1, SelectionSource: tc.source, SelectedFindingIDs: tc.ids, UserFindingsJSON: &payload}})
+			if len(got) != tc.want {
+				t.Fatalf("scope decisions = %v", got)
+			}
+		})
+	}
 }
