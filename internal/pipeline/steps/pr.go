@@ -37,6 +37,7 @@ type prContent struct {
 	// source of run intent or approval authority.
 	PublicIntent        string                       `json:"public_intent,omitempty"`
 	HeadingTranslations []templateHeadingTranslation `json:"-"`
+	LiteralEvidence     []prLiteralEvidence          `json:"-"`
 }
 
 func (c prContent) scmContent() scm.PRContent {
@@ -613,7 +614,8 @@ func redactPublicationText(text string) string {
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
-	pipelineMD, riskLine, testingMD, err := s.buildPipelineSection(sctx, provider)
+	var literalEvidence []prLiteralEvidence
+	pipelineMD, riskLine, testingMD, err := s.buildPipelineSections(sctx, provider, false, true, true, &literalEvidence)
 	if err != nil {
 		return prContent{}, err
 	}
@@ -621,6 +623,7 @@ func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	if err != nil {
 		return prContent{}, err
 	}
+	content.LiteralEvidence = literalEvidence
 	// Render only the publication projection. The original context and durable
 	// intent remain untouched and continue to drive every other pipeline step.
 	renderContext := *sctx
@@ -795,7 +798,7 @@ func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.P
 	return s.buildPipelineSections(sctx, provider, false, true, true)
 }
 
-func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting, projectProse bool) (pipelineMD, riskLine, testingMD string, err error) {
+func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting, projectProse bool, literalEvidence ...*[]prLiteralEvidence) (pipelineMD, riskLine, testingMD string, err error) {
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
 		slog.Warn("failed to query step results for pipeline summary", "error", err)
@@ -829,7 +832,7 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
 	if includeTesting {
-		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), literalEvidence...)
 	}
 	return pipelineMD, riskLine, testingMD, nil
 }

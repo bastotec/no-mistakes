@@ -116,6 +116,18 @@ type testingSummaryOptions struct {
 	// uploaded at PR render time. Nil means nothing was uploaded; the renderer
 	// then keeps today's local-path or commit-pinned link.
 	attachments map[string]string
+	// literalEvidence is render-only provenance for the final language judge.
+	// It never comes from agent-authored draft metadata or durable records.
+	literalEvidence *[]prLiteralEvidence
+}
+
+func artifactInlineContentIsLiteral(artifact types.TestArtifact) bool {
+	target := artifact.URL
+	if target == "" {
+		target = artifact.Path
+	}
+	return artifact.Kind == "log" || artifact.Kind == "command-output" ||
+		(artifact.Kind == "" && !isImageArtifact(artifact.Kind, target) && !isVideoArtifact(artifact.Kind, target))
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
@@ -388,7 +400,7 @@ func BuildTestingSummaryForPRWithProvider(steps []*db.StepResult, rounds map[str
 	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil)
 }
 
-func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string) string {
+func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string, literalEvidence ...*[]prLiteralEvidence) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.flavor = prBodyFlavorFor(provider)
 	opts.compactArtifacts = true
@@ -398,6 +410,9 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	opts.evidenceRoot = evidenceRoot
 	opts.evidence = links
 	opts.attachments = attachments
+	if len(literalEvidence) > 0 {
+		opts.literalEvidence = literalEvidence[0]
+	}
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -810,8 +825,12 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		inner.WriteString(renderTestedDetailFor(descriptionLine, opts.flavor))
 		inner.WriteString("\n\n")
 	}
-	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+	fence := fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody)))
+	inner.WriteString(fence)
 	folded := foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
+	if opts.literalEvidence != nil && (hasFile || artifactInlineContentIsLiteral(artifact)) {
+		*opts.literalEvidence = append(*opts.literalEvidence, prLiteralEvidence{Block: folded, Fence: fence})
+	}
 	if attachment == "" {
 		return folded
 	}

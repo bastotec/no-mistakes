@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // Exercise authoring -> assembly -> final digest-bound validation, not prompt
@@ -63,7 +64,7 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 					t.Fatal("missing actual content")
 				}
 				var written struct{ Title, Body string }
-				if err := json.Unmarshal([]byte(raw[1]), &written); err != nil {
+				if err := json.NewDecoder(strings.NewReader(raw[1])).Decode(&written); err != nil {
 					t.Fatal(err)
 				}
 				english := !strings.Contains(written.Body, "Aprovação")
@@ -269,13 +270,34 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				raw := strings.SplitN(opts.Prompt, "Run-written PR content JSON:\n", 2)
 				var written prContent
-				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &written) != nil {
+				if len(raw) != 2 || json.NewDecoder(strings.NewReader(raw[1])).Decode(&written) != nil {
 					t.Fatal("missing final content")
 				}
-				// This checks the generated validator request contract, not the
-				// model's interpretation of the literal evidence below.
-				if !strings.Contains(opts.Prompt, "captured logs and command output") || !strings.Contains(opts.Prompt, "Judge authored captions and observations") {
-					t.Fatal("validator request lost the literal-output versus authored-prose distinction")
+				// The generated request must carry renderer-owned roles, not ask
+				// the model to infer authorship from identical passage text.
+				roleJSON := strings.SplitN(opts.Prompt, "Renderer-captured literal evidence JSON:\n", 2)
+				var roles []struct {
+					StartByte int    `json:"start_byte"`
+					EndByte   int    `json:"end_byte"`
+					Text      string `json:"text"`
+				}
+				if len(roleJSON) != 2 || json.NewDecoder(strings.NewReader(roleJSON[1])).Decode(&roles) != nil || len(roles) != 12 {
+					t.Fatal("validator request lost renderer-owned literal evidence roles")
+				}
+				literalCaptions := 0
+				for _, role := range roles {
+					if role.StartByte < 0 || role.EndByte > len(written.Body) || role.StartByte >= role.EndByte || written.Body[role.StartByte:role.EndByte] != role.Text {
+						t.Fatalf("literal evidence role does not bind final body: %+v", role)
+					}
+					if strings.Contains(role.Text, english) {
+						t.Fatal("authored caption exempted from English validation")
+					}
+					if strings.Contains(role.Text, caption) {
+						literalCaptions++
+					}
+				}
+				if literalCaptions != 9 {
+					t.Fatalf("literal roles do not distinguish identical authored/captured text: %d", literalCaptions)
 				}
 				body := html.UnescapeString(written.Body)
 				if strings.Count(body, caption) != 9 || strings.Count(body, english) != 5 {
@@ -372,6 +394,52 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				t.Fatalf("publication changed literal file bytes: %q, %v", unchangedFile, err)
 			}
 		})
+	}
+}
+
+func TestPRLiteralEvidenceTracksFinalRedactionAndOmission(t *testing.T) {
+	const text = "Aprovação apenas para revisão /home/privacy-sentinel/scope.log"
+	payload, _ := json.Marshal(map[string]any{"items": []any{}, "artifacts": []any{
+		map[string]string{"kind": "command-output", "label": "Captured scope", "content": text},
+		map[string]string{"kind": "other", "label": "Authored scope", "content": text},
+	}})
+	raw := string(payload)
+	steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &raw}}
+	var evidence []prLiteralEvidence
+	testingMD := buildPRTestingSummary(steps, nil, "", "", "", "", nil, scm.ProviderGitHub, nil, &evidence)
+	for _, includeTesting := range []bool{true, false} {
+		section := ""
+		if includeTesting {
+			section = testingMD
+		}
+		content := redactPRContent(prContent{
+			Title: "feat: preserve scope", Body: appendGeneratedSections("## What Changed\n\nReview only.", "", section, ""), LiteralEvidence: evidence,
+		})
+		ranges := finalPRLiteralEvidence(content)
+		if !includeTesting {
+			if len(ranges) != 0 {
+				t.Fatal("omitted evidence left a language exemption in the final body")
+			}
+			continue
+		}
+		if len(ranges) != 1 {
+			t.Fatalf("literal and authored fences lost their distinct roles: %+v", ranges)
+		}
+		role := ranges[0]
+		if content.Body[role.StartByte:role.EndByte] != role.Text || !strings.Contains(role.Text, "~/scope.log") || strings.Contains(role.Text, "/home/privacy-sentinel") {
+			t.Fatalf("literal role did not follow final privacy redaction: %+v", role)
+		}
+		if strings.Count(content.Body, role.Text) != 2 {
+			t.Fatal("fixture must exercise identical captured and authored fences")
+		}
+		if role.StartByte >= strings.Index(content.Body, "Evidence: Authored scope") {
+			t.Fatal("authored fence inherited the identical captured fence's exemption")
+		}
+		encoded, _ := json.Marshal(content)
+		var public map[string]json.RawMessage
+		if err := json.Unmarshal(encoded, &public); err != nil || len(public) != 2 {
+			t.Fatal("renderer role metadata leaked into the public PR payload")
+		}
 	}
 }
 
@@ -512,7 +580,7 @@ func TestPRWriterPublicProjectionStillRequiresEnglishAndScopeValidation(t *testi
 					t.Fatal("missing final content")
 				}
 				var content prContent
-				if err := json.Unmarshal([]byte(raw[1]), &content); err != nil {
+				if err := json.NewDecoder(strings.NewReader(raw[1])).Decode(&content); err != nil {
 					t.Fatal(err)
 				}
 				if tc.suppressed && (strings.Contains(content.Body, "## Intent") || strings.Contains(content.Body, tc.projection)) {
@@ -581,7 +649,7 @@ func TestPRTemplatePublishesTranslatedQuotationWithoutAddingSourceIntent(t *test
 			t.Fatal("missing final content")
 		}
 		var written prContent
-		if err := json.Unmarshal([]byte(raw[1]), &written); err != nil {
+		if err := json.NewDecoder(strings.NewReader(raw[1])).Decode(&written); err != nil {
 			t.Fatal(err)
 		}
 		if !strings.Contains(written.Body, quotation) || strings.Contains(written.Body, original) {
