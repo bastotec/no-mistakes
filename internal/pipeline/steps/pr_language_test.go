@@ -158,6 +158,80 @@ func TestPRWriterPublishesEnglishIntentWithoutChangingPrivateSource(t *testing.T
 	}
 }
 
+func TestPRWriterTranslatesTestedProseWithoutChangingCommandsOrRecords(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	const command = "`./check-scope --fixture 'fixtures/aprovação.json'`"
+	const stepSource = `Verified the criterion "Aprovação apenas para revisão" against the running product`
+	const stepEnglish = `Verified the criterion "Approval for review only" against the running product`
+	const roundSource = `Checked "Não publicar em produção" using ` + command
+	const roundEnglish = `Checked "Do not deploy to production" using ` + command
+	ag := &mockAgent{name: "test", translationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		raw := strings.SplitN(opts.Prompt, prProseInputPrefix, 2)
+		var sources []string
+		if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &sources) != nil {
+			t.Fatal("missing publication prose")
+		}
+		translations := map[string]string{stepSource: stepEnglish, roundSource: roundEnglish, command: command}
+		seen := map[string]bool{}
+		for i, source := range sources {
+			if translated, ok := translations[source]; ok {
+				sources[i] = translated
+				seen[source] = true
+			}
+		}
+		if len(seen) != len(translations) {
+			t.Fatalf("tested entries omitted from translation: %v", seen)
+		}
+		payload, _ := json.Marshal(map[string]any{"translations": sources})
+		return &agent.Result{Output: payload}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	stepPayload, _ := json.Marshal(map[string]any{"items": []any{}, "tested": []string{stepSource, command}})
+	sr := insertCompletedStep(t, sctx, "test", string(stepPayload), "")
+	roundPayload, _ := json.Marshal(map[string]any{"items": []any{}, "tested": []string{roundSource, command}})
+	roundFindings := string(roundPayload)
+	if _, err := sctx.DB.InsertStepRound(sr.ID, 2, "auto_fix", &roundFindings, nil, 0); err != nil {
+		t.Fatal(err)
+	}
+	beforeSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeRounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeStepsJSON, _ := json.Marshal(beforeSteps)
+	beforeRoundsJSON, _ := json.Marshal(beforeRounds)
+	attestation := buildPipelineAttestation(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, head)
+	pipelineMD, _, testingMD, err := (&PRStep{}).buildPipelineSection(sctx, scm.ProviderGitHub)
+	if err != nil {
+		t.Fatal(err)
+	}
+	public := html.UnescapeString(pipelineMD + testingMD)
+	if strings.Contains(public, stepSource) || strings.Contains(public, roundSource) {
+		t.Fatalf("publication retained untranslated tested prose: %s", public)
+	}
+	for _, want := range []string{stepEnglish, roundEnglish, command, attestation} {
+		if !strings.Contains(html.UnescapeString(pipelineMD), want) {
+			t.Fatalf("pipeline lost translated observation, literal command, or machine attestation %q: %s", want, pipelineMD)
+		}
+	}
+	afterSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterRounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterStepsJSON, _ := json.Marshal(afterSteps)
+	afterRoundsJSON, _ := json.Marshal(afterRounds)
+	if string(beforeStepsJSON) != string(afterStepsJSON) || string(beforeRoundsJSON) != string(afterRoundsJSON) {
+		t.Fatal("publication changed persisted Test evidence")
+	}
+}
+
 func TestPRWriterPublicProjectionStillRequiresEnglishAndScopeValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, projection, narrative string

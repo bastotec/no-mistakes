@@ -46,6 +46,9 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 				add(&items[i].Description)
 			}
 		}
+		for i := range findings.Tested {
+			add(&findings.Tested[i])
+		}
 		add(&findings.TestingSummary)
 		add(&findings.RiskRationale)
 		for i := range findings.Artifacts {
