@@ -114,6 +114,9 @@ type recoveredRunPlan struct {
 	agent   agent.Agent
 	steps   []pipeline.Step
 	forge   *forgecontext.Context
+	// ciWatch marks a run that was only watching its pull request's CI when
+	// the daemon stopped; it resumes watching instead of resuming a gate.
+	ciWatch bool
 }
 
 func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPlan {
@@ -150,8 +153,11 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	if err != nil {
 		return nil, fmt.Errorf("read repair dispatch: %w", err)
 	}
-	if run.AwaitingAgentSince == nil && !repairDispatch {
-		return nil, fmt.Errorf("run is not a parked or repair-dispatched running run")
+	// A run that was only watching its PR's CI has no gate to resume; it is
+	// recognised from its step rows below, once the step plan is known.
+	maybeCIWatch := run.AwaitingAgentSince == nil && !repairDispatch && run.PRURL != nil && *run.PRURL != ""
+	if run.AwaitingAgentSince == nil && !repairDispatch && !maybeCIWatch {
+		return nil, fmt.Errorf("run is not a parked, repair-dispatched or CI-watching running run")
 	}
 	repo, err := m.db.GetRepo(run.RepoID)
 	if err != nil {
@@ -182,7 +188,13 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		return nil, err
 	}
 	execSteps := steps.WithCustomGates(m.steps(), cfg.Gates)
-	if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
+	ciWatch := false
+	if maybeCIWatch {
+		if _, err := pipeline.RecoverableCIWatch(m.db, run, execSteps); err != nil {
+			return nil, err
+		}
+		ciWatch = true
+	} else if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
@@ -208,6 +220,7 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		agent:   ag,
 		steps:   execSteps,
 		forge:   forgeCtx,
+		ciWatch: ciWatch,
 	}, nil
 }
 
@@ -456,7 +469,12 @@ func (m *RunManager) resumeRecoveredRun(plan recoveredRunPlan) {
 			m.mu.Unlock()
 		}()
 
-		if err := executor.Resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
+		resume := executor.Resume
+		if plan.ciWatch {
+			slog.Info("resuming CI watch after daemon restart", "run_id", plan.run.ID)
+			resume = executor.ResumeCIWatch
+		}
+		if err := resume(runCtx, plan.run, plan.repo, plan.workDir); err != nil {
 			if errors.Is(err, pipeline.ErrDaemonShutdown) {
 				return
 			}
@@ -2160,7 +2178,7 @@ func (m *RunManager) Shutdown() {
 	for id, cancel := range cancels {
 		run, runErr := m.db.GetRun(id)
 		repairDispatch, dispatchErr := m.db.HasRecoverableRepairDispatch(id)
-		if runErr != nil || dispatchErr != nil || run == nil || (run.AwaitingAgentSince == nil && !repairDispatch) {
+		if runErr != nil || dispatchErr != nil || run == nil || (run.AwaitingAgentSince == nil && !repairDispatch && !m.isCIWatch(run)) {
 			needsDecision = append(needsDecision, id)
 		}
 		cancel(pipeline.ErrDaemonShutdown)
@@ -2183,6 +2201,15 @@ func (m *RunManager) Shutdown() {
 			slog.Error("failed to park run interrupted by daemon shutdown", "run_id", runID, "error", err)
 		}
 	}
+}
+
+// isCIWatch reports a run that is only watching its pull request's CI: the
+// next daemon resumes it (see prepareRecoveredRun), so shutdown must not park
+// it at a decision gate. It reads the run's recorded steps only; recovery
+// checks them against the step plan.
+func (m *RunManager) isCIWatch(run *db.Run) bool {
+	_, err := pipeline.RecoverableCIWatch(m.db, run, nil)
+	return err == nil
 }
 
 func (m *RunManager) parkShutdownInterruptedRun(runID string) error {

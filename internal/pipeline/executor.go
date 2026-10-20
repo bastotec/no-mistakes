@@ -431,6 +431,75 @@ func ValidateRecoveredRun(database *db.DB, run *db.Run, steps []Step) error {
 	return err
 }
 
+// RecoverableCIWatch reports the index of a run's CI step when the daemon
+// stopped while that step was only watching an open pull request: the run has
+// a PR, every earlier step finished, the CI step is running (not mid-repair),
+// and no repair is in flight. Such a run resumes watching rather than ending.
+// With nil steps only the recorded rows are checked, not the step plan.
+func RecoverableCIWatch(database *db.DB, run *db.Run, steps []Step) (int, error) {
+	if run == nil || run.Status != types.RunRunning || run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+		return 0, fmt.Errorf("run is not watching an open pull request")
+	}
+	if run.AwaitingAgentSince != nil {
+		return 0, fmt.Errorf("run is parked at a gate")
+	}
+	repair, err := database.HasRecoverableRepairDispatch(run.ID)
+	if err != nil {
+		return 0, err
+	}
+	if repair {
+		return 0, fmt.Errorf("run has a repair in flight")
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return 0, err
+	}
+	if steps != nil && len(results) != len(steps) {
+		return 0, fmt.Errorf("recovered step plan changed")
+	}
+	for index, result := range results {
+		if steps != nil && result.StepName != steps[index].Name() {
+			return 0, fmt.Errorf("recovered step plan changed at %d", index)
+		}
+		if result.StepName == types.StepCI {
+			if result.Status != types.StepStatusRunning {
+				return 0, fmt.Errorf("ci step is %s, not watching", result.Status)
+			}
+			for _, later := range results[index+1:] {
+				if later.Status != types.StepStatusPending && later.Status != types.StepStatusSkipped {
+					return 0, fmt.Errorf("step after ci already ran")
+				}
+			}
+			return index, nil
+		}
+		if result.Status != types.StepStatusCompleted && result.Status != types.StepStatusSkipped {
+			return 0, fmt.Errorf("step %s did not finish before ci", result.StepName)
+		}
+	}
+	return 0, fmt.Errorf("run has no ci step")
+}
+
+// ResumeCIWatch resumes a run whose CI step was watching its pull request
+// when the daemon stopped (see RecoverableCIWatch). The CI step starts over
+// from the run's recorded PR and head, so it re-attaches to the same checks.
+func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo, workDir string) error {
+	e.workDir = workDir
+	ctx = e.runContext(ctx)
+	if repo == nil {
+		return fmt.Errorf("recovered run has no repository")
+	}
+	index, err := RecoverableCIWatch(e.db, run, e.steps)
+	if err != nil {
+		return err
+	}
+	logDir := e.paths.RunLogDir(run.ID)
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("create log dir: %w", err))
+	}
+	e.initializeRunScopes(run.ID)
+	return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, index, true)
+}
+
 // Resume restores a run that was durably parked at an approval gate when the
 // daemon stopped. It only accepts a fully recorded gate and otherwise returns
 // an error so startup recovery can fail the run rather than guessing.
@@ -1304,7 +1373,9 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
 		if err != nil {
-			if errors.Is(err, ErrDaemonShutdown) {
+			// A step cut off by daemon shutdown can surface the bare context
+			// error (the CI monitor returns ctx.Err()); the cause says which.
+			if errors.Is(err, ErrDaemonShutdown) || errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
 				return false, "", ErrDaemonShutdown
 			}
 			durationMS := executionMS + roundDuration

@@ -121,3 +121,73 @@ func TestRunManagerShutdownParksUnrecoverableActiveInvocation(t *testing.T) {
 		t.Fatalf("shutdown park is not recoverable: %v", err)
 	}
 }
+
+// A run only watching its PR's CI is left running on shutdown, not parked at
+// a decision gate: the next daemon resumes the watch on its own.
+func TestRunManagerShutdownLeavesCIWatchResumable(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	database, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	repo, err := database.InsertRepo(t.TempDir(), "https://example.com/repo.git", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunPRURL(run.ID, "https://example.com/repo/pull/7"); err != nil {
+		t.Fatal(err)
+	}
+	review, err := database.InsertStepResult(run.ID, types.StepReview)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.CompleteStep(review.ID, 0, 1, ""); err != nil {
+		t.Fatal(err)
+	}
+	ci, err := database.InsertStepResult(run.ID, types.StepCI)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.StartStep(ci.ID); err != nil {
+		t.Fatal(err)
+	}
+	manager := NewRunManager(database, p, func() []pipeline.Step {
+		return []pipeline.Step{&mockPassStep{name: types.StepReview}, &mockPassStep{name: types.StepCI}}
+	})
+	runCtx, cancel := context.WithCancelCause(context.Background())
+	manager.mu.Lock()
+	manager.cancels[run.ID] = cancel
+	manager.mu.Unlock()
+	manager.wg.Add(1)
+	go func() {
+		defer manager.wg.Done()
+		<-runCtx.Done()
+	}()
+
+	manager.Shutdown()
+
+	stored, err := database.GetRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != types.RunRunning || stored.AwaitingAgentSince != nil {
+		t.Fatalf("run after shutdown = status %s, awaiting %v; want a running CI watch", stored.Status, stored.AwaitingAgentSince)
+	}
+	if step, _ := database.GetStepResult(ci.ID); step.Status != types.StepStatusRunning {
+		t.Fatalf("ci step after shutdown = %s, want running", step.Status)
+	}
+	if _, err := pipeline.RecoverableCIWatch(database, stored, manager.steps()); err != nil {
+		t.Fatalf("shutdown left the CI watch unrecoverable: %v", err)
+	}
+}
