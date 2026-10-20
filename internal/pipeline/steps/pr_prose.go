@@ -52,8 +52,13 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 		add(&findings.TestingSummary)
 		add(&findings.RiskRationale)
 		for i := range findings.Artifacts {
-			add(&findings.Artifacts[i].Label)
-			add(&findings.Artifacts[i].Content)
+			artifact := &findings.Artifacts[i]
+			add(&artifact.Label)
+			kind := strings.ToLower(sanitizePromptText(artifact.Kind))
+			if artifact.Path == "" && artifact.URL == "" && (kind == "log" || kind == "command-output") {
+				continue
+			}
+			add(&artifact.Content)
 		}
 		for i := range findings.Scenarios {
 			add(&findings.Scenarios[i].Name)

@@ -252,8 +252,8 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				}
 				found := false
 				for i, source := range sources {
-					if strings.Contains(source, "RAW_FILE:") {
-						t.Fatal("literal file evidence reached translation")
+					if strings.Contains(source, "RAW_FILE:") || source == logBody || source == commandBody {
+						t.Fatal("literal evidence reached translation")
 					}
 					if source == caption {
 						sources[i] = english
@@ -273,8 +273,8 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 					t.Fatal("missing final content")
 				}
 				body := html.UnescapeString(written.Body)
-				if strings.Contains(body, caption) || !strings.Contains(body, english) {
-					t.Fatalf("final body lost translated caption: %s", body)
+				if strings.Count(body, caption) != 2 || strings.Count(body, english) != 3 {
+					t.Fatalf("final body mixed authored captions with literal output: %s", body)
 				}
 				for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
 					if !strings.Contains(body, literal) {
@@ -294,13 +294,19 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				"items": []any{}, "testing_summary": "Verified review-only scope.",
 				"artifacts": []any{
 					map[string]string{"kind": "log", "label": "Captioned log", "path": path, "content": caption},
-					map[string]string{"kind": "other", "label": "Linked observation", "url": "https://example.com/evidence", "content": caption},
+					map[string]string{"kind": "screenshot", "label": "Captioned screenshot", "url": "https://example.com/evidence.png", "content": caption},
 					map[string]string{"kind": "other", "label": "Inline observation", "content": caption},
 					map[string]string{"kind": "log", "label": "Raw log", "content": logBody},
 					map[string]string{"kind": "command-output", "label": "Raw command output", "content": commandBody},
+					map[string]string{"kind": "log", "label": "Captured criterion log", "content": caption},
+					map[string]string{"kind": "command-output", "label": "Captured criterion command output", "content": caption},
 				},
 			})
 			sr := insertCompletedStep(t, sctx, "test", string(payload), "")
+			roundFindings := string(payload)
+			if _, err := sctx.DB.InsertStepRound(sr.ID, 1, "initial", &roundFindings, nil, 0); err != nil {
+				t.Fatal(err)
+			}
 			beforeSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 			if err != nil {
 				t.Fatal(err)
@@ -326,8 +332,13 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				t.Fatal(err)
 			}
 			full := html.UnescapeString(BuildTestingSummaryForPR(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, sctx.Repo.UpstreamURL, head, dir, evidenceRoot, nil))
-			if strings.Contains(full, caption) || strings.Count(full, english) != 3 || !strings.Contains(full, strings.TrimRight(fileBody, "\n")) {
-				t.Fatalf("noncompact renderer lost caption translation or literal file evidence: %s", full)
+			if strings.Count(full, caption) != 2 || strings.Count(full, english) != 3 {
+				t.Fatalf("noncompact renderer mixed authored captions with literal output: %s", full)
+			}
+			for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
+				if !strings.Contains(full, literal) {
+					t.Fatalf("noncompact renderer changed literal evidence %q: %s", literal, full)
+				}
 			}
 			afterSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 			if err != nil {
