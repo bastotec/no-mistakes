@@ -375,6 +375,111 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 	}
 }
 
+func TestPRWriterDeduplicatesArtifactsBeforeCaptionProjection(t *testing.T) {
+	for _, tc := range []struct {
+		name                  string
+		firstSize, secondSize int
+		sanitizedDuplicate    bool
+	}{
+		{name: "16 KiB duplicate then 1 KiB caption", firstSize: 16 * 1024, secondSize: 1024},
+		{name: "12 KiB duplicate then 12 KiB caption", firstSize: 12 * 1024, secondSize: 12 * 1024},
+		{name: "sanitized duplicate then caption", firstSize: 16 * 1024, secondSize: 1024, sanitizedDuplicate: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			const caption = `Verified the criterion "Aprovação apenas para revisão"`
+			const english = `Verified the criterion "Approval for review only"`
+			evidenceRoot := t.TempDir()
+			firstBody := strings.Repeat("a", tc.firstSize)
+			secondBody := strings.Repeat("b", tc.secondSize)
+			firstPath := writeTempEvidenceFile(t, evidenceRoot, "first.log", []byte(firstBody))
+			secondPath := writeTempEvidenceFile(t, evidenceRoot, "second.log", []byte(secondBody))
+			ag := &mockAgent{name: "test", translationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				raw := strings.SplitN(opts.Prompt, prProseInputPrefix, 2)
+				var sources []string
+				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &sources) != nil {
+					t.Fatal("missing publication prose")
+				}
+				found := false
+				for i, source := range sources {
+					if source == firstBody || source == secondBody {
+						t.Fatal("embedded file bytes reached translation")
+					}
+					if source == caption {
+						sources[i] = english
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("duplicate artifacts exhausted caption projection budget")
+				}
+				payload, _ := json.Marshal(map[string]any{"translations": sources})
+				return &agent.Result{Output: payload}, nil
+			}}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.EvidenceDir = evidenceRoot
+			duplicateLabel := "Shared log"
+			if tc.sanitizedDuplicate {
+				duplicateLabel = " Shared log "
+			}
+			payload, _ := json.Marshal(map[string]any{
+				"items": []any{}, "testing_summary": "Verified review-only scope.",
+				"artifacts": []any{
+					map[string]string{"kind": "log", "label": "Shared log", "path": firstPath},
+					map[string]string{"kind": "log", "label": duplicateLabel, "path": firstPath},
+					map[string]string{"kind": "log", "label": "Captioned log", "path": secondPath, "content": caption},
+					map[string]string{"kind": "command-output", "label": "Literal output", "path": "artifacts/captured.log", "content": caption},
+				},
+			})
+			sr := insertCompletedStep(t, sctx, "test", "", "")
+			roundFindings := string(payload)
+			if _, err := sctx.DB.InsertStepRound(sr.ID, 2, "auto_fix", &roundFindings, nil, 0); err != nil {
+				t.Fatal(err)
+			}
+			beforeSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeRounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			before, _ := json.Marshal([]any{beforeSteps, beforeRounds})
+			content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, scm.ProviderGitHub, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body := html.UnescapeString(content.Body)
+			if strings.Count(body, english) != 1 || strings.Count(body, caption) != 1 {
+				t.Fatal("final body failed to translate the caption independently of identical literal output")
+			}
+			for _, literal := range []string{firstBody, secondBody} {
+				if strings.Count(body, literal) != 1 {
+					t.Fatal("final body did not embed each distinct file exactly once")
+				}
+			}
+			afterSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterRounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			after, _ := json.Marshal([]any{afterSteps, afterRounds})
+			if string(before) != string(after) {
+				t.Fatal("publication changed durable source records")
+			}
+			for path, want := range map[string]string{firstPath: firstBody, secondPath: secondBody} {
+				got, err := os.ReadFile(path)
+				if err != nil || string(got) != want {
+					t.Fatalf("publication changed literal file %s: %v", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestPRWriterPublicProjectionStillRequiresEnglishAndScopeValidation(t *testing.T) {
 	for _, tc := range []struct {
 		name, projection, narrative string

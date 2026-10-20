@@ -52,14 +52,12 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 		add(&findings.TestingSummary)
 		add(&findings.RiskRationale)
 		artifactOpts := testingSummaryOptions{repoRoot: sctx.WorkDir, evidenceRoot: testEvidenceDir(sctx)}
+		findings.Artifacts = appendTestingArtifacts(nil, map[string]bool{}, *target, artifactOpts)
 		artifactState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
 		for i := range findings.Artifacts {
 			artifact := &findings.Artifacts[i]
 			add(&artifact.Label)
 			rendered := *artifact
-			rendered.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
-			rendered.Path = sanitizeArtifactPath(artifact.Path, artifactOpts)
-			rendered.URL = sanitizeArtifactURL(artifact.URL)
 			_, hasFile := embeddedArtifactText(rendered, artifactOpts, &artifactState)
 			target := rendered.URL
 			if target == "" {
