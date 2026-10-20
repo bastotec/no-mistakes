@@ -423,7 +423,7 @@ func TestPRStep_CreatesConfiguredDraftPR(t *testing.T) {
 	if !strings.Contains(ghLog, "pr create --head feature --base main") {
 		t.Fatalf("expected unset PR base to fall back to repository default branch, got:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "pr create --head feature --base main --repo test/repo --draft") {
+	if !strings.Contains(ghLog, "pr create --head feature --base main --repo github.com/test/repo --draft") {
 		t.Fatalf("expected configured GitHub PR creation to use --draft, got:\n%s", ghLog)
 	}
 	if !strings.Contains(ghLog, "--title chore: update pull request --body") {
