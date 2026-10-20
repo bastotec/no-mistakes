@@ -213,6 +213,10 @@ func fakeGHHandler(args []string) {
 			os.Exit(0)
 		}
 		if strings.Contains(joined, "--json state") {
+			if message := os.Getenv("FAKE_CLI_PR_STATE_ERR"); message != "" {
+				fmt.Fprintln(os.Stderr, message)
+				os.Exit(1)
+			}
 			state := os.Getenv("FAKE_CLI_PR_STATE")
 			if state == "" {
 				state = "OPEN"

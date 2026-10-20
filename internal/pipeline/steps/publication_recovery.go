@@ -366,12 +366,26 @@ func findRecoveryPR(sctx *pipeline.StepContext, host scm.Host) (*scm.PR, error) 
 	return reader.FindPublicationPR(sctx.Ctx, strings.TrimPrefix(sctx.Run.Branch, "refs/heads/"))
 }
 
-func (s *PRStep) recoveredExistingPR(sctx *pipeline.StepContext, pr *scm.PR) (*pipeline.StepOutcome, error) {
+func (s *PRStep) recoveredExistingPR(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR) (*pipeline.StepOutcome, error) {
 	if sctx.Run.PRURL != nil && strings.TrimSpace(*sctx.Run.PRURL) != "" && *sctx.Run.PRURL != pr.URL {
 		return nil, recoveryRefusal("existing PR identity differs from recorded publication")
 	}
 	if pr.URL == "" || pr.HeadSHA == "" || pr.HeadSHA != s.recovery.HeadSHA || pr.BaseBranch != s.recovery.BaseBranch {
 		return nil, recoveryRefusal("existing PR head or target/base differs from recorded publication")
+	}
+	state, err := host.GetPRState(sctx.Ctx, pr)
+	if err != nil {
+		return nil, fmt.Errorf("read recovered PR state: %w", err)
+	}
+	switch state {
+	case scm.PRStateOpen, scm.PRStateClosed, scm.PRStateMerged:
+	default:
+		return nil, recoveryRefusal("existing PR lifecycle is unknown")
+	}
+	// Record lifecycle first: the URL writer preserves terminal states but
+	// otherwise defaults to open. Never invent an open observation on retry.
+	if err := sctx.DB.UpdateRunPRState(sctx.Run.ID, string(state)); err != nil {
+		return nil, fmt.Errorf("persist recovered PR state: %w", err)
 	}
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, pr.URL); err != nil {
 		return nil, fmt.Errorf("persist recovered PR URL: %w", err)

@@ -189,7 +189,7 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			return nil, err
 		}
 		if existing != nil {
-			return s.recoveredExistingPR(sctx, existing)
+			return s.recoveredExistingPR(sctx, host, existing)
 		}
 		if s.mediaUploader == nil {
 			s.mediaUploader, _ = host.(userAssetUploader)
@@ -359,7 +359,7 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if prior, err := findRecoveryPR(sctx, host); err != nil {
 			return nil, err
 		} else if prior != nil {
-			return s.recoveredExistingPR(sctx, prior)
+			return s.recoveredExistingPR(sctx, host, prior)
 		}
 	}
 	sctx.Log("creating pull request...")
@@ -389,7 +389,7 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider, host); err != nil {
 			return nil, err
 		}
-		if _, err := s.recoveredExistingPR(sctx, actual); err != nil {
+		if _, err := s.recoveredExistingPR(sctx, host, actual); err != nil {
 			return nil, err
 		}
 	} else if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
