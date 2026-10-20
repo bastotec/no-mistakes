@@ -36,3 +36,45 @@ func TestReviewDispositionRationaleNeverCallsCarriedFindingsClean(t *testing.T) 
 		t.Fatalf("rationale = %q, want it unchanged", f.RiskRationale)
 	}
 }
+
+// Exercise the serialized findings contract consumed by PR rendering, including
+// the fix-only disposition and the boundary where nothing must be rewritten.
+func TestReviewDispositionRationaleBoundaries(t *testing.T) {
+	carried := []types.Finding{{ID: "R1", Severity: "error", Action: types.ActionAskUser, Description: "Missing phone action"}}
+	fixed := []types.Finding{{ID: "R2", Severity: "error", Action: types.ActionAutoFix, Description: "Repair committed"}}
+	const unresolved = "unresolved error R1: Missing phone action"
+	const uncertified = "fixes committed without rereview; their correctness is not certified"
+	const clean = "; the latest rereview raised no new actionable finding"
+	for _, tc := range []struct {
+		name       string
+		current    string
+		unresolved []types.Finding
+		fixed      []types.Finding
+		want       string
+		wantRisk   string
+	}{
+		{name: "carried with blank assessment", unresolved: carried, want: unresolved, wantRisk: "high"},
+		{name: "case and whitespace clean assessment", current: "  NO ACTIONABLE FINDING SURVIVED VERIFICATION  ", unresolved: carried, want: unresolved + clean, wantRisk: "high"},
+		{name: "agent assessment retained and scoped", current: "small change", unresolved: carried, want: unresolved + "; the latest rereview: small change", wantRisk: "high"},
+		{name: "fix-only with clean assessment", current: types.NoActionableFindingRationale, fixed: fixed, want: uncertified + clean, wantRisk: "medium"},
+		{name: "carried and fix-only together", current: types.NoActionableFindingRationale, unresolved: carried, fixed: fixed, want: unresolved + "; " + uncertified + clean, wantRisk: "high"},
+		{name: "clean without dispositions unchanged", current: types.NoActionableFindingRationale, want: types.NoActionableFindingRationale, wantRisk: "low"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := types.Findings{RiskLevel: "low", RiskRationale: tc.current, ResolvedByFix: tc.fixed}
+			appendReviewDispositionMetadata(&f, tc.unresolved)
+			raw, err := types.MarshalFindingsJSON(f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, err := types.ParseFindingsJSON(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got.RiskRationale != tc.want || got.RiskLevel != tc.wantRisk || got.RiskScope != types.FindingsRiskScopeSourceOrExternal || len(got.ResolvedByFix) != len(tc.fixed) {
+				t.Fatalf("serialized disposition = %s; want rationale %q, risk %s", raw, tc.want, tc.wantRisk)
+			}
+			t.Logf("Generated findings: %s", raw)
+		})
+	}
+}
