@@ -952,7 +952,11 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if run == nil {
 		return ""
 	}
-	if pipeline.SurvivedWorkMarked(workDir) {
+	isolated, err := d.TestIsolationEnabled(run.ID)
+	if err != nil {
+		return "cannot read Test isolation policy"
+	}
+	if pipeline.SurvivedWorkMarked(workDir, isolated) {
 		return "interrupted repair left unrecorded uncommitted work; preserving worktree"
 	}
 	work, err := d.GetRunSurvivedWork(run.ID)
@@ -962,7 +966,7 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if work == nil || work.State == types.SurvivedWorkCaptured {
 		return ""
 	}
-	if pipeline.SurvivedWorkHoldsWorktree(work, workDir) {
+	if pipeline.SurvivedWorkHoldsWorktree(work, workDir, isolated) {
 		return "interrupted repair has uncommitted or unreadable work; preserving worktree"
 	}
 	// In-place work with a ref and a clean worktree is all in the ref - a
@@ -1356,6 +1360,21 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, err
 		}
 		return &ipc.RetireExistingPRResult{RetiredURL: retired}, nil
+	})
+
+	srv.Handle(ipc.MethodStartIsolatedTestRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.StartHistoryRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		receipt, err := mgr.HandleStartIsolatedTestRun(ctx, &p)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.StartFreshRunResult{Receipt: receipt}, nil
 	})
 
 	srv.Handle(ipc.MethodStartFreshRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {

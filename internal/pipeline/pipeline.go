@@ -49,6 +49,18 @@ type StepContext struct {
 	// in embeddings that never gather evidence.
 	EvidenceDir string
 	Env         []string // extra environment variables for subprocesses (used in tests)
+	// IsolatedTestWorker is set only by the internal whole-step worker, never
+	// from the environment or repository configuration.
+	IsolatedTestWorker bool
+	// RecordIsolatedHead acknowledges an isolated repair's durable head in the
+	// parent daemon before the worker continues. Nil on the ordinary path.
+	RecordIsolatedHead func(string) error
+	// IsolatedRepairRound identifies the executor-owned durable reservation
+	// for a whole-Test worker. It prevents interrupted repair side effects
+	// from being replayed merely because the daemon restarted.
+	IsolatedRepairRound func() string
+	IsolatedRound       func() int
+	IsolatedActivity    func()
 	// UserIntent is a short, possibly-empty summary of what the change author
 	// was trying to accomplish. It's surfaced in step prompts so agents have
 	// context beyond the diff. Its authority depends on IntentSource: an

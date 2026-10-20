@@ -18,21 +18,24 @@ func RecoveryRef(runID string) string {
 // replacing existing evidence. A matching commit is idempotent; a conflicting
 // or non-commit ref fails closed so reconciliation can inspect the original
 // object.
-func PreserveRecoveryHead(ctx context.Context, dir, runID, head string) error {
-	return PreserveRecoveryAnchor(ctx, dir, RecoveryRef(runID), head)
+func PreserveRecoveryHead(ctx context.Context, dir, runID, head string, gitOptions ...string) error {
+	return PreserveRecoveryAnchor(ctx, dir, RecoveryRef(runID), head, gitOptions...)
 }
 
-func PreserveRecoveryAnchor(ctx context.Context, dir, ref, head string) error {
-	if symbolic, err := git.Run(ctx, dir, "symbolic-ref", "-q", ref); err == nil {
+func PreserveRecoveryAnchor(ctx context.Context, dir, ref, head string, gitOptions ...string) error {
+	run := func(args ...string) (string, error) {
+		return git.Run(ctx, dir, append(append([]string(nil), gitOptions...), args...)...)
+	}
+	if symbolic, err := run("symbolic-ref", "-q", ref); err == nil {
 		return fmt.Errorf("recovery anchor %s is symbolic to %s instead of the verified commit %s", ref, symbolic, head)
 	}
-	if _, err := git.Run(ctx, dir, "update-ref", "--no-deref", ref, head, strings.Repeat("0", len(head))); err == nil {
+	if _, err := run("update-ref", "--no-deref", ref, head, strings.Repeat("0", len(head))); err == nil {
 		return nil
 	}
-	if symbolic, err := git.Run(ctx, dir, "symbolic-ref", "-q", ref); err == nil {
+	if symbolic, err := run("symbolic-ref", "-q", ref); err == nil {
 		return fmt.Errorf("recovery anchor %s is symbolic to %s instead of the verified commit %s", ref, symbolic, head)
 	}
-	existing, err := git.Run(ctx, dir, "rev-parse", "--verify", ref+"^{commit}")
+	existing, err := run("rev-parse", "--verify", ref+"^{commit}")
 	if err != nil {
 		return fmt.Errorf("recovery anchor %s exists but is not the verified commit %s: %w", ref, head, err)
 	}

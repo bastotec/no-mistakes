@@ -24,6 +24,15 @@ var _ pipeline.ApprovalOverrideVerifier = (*TestStep)(nil)
 func (s *TestStep) Name() types.StepName { return types.StepTest }
 
 func (s *TestStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	if !sctx.IsolatedTestWorker && sctx.DB != nil {
+		isolated, err := sctx.DB.TestIsolationEnabled(sctx.Run.ID)
+		if err != nil {
+			return nil, fmt.Errorf("read Test isolation pin: %w", err)
+		}
+		if isolated {
+			return executeIsolatedTest(sctx)
+		}
+	}
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}

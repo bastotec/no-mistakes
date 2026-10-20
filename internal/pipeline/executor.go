@@ -1183,9 +1183,14 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)
 		},
-		CIReadinessChanged: ciReadinessChanged,
-		MarkRunning:        markRunning,
-		OnPRMerged:         e.onPRMerged,
+		CIReadinessChanged:  ciReadinessChanged,
+		MarkRunning:         markRunning,
+		OnPRMerged:          e.onPRMerged,
+		IsolatedRepairRound: func() string { return activeRepairRoundID },
+		IsolatedRound:       func() int { return roundNum + 1 },
+		IsolatedActivity: func() {
+			onAgentLifecycle(agent.LifecycleEvent{Agent: "deck", Phase: agent.LifecyclePhaseActivity})
+		},
 	}
 	if stepName == types.StepTest {
 		e.mu.Lock()
@@ -1290,7 +1295,11 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if refusal := ProtectedPathOutcome(err); refusal != nil {
-			outcome, err = refusal, nil
+			if cause := context.Cause(sctx.Ctx); cause != nil {
+				err = errors.Join(err, cause)
+			} else if !errors.Is(err, ErrIsolatedTestHandoff) && !errors.Is(err, ErrDaemonShutdown) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+				outcome, err = refusal, nil
+			}
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()
@@ -1708,7 +1717,11 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	if work == nil || (work.State == types.SurvivedWorkInPlace && work.Ref == "") {
 		return nil, nil
 	}
-	unclean := survivedWorkUnclean(workDir)
+	g, err := e.survivedWorkGit(runID)
+	if err != nil {
+		return nil, err
+	}
+	unclean := g.survivedWorkUnclean(workDir)
 	// Work whose capture could not be removed from the worktree is split:
 	// part in the ref, part still in the worktree. Neither half can be
 	// continued alone without losing the other, so the round stops for a
@@ -1722,7 +1735,7 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	// again onto the head that already holds it.
 	if work.State == types.SurvivedWorkRestored && !unclean {
 		writeLog("interrupted repair work from " + work.Ref + " was already committed")
-		return nil, ClearSurvivedWork(e.db, runID, workDir)
+		return nil, g.ClearSurvivedWork(e.db, runID, workDir)
 	}
 	if work.State == types.SurvivedWorkRestored && unclean {
 		writeLog("continuing interrupted repair work restored from " + work.Ref)
@@ -1738,7 +1751,7 @@ func (e *Executor) restoreSurvivedWork(runID, workDir string, writeLog func(stri
 	}
 	restored := restoring
 	restored.State = types.SurvivedWorkRestored
-	if err := RestoreSurvivedWork(workDir, work); err != nil {
+	if err := g.RestoreSurvivedWork(workDir, work); err != nil {
 		// The round stops rather than running without the work: a capture
 		// it then took would replace this one, which it never contained.
 		captured := *work
@@ -1770,14 +1783,18 @@ func (e *Executor) settleSurvivedWork(runID, workDir string, timedOut bool, writ
 	if !timedOut && !wasRestored {
 		return nil
 	}
-	work, err := CaptureSurvivedWork(workDir, runID, SurvivedWorkRecorder(e.db, runID, workDir))
+	g, err := e.survivedWorkGit(runID)
+	if err != nil {
+		return err
+	}
+	work, err := g.CaptureSurvivedWork(workDir, runID, g.SurvivedWorkRecorder(e.db, runID, workDir))
 	switch {
 	case work != nil && timedOut:
 		writeLog("interrupted repair left uncommitted work: " + work.Next)
 	case work != nil:
 		writeLog("restored repair work was not committed this round: " + work.Next)
 	case wasRestored:
-		return ClearSurvivedWork(e.db, runID, workDir)
+		return g.ClearSurvivedWork(e.db, runID, workDir)
 	}
 	return err
 }
@@ -1790,7 +1807,11 @@ func (e *Executor) refuseSurvivedWorkInWorktree(runID, workDir string) error {
 	if err != nil || work == nil || work.State == types.SurvivedWorkCaptured {
 		return err
 	}
-	if !survivedWorkUnclean(workDir) {
+	g, err := e.survivedWorkGit(runID)
+	if err != nil {
+		return err
+	}
+	if !g.survivedWorkUnclean(workDir) {
 		return nil
 	}
 	return fmt.Errorf("interrupted repair work is still in the worktree %s (%s); only a repair may continue it: %s", workDir, work.State, work.Next)
@@ -2141,6 +2162,8 @@ func (a *gateStepBoundaryAgent) NeutralizesGateInstructions() bool {
 
 func repairInvocationErrorClass(err error) string {
 	switch {
+	case errors.Is(err, ErrTestAgentTimeout):
+		return "test_agent_timeout"
 	case errors.Is(err, ErrReviewAgentTimeout):
 		return "review_agent_timeout"
 	case errors.Is(err, ErrAgentTimeout):
@@ -2161,6 +2184,14 @@ func restoreRepairInvocationError(class *string, message string) error {
 		return errors.New(message)
 	}
 	switch *class {
+	case "isolated_test_error":
+		var failure IsolatedTestError
+		if err := json.Unmarshal([]byte(message), &failure); err != nil {
+			return fmt.Errorf("decode isolated Test error: %w", err)
+		}
+		return failure.Restore()
+	case "test_agent_timeout":
+		return fmt.Errorf("%s: %w", message, ErrTestAgentTimeout)
 	case "review_agent_timeout":
 		return fmt.Errorf("%s: %w", message, ErrReviewAgentTimeout)
 	case "agent_timeout":
@@ -2555,7 +2586,17 @@ func (e *Executor) preserveUnpublishedTerminalHead(ctx context.Context, run *db.
 	if head == published {
 		return true
 	}
-	if err := custody.PreserveRecoveryHead(ctx, e.workDir, run.ID, head); err != nil {
+	g, err := e.survivedWorkGit(run.ID)
+	if err != nil {
+		slog.Warn("failed to resolve terminal head preservation policy", "run", run.ID, "error", err)
+		return false
+	}
+	options, err := g.args(ctx, e.workDir, nil)
+	if err != nil {
+		slog.Warn("failed to disable terminal head callbacks", "run", run.ID, "error", err)
+		return false
+	}
+	if err := custody.PreserveRecoveryHead(ctx, e.workDir, run.ID, head, options...); err != nil {
 		slog.Warn("failed to anchor unpublished terminal head", "run", run.ID, "head", head, "error", err)
 		return false
 	}

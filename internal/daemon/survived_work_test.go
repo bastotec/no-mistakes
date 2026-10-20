@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -11,6 +13,100 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestSurvivedWorkCleanupSuppressesIsolatedGitCallbacks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("callback fixtures require a POSIX shell")
+	}
+	for _, isolated := range []bool{false, true} {
+		for _, marked := range []bool{false, true} {
+			t.Run(fmt.Sprintf("isolated=%v/marked=%v", isolated, marked), func(t *testing.T) {
+				p := paths.WithRoot(t.TempDir())
+				if err := p.EnsureDirs(); err != nil {
+					t.Fatal(err)
+				}
+				database, err := db.Open(p.DB())
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer database.Close()
+				repo, head := setupTestGitRepo(t, p, database, "cleanup-callbacks")
+				run, err := database.InsertRun(repo.ID, "main", head, head)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if isolated {
+					if err := database.EnableTestIsolation(run.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				dir := p.WorktreeDir(repo.ID, run.ID)
+				if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), dir, head); err != nil {
+					t.Fatal(err)
+				}
+				if marked {
+					marker := gitOutput(t, dir, "rev-parse", "--git-path", "no-mistakes-survived-work")
+					if err := os.WriteFile(marker, []byte("unrecorded work\n"), 0o600); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := database.SetRunSurvivedWork(run.ID, &types.SurvivedWork{State: types.SurvivedWorkRestored, Worktree: dir}); err != nil {
+					t.Fatal(err)
+				}
+				file := filepath.Join(dir, "test.txt")
+				if err := os.WriteFile(file, []byte("interrupted isolated repair\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				callbacks := t.TempDir()
+				monitorMarker := filepath.Join(callbacks, "monitor-called")
+				hookMarker := filepath.Join(callbacks, "hook-called")
+				for name, body := range map[string]string{
+					"monitor":           "#!/bin/sh\nprintf called >> '" + monitorMarker + "'\nprintf 'token\\000/\\000'\n",
+					"post-index-change": "#!/bin/sh\nprintf called >> '" + hookMarker + "'\n",
+				} {
+					if err := os.WriteFile(filepath.Join(callbacks, name), []byte(body), 0o755); err != nil {
+						t.Fatal(err)
+					}
+				}
+				gitCmd(t, dir, "config", "core.fsmonitor", filepath.Join(callbacks, "monitor"))
+				gitCmd(t, dir, "config", "core.hooksPath", callbacks)
+				if err := database.UpdateRunStatus(run.ID, types.RunCancelled); err != nil {
+					t.Fatal(err)
+				}
+				if err := database.UpdateRunError(run.ID, types.RunCancelReasonAbortedByUser); err != nil {
+					t.Fatal(err)
+				}
+				assertCallbacks := func() {
+					t.Helper()
+					_, err := os.Stat(monitorMarker)
+					if isolated && !os.IsNotExist(err) || !isolated && err != nil {
+						t.Fatalf("cleanup monitor isolated=%v: %v", isolated, err)
+					}
+					if isolated {
+						if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+							t.Fatalf("cleanup invoked isolated hook: %v", err)
+						}
+					}
+				}
+				cleanupOrphanWorktrees(database, p, nil)
+				if data, err := os.ReadFile(file); err != nil || string(data) != "interrupted isolated repair\n" {
+					t.Fatalf("cleanup erased repair: %q %v", data, err)
+				}
+				assertCallbacks()
+				if isolated {
+					if reason := survivedWorkCleanupReason(database, run, filepath.Join(dir, "missing")); reason == "" {
+						t.Fatal("unreadable isolated worktree released custody")
+					}
+				}
+				gitCmd(t, dir, "-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull, "reset", "--hard", "HEAD")
+				cleanupOrphanWorktrees(database, p, nil)
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatalf("clean worktree not reclaimed: %v", err)
+				}
+				assertCallbacks()
+			})
+		}
+	}
+}
 
 func TestSurvivedWorkRetainedAfterAbortAndStartupCleanup(t *testing.T) {
 	p := paths.WithRoot(t.TempDir())

@@ -26,7 +26,8 @@ type perfRecordingAgent struct {
 	runID    string
 	stepName types.StepName
 	// round returns the 1-based round the current invocation belongs to.
-	round func() int
+	round    func() int
+	onRecord func(db.AgentInvocation)
 }
 
 func (a *perfRecordingAgent) Name() string { return a.inner.Name() }
@@ -109,6 +110,9 @@ func (a *perfRecordingAgent) record(ctx context.Context, opts agent.RunOpts, age
 
 	if _, dbErr := a.db.InsertAgentInvocation(inv); dbErr != nil {
 		slog.Warn("failed to record agent invocation", "step", a.stepName, "error", dbErr)
+	}
+	if a.onRecord != nil {
+		a.onRecord(inv)
 	}
 }
 
@@ -289,5 +293,16 @@ func classifyFallbackReason(err error) string {
 		return db.FallbackReasonTransient
 	default:
 		return db.FallbackReasonOther
+	}
+}
+
+func InstrumentIsolatedTestAgent(inner agent.Agent, database *db.DB, runID string, round int, record func(db.AgentInvocation), activity func()) agent.Agent {
+	return &perfRecordingAgent{
+		inner: &lifecycleAgent{inner: inner, onLifecycle: func(event agent.LifecycleEvent) {
+			if event.Phase == agent.LifecyclePhaseActivity && activity != nil {
+				activity()
+			}
+		}},
+		db: database, runID: runID, stepName: types.StepTest, round: func() int { return round }, onRecord: record,
 	}
 }

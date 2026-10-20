@@ -93,10 +93,11 @@ Event delivery is bounded, so a slow or wedged client can never stall a run. Und
 
 Pipeline agents are prompted to keep intentional writes inside that detached worktree and avoid changing system state outside it, such as Homebrew packages, apps under `/Applications`, or global tool configuration.
 That reduces surprising machine-level side effects and macOS App Management prompts, but it is prompt steering rather than a true sandbox.
+The explicit [run-scoped Test isolation](/no-mistakes/reference/cli/#run-scoped-test-isolation) opt-in adds an OS boundary for Test; other steps and ordinary runs keep the behavior described here.
 While executing steps, the daemon also owns child-process cleanup.
 Configured commands and one-shot agent subprocesses are terminated as a process tree on completion, failure, or cancellation so leaked test workers, build watchers, or dev servers cannot accumulate across runs.
 Each process is asked to exit first and only forcibly killed if it is still running a few seconds later.
-A process can still escape that tree by detaching itself into its own session, so when a run finishes the daemon also terminates anything still standing in that run's worktree before removing the directory.
+On the ordinary execution path, a process can still escape that tree by detaching itself into its own session, so when a run finishes the daemon also terminates anything still standing in that run's worktree before removing the directory.
 That sweep is scoped by working directory: it never touches a worktree whose run is still active, and it can never reach a process working outside `~/.no-mistakes/worktrees/` or outside a run worktree a run record names in a configured worktree root.
 
 ## Concurrent push handling

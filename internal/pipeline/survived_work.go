@@ -11,6 +11,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
+	"github.com/kunchenguid/no-mistakes/internal/testisolation"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -33,6 +34,100 @@ const survivedWorkRefPrefix = "refs/no-mistakes/survived/"
 
 const survivedWorkGitTimeout = 30 * time.Second
 
+type survivedWorkGit struct {
+	noCallbacks bool
+}
+
+func (g survivedWorkGit) args(ctx context.Context, dir string, args []string) ([]string, error) {
+	if !g.noCallbacks {
+		return args, nil
+	}
+	overrides := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"}
+	// Never enter another repository to inspect its private configuration.
+	args = append([]string(nil), args...)
+	for i, arg := range args {
+		if strings.HasPrefix(arg, "--ignore-submodules=") {
+			args[i] = "--ignore-submodules=all"
+		}
+	}
+	keys, err := git.RunRaw(ctx, dir, append(overrides, "config", "--null", "--name-only", "--list")...)
+	if err != nil {
+		return nil, err
+	}
+	for _, key := range strings.Split(string(keys), "\x00") {
+		field := key[strings.LastIndexByte(key, '.')+1:]
+		if strings.HasPrefix(key, "filter.") && (field == "clean" || field == "smudge" || field == "process" || field == "required") ||
+			strings.HasPrefix(key, "diff.") && field == "textconv" {
+			if strings.ContainsAny(key, "=\n\r") {
+				return nil, fmt.Errorf("cannot disable unsafe Git callback key")
+			}
+			value := ""
+			if field == "required" {
+				value = "false"
+			}
+			overrides = append(overrides, "-c", key+"="+value)
+		}
+	}
+	return append(overrides, args...), nil
+}
+
+func (g survivedWorkGit) Run(ctx context.Context, dir string, args ...string) (string, error) {
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return "", err
+	}
+	return git.Run(ctx, dir, args...)
+}
+
+func (g survivedWorkGit) RunRaw(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return nil, err
+	}
+	return git.RunRaw(ctx, dir, args...)
+}
+
+func (g survivedWorkGit) RunWithEnv(ctx context.Context, dir string, env []string, args ...string) (string, error) {
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return "", err
+	}
+	return git.RunWithEnv(ctx, dir, env, args...)
+}
+
+func (g survivedWorkGit) RunWithInput(ctx context.Context, dir, input string, args ...string) (string, error) {
+	args, err := g.args(ctx, dir, args)
+	if err != nil {
+		return "", err
+	}
+	return git.RunWithInput(ctx, dir, input, args...)
+}
+
+func (e *Executor) survivedWorkGit(runID string) (survivedWorkGit, error) {
+	isolated, err := e.db.TestIsolationEnabled(runID)
+	return survivedWorkGit{noCallbacks: isolated}, err
+}
+
+func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) (*types.SurvivedWork, error) {
+	return (survivedWorkGit{}).CaptureSurvivedWork(workDir, runID, record)
+}
+
+func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
+	return (survivedWorkGit{}).RestoreSurvivedWork(workDir, work)
+}
+
+func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.SurvivedWork) error {
+	return (survivedWorkGit{}).SurvivedWorkRecorder(database, runID, workDir)
+}
+
+func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
+	isolated, err := database.TestIsolationEnabled(runID)
+	if err != nil {
+		return err
+	}
+	return (survivedWorkGit{noCallbacks: isolated}).ClearSurvivedWork(database, runID, workDir)
+}
+
 // CaptureSurvivedWork moves a cut-short repair's uncommitted work into a
 // run-owned ref and returns the worktree to HEAD. It returns nil for a clean
 // worktree. record makes the evidence durable and is called before the
@@ -42,16 +137,16 @@ const survivedWorkGitTimeout = 30 * time.Second
 // worktree (see the daemon) rather than lose it. The error reports in-place
 // work whose handoff could not be recorded either: a marker file in the
 // worktree's git directory then stands in for it, best effort.
-func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) (*types.SurvivedWork, error) {
+func (g survivedWorkGit) CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) (*types.SurvivedWork, error) {
 	if record == nil {
 		record = func(*types.SurvivedWork) error { return nil }
 	}
-	work := captureSurvivedWork(workDir, runID, record)
+	work := g.captureSurvivedWork(workDir, runID, record)
 	if work == nil || work.State != types.SurvivedWorkInPlace {
 		return work, nil
 	}
 	if err := record(work); err != nil {
-		writeSurvivedWorkMarker(workDir)
+		g.writeSurvivedWorkMarker(workDir)
 		return work, fmt.Errorf("record interrupted repair work left in %s: %w", workDir, err)
 	}
 	return work, nil
@@ -61,18 +156,18 @@ func CaptureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 // cleanup away from in-place work whose handoff could not be recorded.
 const survivedWorkMarker = "no-mistakes-survived-work"
 
-func survivedWorkMarkerPath(workDir string) string {
+func (g survivedWorkGit) survivedWorkMarkerPath(workDir string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	dir, err := git.Run(ctx, workDir, "rev-parse", "--path-format=absolute", "--git-dir")
+	dir, err := g.Run(ctx, workDir, "rev-parse", "--path-format=absolute", "--git-dir")
 	if err != nil || strings.TrimSpace(dir) == "" {
 		return ""
 	}
 	return filepath.Join(strings.TrimSpace(dir), survivedWorkMarker)
 }
 
-func writeSurvivedWorkMarker(workDir string) {
-	if path := survivedWorkMarkerPath(workDir); path != "" {
+func (g survivedWorkGit) writeSurvivedWorkMarker(workDir string) {
+	if path := g.survivedWorkMarkerPath(workDir); path != "" {
 		_ = os.WriteFile(path, []byte("interrupted repair work left in this worktree\n"), 0o600)
 	}
 }
@@ -80,15 +175,16 @@ func writeSurvivedWorkMarker(workDir string) {
 // SurvivedWorkMarked reports whether in-place work whose handoff could not be
 // recorded marked this worktree, and drops the marker once the worktree is
 // clean again.
-func SurvivedWorkMarked(workDir string) bool {
-	path := survivedWorkMarkerPath(workDir)
+func SurvivedWorkMarked(workDir string, isolated bool) bool {
+	g := survivedWorkGit{noCallbacks: isolated}
+	path := g.survivedWorkMarkerPath(workDir)
 	if path == "" {
-		return false
+		return isolated
 	}
 	if _, err := os.Stat(path); err != nil {
 		return false
 	}
-	if survivedWorkUnclean(workDir) {
+	if g.survivedWorkUnclean(workDir) {
 		return true
 	}
 	_ = os.Remove(path)
@@ -99,7 +195,7 @@ func SurvivedWorkMarked(workDir string) bool {
 // handoff and then deletes the capture ref it replaced, so only the latest
 // capture is kept. A replaced in-place handoff has no ref; a new in-place one
 // keeps the old ref, since that is all that is known to hold the work.
-func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.SurvivedWork) error {
+func (g survivedWorkGit) SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.SurvivedWork) error {
 	return func(work *types.SurvivedWork) error {
 		previous, err := database.GetRunSurvivedWork(runID)
 		if err != nil {
@@ -114,7 +210,7 @@ func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.Su
 			if inUse, err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
 				return err
 			} else if !inUse {
-				deleteSurvivedWorkRef(workDir, previous.Ref)
+				g.deleteSurvivedWorkRef(workDir, previous.Ref)
 			}
 		}
 		return nil
@@ -123,7 +219,7 @@ func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.Su
 
 // ClearSurvivedWork drops the run's handoff once a repair committed the work,
 // and the capture ref with it.
-func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
+func (g survivedWorkGit) ClearSurvivedWork(database *db.DB, runID, workDir string) error {
 	previous, err := database.GetRunSurvivedWork(runID)
 	if err != nil {
 		return err
@@ -135,26 +231,31 @@ func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
 		if inUse, err := database.ClearSurvivedWorkRef(previous.Ref); err != nil {
 			return err
 		} else if !inUse {
-			deleteSurvivedWorkRef(workDir, previous.Ref)
+			g.deleteSurvivedWorkRef(workDir, previous.Ref)
 		}
 	}
 	return nil
 }
 
-func deleteSurvivedWorkRef(workDir, ref string) {
+func (g survivedWorkGit) deleteSurvivedWorkRef(workDir, ref string) {
 	if !strings.HasPrefix(ref, survivedWorkRefPrefix) {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	_, _ = git.Run(ctx, workDir, "update-ref", "-d", ref)
+	_, _ = g.Run(ctx, workDir, "update-ref", "-d", ref)
 }
 
-func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
+func (g survivedWorkGit) captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork) error) *types.SurvivedWork {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
+	if g.noCallbacks {
+		if err := testisolation.CheckRepository(ctx, workDir, "HEAD"); err != nil {
+			return &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: workDir, InspectionError: err.Error(), Next: survivedWorkInPlaceNext}
+		}
+	}
 	// Raw output: a porcelain line's leading status column is significant.
-	statusRaw, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	statusRaw, err := g.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	status := string(statusRaw)
 	if err == nil && strings.TrimSpace(status) == "" {
 		return nil
@@ -169,7 +270,7 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	// A dirty submodule's own edits live in its repository, not in anything
 	// the superproject can write as a tree: capture would record a gitlink
 	// and lose them. Leave such work in place.
-	if dirty, err := dirtySubmodule(ctx, workDir); err != nil || dirty != "" {
+	if dirty, err := g.dirtySubmodule(ctx, workDir); err != nil || dirty != "" {
 		if err != nil {
 			work.InspectionError = "could not check submodules: " + err.Error()
 		} else {
@@ -181,7 +282,7 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	// A nested repository (an untracked directory with its own .git) is
 	// snapshotted only as a gitlink, and HEAD's ignore rules can hide it
 	// once the worktree is reset, so it is caught here, before anything moves.
-	statusZ, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
+	statusZ, err := g.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		work.InspectionError = "worktree status unreadable"
 		work.Next = survivedWorkInPlaceNext
@@ -195,7 +296,7 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	// The snapshot skips ignored files, and the reset rewrites every file
 	// HEAD tracks: a HEAD file the repair untracked and ignored would be
 	// overwritten with nothing holding its edits.
-	if path, err := ignoredTrackedFile(ctx, workDir); err != nil || path != "" {
+	if path, err := g.ignoredTrackedFile(ctx, workDir); err != nil || path != "" {
 		if err != nil {
 			work.InspectionError = "could not check ignored files: " + err.Error()
 		} else {
@@ -204,14 +305,14 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
-	base, commit, err := snapshotSurvivedWork(ctx, workDir)
+	base, commit, err := g.snapshotSurvivedWork(ctx, workDir)
 	if err != nil {
 		work.InspectionError = "could not capture the uncommitted work: " + err.Error()
 		work.Next = survivedWorkInPlaceNext
 		return work
 	}
 	ref := survivedWorkRefPrefix + runID + "/" + commit[:12]
-	if _, err := git.Run(ctx, workDir, "update-ref", ref, commit); err != nil {
+	if _, err := g.Run(ctx, workDir, "update-ref", ref, commit); err != nil {
 		work.InspectionError = "could not record the uncommitted work: " + err.Error()
 		work.Next = survivedWorkInPlaceNext
 		return work
@@ -236,15 +337,15 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 	// repair had ignored, which the snapshot does not hold: the status check
 	// below then keeps the work in place rather than cleaning it away. git
 	// clean never follows symlinks.
-	if _, err := git.Run(ctx, workDir, "clean", "-fdq"); err != nil {
+	if _, err := g.Run(ctx, workDir, "clean", "-fdq"); err != nil {
 		work.InspectionError = "captured, but its untracked files could not be removed: " + err.Error()
-	} else if _, err := git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err != nil {
+	} else if _, err := g.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD"); err != nil {
 		work.InspectionError = "captured, but the worktree could not be reset: " + err.Error()
 	}
 	// git clean skips nested repositories, and the snapshot holds only a
 	// gitlink for one, so a clean exit does not prove the worktree is clean.
 	if work.InspectionError == "" {
-		if rest, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"); err != nil {
+		if rest, err := g.RunRaw(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none"); err != nil {
 			work.InspectionError = "captured, but the worktree could not be checked afterwards: " + err.Error()
 		} else if strings.TrimSpace(string(rest)) != "" {
 			work.InspectionError = "captured, but changes the capture cannot hold (such as a nested repository) are still in the worktree"
@@ -268,19 +369,30 @@ func captureSurvivedWork(workDir, runID string, record func(*types.SurvivedWork)
 
 const survivedWorkInPlaceNext = "Left uncommitted in the run worktree and not pushed. Cleanup refuses to remove the worktree while it holds changes; recover the files from it by hand before abandoning the run."
 
+// RetainIsolatedTestWork records unsupported worker state without asking Git
+// to inspect or capture it. Even a database failure leaves a cleanup marker.
+func RetainIsolatedTestWork(database *db.DB, runID, workDir string, cause error) error {
+	work := &types.SurvivedWork{State: types.SurvivedWorkInPlace, Worktree: workDir, InspectionError: cause.Error(), Next: survivedWorkInPlaceNext}
+	if err := database.SetRunSurvivedWork(runID, work); err != nil {
+		(survivedWorkGit{noCallbacks: true}).writeSurvivedWorkMarker(workDir)
+		return err
+	}
+	return nil
+}
+
 // snapshotSurvivedWork writes the index and the full working tree as two
 // commits on HEAD without touching the real index or the worktree.
-func snapshotSurvivedWork(ctx context.Context, workDir string) (base, commit string, err error) {
-	base, err = git.Run(ctx, workDir, "rev-parse", "HEAD")
+func (g survivedWorkGit) snapshotSurvivedWork(ctx context.Context, workDir string) (base, commit string, err error) {
+	base, err = g.Run(ctx, workDir, "rev-parse", "HEAD")
 	if err != nil {
 		return "", "", err
 	}
 	base = strings.TrimSpace(base)
-	indexTree, err := git.Run(ctx, workDir, "write-tree")
+	indexTree, err := g.Run(ctx, workDir, "write-tree")
 	if err != nil {
 		return "", "", fmt.Errorf("write index tree: %w", err)
 	}
-	indexPath, err := git.Run(ctx, workDir, "rev-parse", "--path-format=absolute", "--git-path", "index")
+	indexPath, err := g.Run(ctx, workDir, "rev-parse", "--path-format=absolute", "--git-path", "index")
 	if err != nil {
 		return "", "", err
 	}
@@ -298,18 +410,18 @@ func snapshotSurvivedWork(ctx context.Context, workDir string) (base, commit str
 		return "", "", err
 	}
 	env := []string{"GIT_INDEX_FILE=" + tmpIndex}
-	if _, err := git.RunWithEnv(ctx, workDir, env, "add", "-A"); err != nil {
+	if _, err := g.RunWithEnv(ctx, workDir, env, "add", "-A"); err != nil {
 		return "", "", fmt.Errorf("stage working tree: %w", err)
 	}
-	worktreeTree, err := git.RunWithEnv(ctx, workDir, env, "write-tree")
+	worktreeTree, err := g.RunWithEnv(ctx, workDir, env, "write-tree")
 	if err != nil {
 		return "", "", fmt.Errorf("write working tree: %w", err)
 	}
-	indexCommit, err := git.Run(ctx, workDir, "commit-tree", strings.TrimSpace(indexTree), "-p", base, "-m", "no-mistakes: interrupted repair, index")
+	indexCommit, err := g.Run(ctx, workDir, "commit-tree", strings.TrimSpace(indexTree), "-p", base, "-m", "no-mistakes: interrupted repair, index")
 	if err != nil {
 		return "", "", err
 	}
-	commit, err = git.Run(ctx, workDir, "commit-tree", strings.TrimSpace(worktreeTree), "-p", strings.TrimSpace(indexCommit), "-m", "no-mistakes: interrupted repair, working tree")
+	commit, err = g.Run(ctx, workDir, "commit-tree", strings.TrimSpace(worktreeTree), "-p", strings.TrimSpace(indexCommit), "-m", "no-mistakes: interrupted repair, working tree")
 	if err != nil {
 		return "", "", err
 	}
@@ -322,28 +434,33 @@ func snapshotSurvivedWork(ctx context.Context, workDir string) (base, commit str
 // the unstaged layer are each merged three-way, preserving their index split.
 // A restore that cannot apply cleanly leaves the worktree as it was and
 // returns an error; the ref and its evidence stay.
-func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
+func (g survivedWorkGit) RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 	if work == nil || work.Ref == "" {
 		return fmt.Errorf("no captured work to restore")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	if g.noCallbacks {
+		if err := testisolation.CheckRepository(ctx, workDir, "HEAD", work.Ref, work.Ref+"^"); err != nil {
+			return fmt.Errorf("refuse isolated custody restore: %w", err)
+		}
+	}
+	status, err := g.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return fmt.Errorf("read worktree status: %w", err)
 	}
 	if strings.TrimSpace(status) != "" {
 		return fmt.Errorf("worktree is not clean, so restoring would mix in other changes")
 	}
-	head, err := git.Run(ctx, workDir, "rev-parse", "HEAD")
+	head, err := g.Run(ctx, workDir, "rev-parse", "HEAD")
 	if err != nil {
 		return err
 	}
 	if strings.TrimSpace(head) == work.BaseSHA {
-		if _, err := git.Run(ctx, workDir, "read-tree", "-m", "-u", "HEAD", work.Ref+"^{tree}"); err != nil {
+		if _, err := g.Run(ctx, workDir, "read-tree", "-m", "-u", "HEAD", work.Ref+"^{tree}"); err != nil {
 			return fmt.Errorf("restore working tree: %w", err)
 		}
-		if _, err := git.Run(ctx, workDir, "read-tree", work.Ref+"^^{tree}"); err != nil {
+		if _, err := g.Run(ctx, workDir, "read-tree", work.Ref+"^^{tree}"); err != nil {
 			return fmt.Errorf("restore index: %w", err)
 		}
 		return nil
@@ -353,25 +470,25 @@ func RestoreSurvivedWork(workDir string, work *types.SurvivedWork) error {
 	// so staged-only work survives too and the index keeps only what was
 	// staged.
 	undo := func() {
-		_, _ = git.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD")
-		_, _ = git.Run(ctx, workDir, "clean", "-fdq")
+		_, _ = g.Run(ctx, workDir, "reset", "-q", "--hard", "HEAD")
+		_, _ = g.Run(ctx, workDir, "clean", "-fdq")
 	}
-	if err := applySurvivedLayer(ctx, workDir, work.BaseSHA, work.Ref+"^", "--3way", "--index"); err != nil {
+	if err := g.applySurvivedLayer(ctx, workDir, work.BaseSHA, work.Ref+"^", "--3way", "--index"); err != nil {
 		undo()
 		return fmt.Errorf("captured staged work does not apply to the moved HEAD: %w", err)
 	}
 	// The unstaged layer is merged three-way as well, which needs the
 	// index; the index then goes back to the staged layer alone.
-	stagedTree, err := git.Run(ctx, workDir, "write-tree")
+	stagedTree, err := g.Run(ctx, workDir, "write-tree")
 	if err != nil {
 		undo()
 		return fmt.Errorf("record restored staged work: %w", err)
 	}
-	if err := applySurvivedLayer(ctx, workDir, work.Ref+"^", work.Ref, "--3way", "--index"); err != nil {
+	if err := g.applySurvivedLayer(ctx, workDir, work.Ref+"^", work.Ref, "--3way", "--index"); err != nil {
 		undo()
 		return fmt.Errorf("captured unstaged work does not apply to the moved HEAD: %w", err)
 	}
-	if _, err := git.Run(ctx, workDir, "read-tree", strings.TrimSpace(stagedTree)); err != nil {
+	if _, err := g.Run(ctx, workDir, "read-tree", strings.TrimSpace(stagedTree)); err != nil {
 		undo()
 		return fmt.Errorf("restore the staged layer: %w", err)
 	}
@@ -389,10 +506,15 @@ func SurvivedWorkPrompt(restored *types.SurvivedWork) string {
 
 // survivedWorkUnclean reports whether a worktree still holds changes, treating
 // an unreadable status as unclean.
-func survivedWorkUnclean(workDir string) bool {
+func (g survivedWorkGit) survivedWorkUnclean(workDir string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), survivedWorkGitTimeout)
 	defer cancel()
-	status, err := git.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
+	if g.noCallbacks {
+		if err := testisolation.CheckRepository(ctx, workDir, "HEAD"); err != nil {
+			return true
+		}
+	}
+	status, err := g.Run(ctx, workDir, "status", "--porcelain", "--untracked-files=all", "--ignore-submodules=none")
 	return err != nil || strings.TrimSpace(status) != ""
 }
 
@@ -401,16 +523,17 @@ func survivedWorkUnclean(workDir string) bool {
 // repair that never settled (a shutdown mid-round) and may have added to it -
 // and the worktree still holds changes. Captured work lives in its ref and
 // never holds the worktree.
-func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string) bool {
-	return work != nil && work.State != types.SurvivedWorkCaptured && survivedWorkUnclean(workDir)
+func SurvivedWorkHoldsWorktree(work *types.SurvivedWork, workDir string, isolated bool) bool {
+	g := survivedWorkGit{noCallbacks: isolated}
+	return work != nil && work.State != types.SurvivedWorkCaptured && g.survivedWorkUnclean(workDir)
 }
 
 // dirtySubmodule returns the first changed path in status that is a
 // submodule (a gitlink in the index), or "".
 // Both listings are read NUL-delimited, so paths compare exactly whatever
 // characters they hold.
-func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
-	stage, err := git.RunRaw(ctx, workDir, "ls-files", "--stage", "-z")
+func (g survivedWorkGit) dirtySubmodule(ctx context.Context, workDir string) (string, error) {
+	stage, err := g.RunRaw(ctx, workDir, "ls-files", "--stage", "-z")
 	if err != nil {
 		return "", err
 	}
@@ -425,7 +548,7 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 	if len(gitlinks) == 0 {
 		return "", nil
 	}
-	status, err := git.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
+	status, err := g.RunRaw(ctx, workDir, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=none")
 	if err != nil {
 		return "", err
 	}
@@ -440,15 +563,15 @@ func dirtySubmodule(ctx context.Context, workDir string) (string, error) {
 // ignoredTrackedFile returns the first ignored, untracked file the reset to
 // HEAD would overwrite - HEAD tracks it, or a file or directory in its
 // place - or "".
-func ignoredTrackedFile(ctx context.Context, workDir string) (string, error) {
-	ignored, err := git.RunRaw(ctx, workDir, "ls-files", "-z", "--others", "--ignored", "--exclude-standard")
+func (g survivedWorkGit) ignoredTrackedFile(ctx context.Context, workDir string) (string, error) {
+	ignored, err := g.RunRaw(ctx, workDir, "ls-files", "-z", "--others", "--ignored", "--exclude-standard")
 	if err != nil {
 		return "", err
 	}
 	if len(ignored) == 0 {
 		return "", nil
 	}
-	tracked, err := git.RunRaw(ctx, workDir, "ls-tree", "-r", "-z", "--name-only", "HEAD")
+	tracked, err := g.RunRaw(ctx, workDir, "ls-tree", "-r", "-z", "--name-only", "HEAD")
 	if err != nil {
 		return "", err
 	}
@@ -517,14 +640,14 @@ func nestedRepository(statusZ string) string {
 // It is a machine-read patch: raw bytes (no textconv, no external diff),
 // fixed a/ b/ prefixes whatever diff.noprefix or diff.mnemonicPrefix say,
 // applied with the matching -p1.
-func applySurvivedLayer(ctx context.Context, workDir, from, to string, applyArgs ...string) error {
-	patch, err := git.RunRaw(ctx, workDir, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to)
+func (g survivedWorkGit) applySurvivedLayer(ctx context.Context, workDir, from, to string, applyArgs ...string) error {
+	patch, err := g.RunRaw(ctx, workDir, "-c", "diff.noprefix=false", "-c", "diff.mnemonicPrefix=false", "diff", "--binary", "--no-ext-diff", "--no-textconv", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", from, to)
 	if err != nil {
 		return fmt.Errorf("read captured changes: %w", err)
 	}
 	if len(patch) == 0 {
 		return nil
 	}
-	_, err = git.RunWithInput(ctx, workDir, string(patch), append([]string{"apply", "-p1"}, applyArgs...)...)
+	_, err = g.RunWithInput(ctx, workDir, string(patch), append([]string{"apply", "-p1"}, applyArgs...)...)
 	return err
 }

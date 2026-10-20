@@ -289,6 +289,11 @@ func recordAgentFixHead(sctx *pipeline.StepContext, stepName types.StepName, hea
 	if startingHead == "" {
 		startingHead = sctx.Run.HeadSHA
 	}
+	if sctx.RecordIsolatedHead != nil {
+		if err := sctx.RecordIsolatedHead(headSHA); err != nil {
+			return err
+		}
+	}
 	if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, headSHA); err != nil {
 		return err
 	}

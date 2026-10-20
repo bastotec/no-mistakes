@@ -1558,6 +1558,12 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	if ctx.Value(isolatedTestLaunchKey{}) == true {
+		if err := m.db.EnableTestIsolation(run.ID); err != nil {
+			m.db.UpdateRunError(run.ID, "pin Test isolation failed")
+			return "", fmt.Errorf("pin Test isolation: %w", err)
+		}
+	}
 	// The target constrains this run from here on, but it is not durable until
 	// the forge has proven it below: a launch that is refused there must leave
 	// the branch mapped exactly where it already was, so the next unflagged run
