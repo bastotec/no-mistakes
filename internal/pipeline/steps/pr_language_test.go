@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"html"
+	"os"
 	"strings"
 	"testing"
 
@@ -229,6 +230,123 @@ func TestPRWriterTranslatesTestedProseWithoutChangingCommandsOrRecords(t *testin
 	afterRoundsJSON, _ := json.Marshal(afterRounds)
 	if string(beforeStepsJSON) != string(afterStepsJSON) || string(beforeRoundsJSON) != string(afterRoundsJSON) {
 		t.Fatal("publication changed persisted Test evidence")
+	}
+}
+
+func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *testing.T) {
+	for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
+		t.Run(string(provider), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			const caption = `Verified the criterion "Aprovação apenas para revisão" against the running product`
+			const english = `Verified the criterion "Approval for review only" against the running product`
+			const fileBody = "RAW_FILE: aprovação apenas para revisão\nexit=0\n"
+			const logBody = `{"criterion":"Aprovação apenas para revisão","exit":0}`
+			const commandBody = "./check --scope 'revisão'\nresult=aprovado"
+			evidenceRoot := t.TempDir()
+			path := writeTempEvidenceFile(t, evidenceRoot, "aprovação.log", []byte(fileBody))
+			ag := &mockAgent{name: "test", translationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				raw := strings.SplitN(opts.Prompt, prProseInputPrefix, 2)
+				var sources []string
+				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &sources) != nil {
+					t.Fatal("missing publication prose")
+				}
+				found := false
+				for i, source := range sources {
+					if strings.Contains(source, "RAW_FILE:") {
+						t.Fatal("literal file evidence reached translation")
+					}
+					if source == caption {
+						sources[i] = english
+						found = true
+					}
+				}
+				if !found {
+					t.Fatal("artifact caption omitted from translation")
+				}
+				payload, _ := json.Marshal(map[string]any{"translations": sources})
+				return &agent.Result{Output: payload}, nil
+			}}
+			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				raw := strings.SplitN(opts.Prompt, "Run-written PR content JSON:\n", 2)
+				var written prContent
+				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &written) != nil {
+					t.Fatal("missing final content")
+				}
+				body := html.UnescapeString(written.Body)
+				if strings.Contains(body, caption) || !strings.Contains(body, english) {
+					t.Fatalf("final body lost translated caption: %s", body)
+				}
+				for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
+					if !strings.Contains(body, literal) {
+						t.Fatalf("final body changed literal evidence %q: %s", literal, body)
+					}
+				}
+				digest, err := validationDigestFromPrompt(opts.Prompt)
+				if err != nil {
+					t.Fatal(err)
+				}
+				payload, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}})
+				return &agent.Result{Output: payload}, nil
+			}
+			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+			sctx.EvidenceDir = evidenceRoot
+			payload, _ := json.Marshal(map[string]any{
+				"items": []any{}, "testing_summary": "Verified review-only scope.",
+				"artifacts": []any{
+					map[string]string{"kind": "log", "label": "Captioned log", "path": path, "content": caption},
+					map[string]string{"kind": "other", "label": "Linked observation", "url": "https://example.com/evidence", "content": caption},
+					map[string]string{"kind": "other", "label": "Inline observation", "content": caption},
+					map[string]string{"kind": "log", "label": "Raw log", "content": logBody},
+					map[string]string{"kind": "command-output", "label": "Raw command output", "content": commandBody},
+				},
+			})
+			sr := insertCompletedStep(t, sctx, "test", string(payload), "")
+			beforeSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeRounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeStepsJSON, _ := json.Marshal(beforeSteps)
+			beforeRoundsJSON, _ := json.Marshal(beforeRounds)
+			attestation := buildPipelineAttestation(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, head)
+			content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", base, provider, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Count(html.UnescapeString(content.Body), english) != 3 {
+				t.Fatalf("not all artifact captions translated: %s", content.Body)
+			}
+			if provider == scm.ProviderGitHub && !strings.Contains(content.Body, attestation) {
+				t.Fatal("publication changed machine attestation")
+			}
+			if err := translatePRRenderProse(sctx, beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}); err != nil {
+				t.Fatal(err)
+			}
+			full := html.UnescapeString(BuildTestingSummaryForPR(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, sctx.Repo.UpstreamURL, head, dir, evidenceRoot, nil))
+			if strings.Contains(full, caption) || strings.Count(full, english) != 3 || !strings.Contains(full, strings.TrimRight(fileBody, "\n")) {
+				t.Fatalf("noncompact renderer lost caption translation or literal file evidence: %s", full)
+			}
+			afterSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterRounds, err := sctx.DB.GetRoundsByStep(sr.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			afterStepsJSON, _ := json.Marshal(afterSteps)
+			afterRoundsJSON, _ := json.Marshal(afterRounds)
+			if string(beforeStepsJSON) != string(afterStepsJSON) || string(beforeRoundsJSON) != string(afterRoundsJSON) {
+				t.Fatal("publication changed durable artifact records")
+			}
+			unchangedFile, err := os.ReadFile(path)
+			if err != nil || string(unchangedFile) != fileBody {
+				t.Fatalf("publication changed literal file bytes: %q, %v", unchangedFile, err)
+			}
+		})
 	}
 }
 
