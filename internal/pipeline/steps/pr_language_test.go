@@ -272,6 +272,11 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &written) != nil {
 					t.Fatal("missing final content")
 				}
+				// This checks the generated validator request contract, not the
+				// model's interpretation of the literal evidence below.
+				if !strings.Contains(opts.Prompt, "captured logs and command output") || !strings.Contains(opts.Prompt, "Judge authored captions and observations") {
+					t.Fatal("validator request lost the literal-output versus authored-prose distinction")
+				}
 				body := html.UnescapeString(written.Body)
 				if strings.Count(body, caption) != 2 || strings.Count(body, english) != 3 {
 					t.Fatalf("final body mixed authored captions with literal output: %s", body)

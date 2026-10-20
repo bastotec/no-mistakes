@@ -27,7 +27,7 @@ const prCreationSkillProseRuleClause = `
 const prCreationSkillPolicyClauses = prCreationSkillInspectClause + prCreationSkillTemplateFormatClause + prCreationSkillProseRuleClause
 
 const prCreationSkillEnglishClauses = `
-- Write all natural-language title and body text in English, including quotations translated faithfully from any source language. Paths, URLs, commands, code, identifiers, product names, and repository issue keys remain literal.
+- Write all authored natural-language title and body text in English, including quotations translated faithfully from any source language. Paths, URLs, commands, code, identifiers, product names, repository issue keys, and captured logs and command output remain literal. Authored captions and observations still require English, including quotations, even when rendered in code spans or fences.
 - Preserve approval and residual scope exactly: permission for review is not permission to merge, deploy, or waive outstanding work. Translation is public authoring, never a change to immutable source intent or approval evidence. Never publish private repair guidance.
 - Do not invent validation, sign-off, behavior, or evidence.`
 
@@ -176,7 +176,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 The SHA-256 binds your verdict to the exact title and body below. Return it unchanged.
 - pr_format_policy_sha: %s
 - content_sha256: %s
-- english is true only when every natural-language passage below is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, and machine metadata.
+- english is true only when every authored natural-language passage below is English. Ignore literal paths, URLs, commands, code, identifiers, product names, repository issue keys, machine metadata, and captured logs and command output (including non-English text within them). Judge authored captions and observations, including translated quotations, even when rendered in code spans or fences; a literal captured output and an authored caption can have identical source text but different language requirements.
 - An empty title below means this run wrote no title; there is nothing to judge there.
 - The Pipeline section is generated round-by-round history, not a set of current claims. A finding listed before a later fix round, or after a "Fixed in round N" status, quotes what a reviewer reported before that fix. Never report such a quote as contradicting the fix, the final step status, or another section.
 %s
