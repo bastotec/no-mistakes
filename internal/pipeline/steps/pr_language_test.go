@@ -278,7 +278,7 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 					t.Fatal("validator request lost the literal-output versus authored-prose distinction")
 				}
 				body := html.UnescapeString(written.Body)
-				if strings.Count(body, caption) != 6 || strings.Count(body, english) != 3 {
+				if strings.Count(body, caption) != 6 || strings.Count(body, english) != 5 {
 					t.Fatalf("final body mixed authored captions with literal output: %s", body)
 				}
 				for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
@@ -300,6 +300,8 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				"artifacts": []any{
 					map[string]string{"kind": "log", "label": "Captioned log", "path": path, "content": caption},
 					map[string]string{"kind": "screenshot", "label": "Captioned screenshot", "url": "https://example.com/evidence.png", "content": caption},
+					map[string]string{"label": "Untyped captioned image", "url": "https://example.com/scope.png", "content": caption},
+					map[string]string{"label": "Untyped captioned video", "url": "https://example.com/scope.mp4", "content": caption},
 					map[string]string{"kind": "other", "label": "Inline observation", "content": caption},
 					map[string]string{"kind": "log", "label": "Raw log", "content": logBody},
 					map[string]string{"kind": "command-output", "label": "Raw command output", "content": commandBody},
@@ -331,7 +333,7 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.Count(html.UnescapeString(content.Body), english) != 3 {
+			if strings.Count(html.UnescapeString(content.Body), english) != 5 {
 				t.Fatalf("not all artifact captions translated: %s", content.Body)
 			}
 			if provider == scm.ProviderGitHub && !strings.Contains(content.Body, attestation) {
@@ -341,7 +343,7 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				t.Fatal(err)
 			}
 			full := html.UnescapeString(BuildTestingSummaryForPR(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, sctx.Repo.UpstreamURL, head, dir, evidenceRoot, nil))
-			if strings.Count(full, caption) != 6 || strings.Count(full, english) != 3 {
+			if strings.Count(full, caption) != 6 || strings.Count(full, english) != 5 {
 				t.Fatalf("noncompact renderer mixed authored captions with literal output: %s", full)
 			}
 			for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
