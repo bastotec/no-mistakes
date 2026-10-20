@@ -111,6 +111,10 @@ func currentPublicationPins(sctx *pipeline.StepContext, branch, base, baseSHA, p
 }
 
 func pinPublication(sctx *pipeline.StepContext, branch, base, baseSHA, policy string, provider scm.Provider, host scm.Host) error {
+	retained, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+	if err != nil || retained != nil {
+		return err
+	}
 	pins, err := currentPublicationPins(sctx, branch, base, baseSHA, policy, provider, host)
 	if err != nil {
 		return err
@@ -368,6 +372,9 @@ func (s *PRStep) recoveredExistingPR(sctx *pipeline.StepContext, pr *scm.PR) (*p
 	}
 	if pr.URL == "" || pr.HeadSHA == "" || pr.HeadSHA != s.recovery.HeadSHA || pr.BaseBranch != s.recovery.BaseBranch {
 		return nil, recoveryRefusal("existing PR head or target/base differs from recorded publication")
+	}
+	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, pr.URL); err != nil {
+		return nil, fmt.Errorf("persist recovered PR URL: %w", err)
 	}
 	return &pipeline.StepOutcome{PRURL: pr.URL}, nil
 }

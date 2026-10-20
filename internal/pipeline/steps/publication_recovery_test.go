@@ -125,6 +125,172 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, c
 	return sctx, dir
 }
 
+func TestOrdinaryPublicationResumeRetainsPinsAndUsesCurrentPolicy(t *testing.T) {
+	for _, compliant := range []bool{true, false} {
+		name := "guard-refuses"
+		if compliant {
+			name = "publishes"
+		}
+		t.Run(name, func(t *testing.T) {
+			sctx, dir := publicationRecoveryFixture(t)
+			original, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, evidence, err := publicationEvidence(sctx)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, dir, "checkout", "main")
+			gitCmd(t, dir, "commit", "--allow-empty", "-m", "advance publication policy")
+			policy := gitCmd(t, dir, "rev-parse", "HEAD")
+			gitCmd(t, dir, "checkout", "feature")
+			if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "target branch/base") {
+				t.Fatalf("recovery accepted changed policy: %v", err)
+			}
+			env, log := fakeGH(t, "")
+			sctx.Env = env
+			ag := sctx.Agent.(*mockAgent)
+			drafted, validated := false, false
+			ag.runFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				drafted = true
+				if !strings.Contains(opts.Prompt, policy) {
+					t.Fatalf("draft did not receive current policy: %s", opts.Prompt)
+				}
+				return &agent.Result{Output: []byte(`{"title":"fix: parser","body":"## What Changed\n\n- Restore records"}`)}, nil
+			}
+			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				validated = true
+				if !strings.Contains(opts.Prompt, "- pr_format_policy_sha: "+policy) {
+					t.Fatalf("guard did not receive current policy: %s", opts.Prompt)
+				}
+				digest, err := validationDigestFromPrompt(opts.Prompt)
+				if err != nil {
+					return nil, err
+				}
+				issues := []string{}
+				if !compliant {
+					issues = append(issues, "risk rationale contradicts recorded dispositions")
+				}
+				raw, err := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, RiskDispositionMismatch: !compliant, Issues: issues})
+				return &agent.Result{Output: raw}, err
+			}
+			sctx.Run.Status = types.RunRunning
+			outcome, err := (&PRStep{}).Execute(sctx)
+			if compliant {
+				if err != nil || outcome == nil || outcome.PRURL != "https://github.com/test/repo/pull/99" {
+					t.Fatalf("ordinary resume failed: outcome=%+v error=%v", outcome, err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "refusing non-compliant PR publication") {
+				t.Fatalf("ordinary guard bypassed: %v", err)
+			}
+			if !drafted || !validated {
+				t.Fatalf("ordinary publication skipped draft or guard: draft=%v guard=%v", drafted, validated)
+			}
+			after, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+			if err != nil || after == nil || after.JSON != original.JSON || after.Refusal == nil || *after.Refusal != *original.Refusal {
+				t.Fatalf("ordinary resume changed original pins: %+v %v", after, err)
+			}
+			_, _, afterEvidence, err := publicationEvidence(sctx)
+			if err != nil || afterEvidence != evidence {
+				t.Fatalf("ordinary resume changed validation evidence: %v", err)
+			}
+			data, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(data), "pr create") != compliant || strings.Contains(string(data), "pr edit") {
+				t.Fatalf("unexpected ordinary publication operations: %s", data)
+			}
+			sctx.Run.Status = types.RunFailed
+			if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "target branch/base") {
+				t.Fatalf("ordinary resume promoted changed recovery pins: %v", err)
+			}
+		})
+	}
+}
+
+func TestPublicationRecoveryInterruptedCreatePersistsSamePR(t *testing.T) {
+	sctx, _ := publicationRecoveryFixture(t)
+	env, log := fakeGH(t, "")
+	state := filepath.Join(t.TempDir(), "forge-state.json")
+	body := filepath.Join(t.TempDir(), "pr-body.md")
+	sctx.Env = append(env, "FAKE_CLI_PUBLICATION_STATE="+state, "FAKE_CLI_PR_BODY_FILE="+body, "FAKE_CLI_PR_HEAD_SHA="+sctx.Run.HeadSHA, "FAKE_CLI_PR_CREATE_ERR=response interrupted")
+	_, _, evidence, err := publicationEvidence(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outcome, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "response interrupted") || outcome != nil {
+		t.Fatalf("expected interrupted create: outcome=%+v error=%v", outcome, err)
+	}
+	sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil || sctx.Run.PRURL != nil {
+		t.Fatalf("interrupted create already associated: %+v %v", sctx.Run, err)
+	}
+	originalPR, err := os.ReadFile(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalBody, err := os.ReadFile(body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag := sctx.Agent.(*mockAgent)
+	ag.runFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("existing PR retry invoked draft agent")
+		return nil, nil
+	}
+	ag.validationFn = func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		t.Fatal("existing PR retry invoked content validator")
+		return nil, nil
+	}
+	for attempt := 0; attempt < 2; attempt++ {
+		outcome, err := RecoverPublication(sctx)
+		if err != nil || outcome == nil || outcome.PRURL != "https://github.com/test/repo/pull/99" {
+			t.Fatalf("retry %d: outcome=%+v error=%v", attempt, outcome, err)
+		}
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil || sctx.Run.PRURL == nil || *sctx.Run.PRURL != outcome.PRURL || sctx.Run.Status != types.RunFailed {
+			t.Fatalf("retry did not retain terminal run and PR association: %+v %v", sctx.Run, err)
+		}
+	}
+	data, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(string(data), "pr create") != 1 || strings.Contains(string(data), "pr edit") || strings.Contains(string(data), "\npush ") {
+		t.Fatalf("retry mutated publication: %s", data)
+	}
+	afterPR, err := os.ReadFile(state)
+	if err != nil || string(afterPR) != string(originalPR) {
+		t.Fatalf("retry changed remote PR: %v", err)
+	}
+	afterBody, err := os.ReadFile(body)
+	if err != nil || string(afterBody) != string(originalBody) {
+		t.Fatalf("retry changed remote content: %v", err)
+	}
+	_, _, afterEvidence, err := publicationEvidence(sctx)
+	if err != nil || afterEvidence != evidence {
+		t.Fatalf("retry changed validation evidence: %v", err)
+	}
+}
+
+func TestPublicationRecoveryExistingPRPersistenceFailureRefusesSuccess(t *testing.T) {
+	sctx, _ := publicationRecoveryFixture(t)
+	pins, err := ValidatePublicationRecoveryRecords(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pr := &scm.PR{URL: "https://github.com/test/repo/pull/99", HeadSHA: pins.HeadSHA, BaseBranch: pins.BaseBranch}
+	outcome, err := (&PRStep{recovery: pins}).recoveredExistingPR(sctx, pr)
+	if err == nil || !strings.Contains(err.Error(), "persist recovered PR URL") || outcome != nil {
+		t.Fatalf("persistence failure reported success: outcome=%+v error=%v", outcome, err)
+	}
+}
+
 func TestPublicationRecoveryRiskPreservesAttributedScopeWithoutPrivateInstructions(t *testing.T) {
 	findings := `{"findings":[],"risk_level":"medium","risk_rationale":"stale risk prose","resolved_by_fix":[{"id":"r1","description":"Restore records","severity":"error","action":"auto-fix"}],"unresolved_notes":[{"id":"n1","description":"Keep the limitation visible","severity":"warning","action":"ask-user"}]}`
 	instructions := `{"findings":[{"id":"r1","description":"Original concern","severity":"error","action":"auto-fix","user_instructions":"PRIVATE DIRECTIVE: do not publish these words"}]}`
