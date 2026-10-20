@@ -56,7 +56,7 @@ func TestScenarioMatchCompletesSuccessfulPRResponsesFromPrompt(t *testing.T) {
 
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	verdict := scenario.Match("Validate final content.\n- content_sha256: " + digest + "\n")
-	if verdict.Structured["content_sha256"] != digest || verdict.Structured["english"] != true || verdict.Structured["format_compliant"] != true {
+	if verdict.Structured["content_sha256"] != digest || verdict.Structured["english"] != true || verdict.Structured["format_compliant"] != true || verdict.Structured["risk_disposition_mismatch"] != false {
 		t.Fatalf("validation response = %#v, want prompt-bound successful verdict", verdict.Structured)
 	}
 	if issues, ok := verdict.Structured["issues"].([]any); !ok || len(issues) != 0 {
@@ -66,15 +66,16 @@ func TestScenarioMatchCompletesSuccessfulPRResponsesFromPrompt(t *testing.T) {
 
 func TestScenarioMatchPreservesExplicitPRFailureResponse(t *testing.T) {
 	scenario := &Scenario{Actions: []Action{{Structured: map[string]any{
-		"content_sha256":    "deliberately-unbound",
-		"english":           false,
-		"format_compliant":  false,
-		"issues":            []any{"not English"},
-		"unsupported_rules": []any{"unsupported policy"},
+		"content_sha256":            "deliberately-unbound",
+		"english":                   false,
+		"format_compliant":          false,
+		"risk_disposition_mismatch": true,
+		"issues":                    []any{"not English"},
+		"unsupported_rules":         []any{"unsupported policy"},
 	}}}}
 
 	action := scenario.Match("unsupported_rules\n- content_sha256: 0123456789abcdef\n")
-	if action.Structured["content_sha256"] != "deliberately-unbound" || action.Structured["english"] != false || action.Structured["format_compliant"] != false {
+	if action.Structured["content_sha256"] != "deliberately-unbound" || action.Structured["english"] != false || action.Structured["format_compliant"] != false || action.Structured["risk_disposition_mismatch"] != true {
 		t.Fatalf("explicit failure response was overwritten: %#v", action.Structured)
 	}
 	if got := action.Structured["unsupported_rules"].([]any); len(got) != 1 {

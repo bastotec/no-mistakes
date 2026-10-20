@@ -28,6 +28,7 @@ const (
 	MethodSubscribe            = "subscribe"
 	MethodRespond              = "respond"
 	MethodPublishTestPreview   = "publish_test_preview"
+	MethodRecoverPublication   = "recover_publication"
 	MethodCancelRun            = "cancel_run"
 	MethodGateContext          = "gate_context"
 	MethodAdmitPush            = "admit_push"
@@ -526,4 +527,16 @@ func NewErrorResponse(id int64, code int, message string) *Response {
 		Error:   &RPCError{Code: code, Message: message},
 		ID:      id,
 	}
+}
+
+// RecoverPublicationParams selects one run, never a new head or target.
+// Unknown-method refusal from an older daemon has no fallback.
+type RecoverPublicationParams struct {
+	RepoID string `json:"repo_id"`
+	RunID  string `json:"run_id"`
+}
+
+type RecoverPublicationResult struct {
+	RunID string `json:"run_id"`
+	PRURL string `json:"pr_url"`
 }

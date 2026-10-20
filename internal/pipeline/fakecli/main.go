@@ -63,6 +63,12 @@ func handleFakeCLI(mode string) {
 	}
 
 	switch mode {
+	case "ssh-hostname":
+		host, err := os.ReadFile(os.Getenv("FAKE_CLI_SSH_HOST_FILE"))
+		if err != nil {
+			os.Exit(1)
+		}
+		fmt.Printf("hostname %s\n", strings.TrimSpace(string(host)))
 	case "test-preview-gh":
 		fakeTestPreviewGH(args)
 	case "gh":
@@ -164,6 +170,19 @@ func fakeGHHandler(args []string) {
 		os.Exit(0)
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "list" {
+		if state := os.Getenv("FAKE_CLI_PUBLICATION_STATE"); state != "" {
+			data, err := os.ReadFile(state)
+			if os.IsNotExist(err) {
+				fmt.Println("[]")
+				os.Exit(0)
+			}
+			if err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
+			fmt.Print(string(data))
+			os.Exit(0)
+		}
 		if hasPRListJSON {
 			fmt.Print(prListJSON)
 			os.Exit(0)
@@ -215,6 +234,15 @@ func fakeGHHandler(args []string) {
 		created := os.Getenv("FAKE_CLI_CREATED_PR_URL")
 		if created == "" {
 			created = "https://github.com/test/repo/pull/99"
+		}
+		if state := os.Getenv("FAKE_CLI_PUBLICATION_STATE"); state != "" {
+			branch, _ := fakeCLIFlagValue(args, "--head")
+			base, _ := fakeCLIFlagValue(args, "--base")
+			payload := fmt.Sprintf(`[{"number":%d,"url":%q,"baseRefName":%q,"headRefOid":%q,"headRefName":%q,"headRepository":{"nameWithOwner":"test/repo"},"headRepositoryOwner":{"login":"test"}}]`, extractTrailingNumber(created), created, base, os.Getenv("FAKE_CLI_PR_HEAD_SHA"), branch)
+			if err := os.WriteFile(state, []byte(payload), 0o644); err != nil {
+				fmt.Fprintln(os.Stderr, err)
+				os.Exit(1)
+			}
 		}
 		fmt.Println(created)
 		os.Exit(0)
