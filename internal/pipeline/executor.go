@@ -516,6 +516,13 @@ func (e *Executor) ResumeCIWatch(ctx context.Context, run *db.Run, repo *db.Repo
 // behaves exactly like an uninterrupted watch.
 func (e *Executor) resumeWatch(ctx context.Context, run *db.Run, repo *db.Repo, workDir, logDir string, index int, sr *db.StepResult, state stepExecutionState) error {
 	step := e.steps[index]
+	// Readiness observed before the restart says nothing about checks that
+	// reran while the daemon was down; the resumed watch observes it again.
+	if err := e.db.SetRunCIReady(run.ID, false); err != nil {
+		return e.failRun(run, repo, fmt.Errorf("clear ci readiness for resumed watch: %w", err), ctx)
+	}
+	run.CIReadyAt = nil
+	run.CIReadyNoCI = false
 	sctx := &StepContext{
 		Ctx:          ctx,
 		Run:          run,
@@ -1450,6 +1457,12 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			} else if !errors.Is(err, ErrIsolatedTestHandoff) && !errors.Is(err, ErrDaemonShutdown) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 				outcome, err = refusal, nil
 			}
+		}
+		// A CI observation cut off by daemon shutdown (a cancelled checks read
+		// can surface as a parked outcome) is not recorded: the next daemon
+		// resumes the watch and observes again.
+		if stepName == types.StepCI && errors.Is(context.Cause(ctx), ErrDaemonShutdown) {
+			return false, "", ErrDaemonShutdown
 		}
 		roundNum++
 		roundDuration := time.Since(phaseStart).Milliseconds()

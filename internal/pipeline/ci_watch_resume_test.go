@@ -260,3 +260,54 @@ func TestResume_PostRepairMonitorUnreadablePREndsInterrupted(t *testing.T) {
 		t.Fatalf("run = %v (%v), want %s", got.Status, err, types.RunCIMonitorInterrupted)
 	}
 }
+
+// A CI observation that shutdown cut off can come back as a parked outcome
+// (a cancelled checks read counted as a failed read). It is not recorded: the
+// watch stays running for the next daemon instead of becoming a gate.
+func TestExecutor_ShutdownCutCIObservationIsNotParked(t *testing.T) {
+	database, p, run, repo := setupTest(t)
+	step := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		<-sctx.Ctx.Done()
+		return &StepOutcome{NeedsApproval: true, Findings: `{"findings":[{"id":"ci-1","severity":"warning","description":"CI checks could not be read","action":"ask-user"}],"summary":"CI checks could not be read"}`}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{step}, nil)
+	ctx, cancel := context.WithCancelCause(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- exec.Execute(ctx, run, repo, t.TempDir()) }()
+	waitForStepStatus(t, database, run.ID, types.StepCI, types.StepStatusRunning)
+	cancel(ErrDaemonShutdown)
+	if err := <-done; !errors.Is(err, ErrDaemonShutdown) {
+		t.Fatalf("Execute() = %v, want ErrDaemonShutdown", err)
+	}
+	if sr := stepResultByName(t, database, run.ID, types.StepCI); sr.Status != types.StepStatusRunning {
+		t.Fatalf("ci step = %s, want it left running for recovery", sr.Status)
+	}
+	if got, err := database.GetRun(run.ID); err != nil || got.AwaitingAgentSince != nil {
+		t.Fatalf("run parked at a gate after shutdown: %+v (%v)", got, err)
+	}
+}
+
+// Readiness observed before the restart is dropped when the watch resumes, so
+// checks that reran while the daemon was down are observed again first.
+func TestResumeCIWatch_ClearsPreRestartReadiness(t *testing.T) {
+	database, p, run, repo := setupCIWatch(t)
+	if err := database.SetRunCIReady(run.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	var readyDuringWatch bool
+	ci := &adaptiveCallStep{name: types.StepCI, fn: func(sctx *StepContext) (*StepOutcome, error) {
+		got, err := database.GetRun(run.ID)
+		if err != nil {
+			return nil, err
+		}
+		readyDuringWatch = got.CIReadyAt != nil
+		return &StepOutcome{}, nil
+	}}
+	exec := NewExecutor(database, p, &config.Config{}, nil, []Step{&adaptiveCallStep{name: types.StepReview}, ci}, nil)
+	if err := exec.ResumeCIWatch(context.Background(), run, repo, t.TempDir()); err != nil {
+		t.Fatal(err)
+	}
+	if readyDuringWatch {
+		t.Fatal("the resumed watch still reported pre-restart readiness")
+	}
+}

@@ -197,6 +197,9 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 	} else if err := pipeline.ValidateRecoveredRun(m.db, run, execSteps); err != nil {
 		return nil, err
 	}
+	if err := clearResumedWatchReadiness(m.db, run); err != nil {
+		return nil, err
+	}
 	forgeCtx, err := forgecontext.Resolve(ctx, cfg.ForgeProfiles, repo.UpstreamURL, repo.ForkURL)
 	if err != nil {
 		return nil, fmt.Errorf("resolve forge profile: %w", err)
@@ -222,6 +225,31 @@ func (m *RunManager) prepareRecoveredRun(ctx context.Context, run *db.Run) (*rec
 		forge:   forgeCtx,
 		ciWatch: ciWatch,
 	}, nil
+}
+
+// clearResumedWatchReadiness drops checks-passed readiness observed before the
+// restart from a run whose CI step will watch again (a plain resumed watch or
+// one monitoring after a published repair). It runs before IPC opens, so no
+// attach reads checks-passed for checks the watch has not observed since.
+func clearResumedWatchReadiness(database *db.DB, run *db.Run) error {
+	if run.CIReadyAt == nil {
+		return nil
+	}
+	results, err := database.GetStepsByRun(run.ID)
+	if err != nil {
+		return err
+	}
+	for _, result := range results {
+		if result.StepName == types.StepCI && result.Status == types.StepStatusRunning {
+			if err := database.SetRunCIReady(run.ID, false); err != nil {
+				return fmt.Errorf("clear ci readiness: %w", err)
+			}
+			run.CIReadyAt = nil
+			run.CIReadyNoCI = false
+			return nil
+		}
+	}
+	return nil
 }
 
 func validateRecoveredSessionProviders(database *db.DB, runID string, ag agent.Agent) error {
