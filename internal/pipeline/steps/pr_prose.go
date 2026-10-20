@@ -55,7 +55,7 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 			artifact := &findings.Artifacts[i]
 			add(&artifact.Label)
 			kind := strings.ToLower(sanitizePromptText(artifact.Kind))
-			if artifact.Path == "" && artifact.URL == "" && (kind == "log" || kind == "command-output") {
+			if artifact.Path == "" && (kind == "" || kind == "log" || kind == "command-output") {
 				continue
 			}
 			add(&artifact.Content)

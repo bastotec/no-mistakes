@@ -278,7 +278,7 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 					t.Fatal("validator request lost the literal-output versus authored-prose distinction")
 				}
 				body := html.UnescapeString(written.Body)
-				if strings.Count(body, caption) != 2 || strings.Count(body, english) != 3 {
+				if strings.Count(body, caption) != 6 || strings.Count(body, english) != 3 {
 					t.Fatalf("final body mixed authored captions with literal output: %s", body)
 				}
 				for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
@@ -305,6 +305,10 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 					map[string]string{"kind": "command-output", "label": "Raw command output", "content": commandBody},
 					map[string]string{"kind": "log", "label": "Captured criterion log", "content": caption},
 					map[string]string{"kind": "command-output", "label": "Captured criterion command output", "content": caption},
+					map[string]string{"kind": "log", "label": "URL-backed criterion log", "url": "https://example.com/job.log", "content": caption},
+					map[string]string{"kind": "command-output", "label": "URL-backed criterion command output", "url": "https://example.com/command.log", "content": caption},
+					map[string]string{"label": "Legacy captured criterion output", "content": caption},
+					map[string]string{"label": "Legacy URL-backed criterion output", "url": "https://example.com/legacy.log", "content": caption},
 				},
 			})
 			sr := insertCompletedStep(t, sctx, "test", string(payload), "")
@@ -337,7 +341,7 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 				t.Fatal(err)
 			}
 			full := html.UnescapeString(BuildTestingSummaryForPR(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, sctx.Repo.UpstreamURL, head, dir, evidenceRoot, nil))
-			if strings.Count(full, caption) != 2 || strings.Count(full, english) != 3 {
+			if strings.Count(full, caption) != 6 || strings.Count(full, english) != 3 {
 				t.Fatalf("noncompact renderer mixed authored captions with literal output: %s", full)
 			}
 			for _, literal := range []string{strings.TrimRight(fileBody, "\n"), logBody, commandBody} {
