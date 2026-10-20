@@ -89,7 +89,7 @@ func (m *RunManager) HandleRecoverPublication(ctx context.Context, p *ipc.Recove
 			return "", err
 		}
 		sctx.ForgeContext = forge
-		ag, err := newPipelineAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forge))
+		ag, err := newConfiguredAgent(ctx, cfg, m.paths.EvidenceRoot(cfg.Test.Evidence.LocalRoot), exec.LookPath, forgeEnvironment(forge))
 		if err != nil {
 			return "", err
 		}
