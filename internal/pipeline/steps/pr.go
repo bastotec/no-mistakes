@@ -788,10 +788,9 @@ func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
 	return sctx.Config.PR.RenderTitle(branch, title)
 }
 
-// buildPipelineSection queries step results and rounds from the DB and
-// produces the deterministic pipeline, risk, and testing sections. These are
-// scoped to this run's own steps and rounds, so they already describe only
-// the final terminal state each step reached in this run.
+// buildPipelineSection reads this run's step results and round history and
+// projects their prose into English for publication without rewriting the DB.
+// Status, round disposition, and machine attestation remain record-derived.
 func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.Provider) (pipelineMD, riskLine, testingMD string, err error) {
 	return s.buildPipelineSections(sctx, provider, false, true, true)
 }
