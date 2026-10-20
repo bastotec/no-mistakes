@@ -51,12 +51,22 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 		}
 		add(&findings.TestingSummary)
 		add(&findings.RiskRationale)
+		artifactOpts := testingSummaryOptions{repoRoot: sctx.WorkDir, evidenceRoot: testEvidenceDir(sctx)}
+		artifactState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
 		for i := range findings.Artifacts {
 			artifact := &findings.Artifacts[i]
 			add(&artifact.Label)
-			kind := strings.ToLower(sanitizePromptText(artifact.Kind))
-			if artifact.Path == "" && (kind == "log" || kind == "command-output" ||
-				(kind == "" && !isImageArtifact(kind, artifact.URL) && !isVideoArtifact(kind, artifact.URL))) {
+			rendered := *artifact
+			rendered.Kind = strings.ToLower(sanitizePromptText(artifact.Kind))
+			rendered.Path = sanitizeArtifactPath(artifact.Path, artifactOpts)
+			rendered.URL = sanitizeArtifactURL(artifact.URL)
+			_, hasFile := embeddedArtifactText(rendered, artifactOpts, &artifactState)
+			target := rendered.URL
+			if target == "" {
+				target = rendered.Path
+			}
+			if !hasFile && (rendered.Kind == "log" || rendered.Kind == "command-output" ||
+				(rendered.Kind == "" && !isImageArtifact(rendered.Kind, target) && !isVideoArtifact(rendered.Kind, target))) {
 				continue
 			}
 			add(&artifact.Content)
