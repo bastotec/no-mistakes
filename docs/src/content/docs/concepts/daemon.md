@@ -55,7 +55,7 @@ no-mistakes update
 
 `no-mistakes update` stops and starts the daemon when it is running, or when stale daemon artifacts exist, so the new executable is used.
 It prefers the managed service path and falls back to a detached daemon if service startup is unavailable or fails.
-If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart anyway; `-y`/`--yes` does not bypass this guard. A forced orderly shutdown preserves recoverable parked gates and dispatched repairs. Any other in-progress step is preserved at a `daemon-shutdown` decision gate because its interrupted result cannot be trusted; that gate accepts only `axi respond --action abort` before replacement validation can start.
+If pending or running pipeline runs exist, `update` refuses to restart the daemon by default and prints each active run's ID, status, branch, and short head SHA. Pass `--force` to restart anyway; `-y`/`--yes` does not bypass this guard. A forced orderly shutdown uses the [recovery rules below](#crash-recovery): recoverable gates, dispatched repairs, and CI watches can resume; other in-progress steps require an explicit abort before replacement validation can start.
 If the daemon is already running from a different executable path, update still prompts before replacing it; `-y`/`--yes` answers that prompt non-interactively.
 If the daemon executable path cannot be determined, the update aborts before replacing anything.
 
@@ -124,7 +124,9 @@ On startup, the daemon checks runs left in `pending` or `running` status by a cr
 - Rebuilds a parked run with the repository gate list pinned in `runs.gates_json` when that run started, never the current default-branch list. An absent pin on an older run means the core pipeline, while an invalid pin refuses recovery
 - Re-resolves and validates any configured repository forge profile before rebuilding the recovered run, so resumed provider checks and agents use the same repository-scoped identity model rather than persisted credentials or ambient active accounts
 - Before resuming a parked CI gate, re-checks its persisted PR URL through the configured provider; a currently merged or closed PR completes the stale gate, while an open, unknown, or unreachable PR remains parked. The [`protected_paths` refusal exception](/no-mistakes/reference/repo-config/#protected_paths) prevents automatic reconciliation
-- Preserves a run that was actively monitoring CI for an already-created PR as `ci_monitor_interrupted` rather than failing it: the PR is still open, so a restart mid-monitor is not a pipeline failure. That run is terminal and never resumed
+- Resumes a run that was only watching CI for an already-created PR — every earlier step completed or skipped, the CI step running, nothing parked or repairing — against the run's recorded PR and head, provided its worktree, head, and pinned step plan still validate. This includes monitoring after a published CI repair. [Checks-passed readiness](/no-mistakes/reference/pipeline-steps/#ci) must be observed again after restart
+- Every resumed CI watch first reads its recorded PR through the configured provider. A merged or closed PR settles the step without watching again; an unreadable or unresolved PR ends the run as `ci_monitor_interrupted`. Once that read succeeds, operator skips and later monitor failures follow the same rules as an uninterrupted watch. A watch that cannot pass startup validation is also preserved as `ci_monitor_interrupted` rather than failed; that status is terminal and never resumed
+- An orderly shutdown leaves a recoverable CI watch running and resumable, not parked or skipped, even when it interrupts forge availability, a checks read, or the resumed watch's initial PR read
 - Before failing any other stale active run, verifies its managed worktree head and pins an unpublished descendant under the run-specific recovery ref so later rerun or guarded custody recovery does not fall back to a stale gate branch
 - Marks every other stale active run as `failed` with the message "daemon crashed during execution"
 - Reaps orphaned managed agent servers left behind by a crashed daemon or setup wizard
@@ -158,7 +160,7 @@ The [starting and stopping](#starting-and-stopping) section owns the active-run
 guard, the top-level `--force` override, and the separate validation-step
 containment rule.
 
-1. Detaches recoverable parked gates and durably dispatched repairs so startup recovery can resume them
-2. Parks any other active step at an explicit `daemon-shutdown` decision gate; its interrupted result is not trusted or replayed, and the only valid response after restart is `axi respond --action abort`
+1. Detaches recoverable parked gates, durably dispatched repairs, and CI watches under the [recovery rules](#crash-recovery)
+2. Parks other active steps at the `daemon-shutdown` gate described above
 3. Waits up to 30 seconds for daemon-owned run goroutines to detach; an independently dispatched repair may continue and be recovered by the replacement daemon
 4. Removes the PID file and socket
