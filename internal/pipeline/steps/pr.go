@@ -355,14 +355,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		if actual == nil || actual.URL != created.URL {
 			return nil, recoveryRefusal("created PR identity could not be revalidated")
 		}
-		if _, err := s.recoveredExistingPR(sctx, actual); err != nil {
-			return nil, err
-		}
 		if err := s.verifyRecoveryPublication(sctx, baseSHA, policySHA, provider, host); err != nil {
 			return nil, err
 		}
-	}
-	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
+		if _, err := s.recoveredExistingPR(sctx, actual); err != nil {
+			return nil, err
+		}
+	} else if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, created.URL); err != nil {
 		slog.Warn("failed to persist PR URL", "run", sctx.Run.ID, "url", created.URL, "err", err)
 	}
 	if template != "" {

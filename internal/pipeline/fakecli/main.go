@@ -244,6 +244,10 @@ func fakeGHHandler(args []string) {
 				os.Exit(1)
 			}
 		}
+		if createErr := os.Getenv("FAKE_CLI_PR_CREATE_ERR"); createErr != "" {
+			fmt.Fprintln(os.Stderr, createErr)
+			os.Exit(1)
+		}
 		fmt.Println(created)
 		os.Exit(0)
 	}
