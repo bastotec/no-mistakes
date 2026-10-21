@@ -307,6 +307,29 @@ func testPublicationRecoveryInterruptedCreate(t *testing.T, lifecycle scm.PRStat
 			t.Fatalf("branch sync did not retire closed publication: %+v", cached)
 		}
 	}
+	if lifecycle != scm.PRStateOpen {
+		observations := []scm.PRState{scm.PRStateOpen}
+		if lifecycle == scm.PRStateMerged {
+			observations = append(observations, scm.PRStateClosed)
+		}
+		for _, observed := range observations {
+			t.Run("refuse_unpersistable_"+string(observed), func(t *testing.T) {
+				env := sctx.Env
+				sctx.Env = append(append([]string(nil), env...), "FAKE_CLI_PR_STATE="+string(observed))
+				defer func() { sctx.Env = env }()
+				for attempt := 0; attempt < 2; attempt++ {
+					outcome, err := RecoverPublication(sctx)
+					if err == nil || !strings.Contains(err.Error(), "persisted PR metadata does not match") || outcome != nil {
+						t.Fatalf("retry %d reported success for unpersistable lifecycle %s: outcome=%+v error=%v", attempt, observed, outcome, err)
+					}
+					sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+					if err != nil || sctx.Run.PRState == nil || *sctx.Run.PRState != strings.ToLower(string(lifecycle)) || sctx.Run.PRURL == nil || *sctx.Run.PRURL != "https://github.com/test/repo/pull/99" || sctx.Run.Status != types.RunFailed || sctx.Run.Error == nil || *sctx.Run.Error != *originalRun.Error {
+						t.Fatalf("refusal changed monotonic lifecycle or original verdict: %+v %v", sctx.Run, err)
+					}
+				}
+			})
+		}
+	}
 	if got := gitCmd(t, dir, "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads/"); got != originalRefs {
 		t.Fatalf("recovery changed source/target refs: before=%s after=%s", originalRefs, got)
 	}
