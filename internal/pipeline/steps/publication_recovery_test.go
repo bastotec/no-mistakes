@@ -408,6 +408,58 @@ func TestPublicationRecoveryExistingPRPersistenceFailureRefusesSuccess(t *testin
 	}
 }
 
+func TestPublicationRecoveryExistingPRReadbackErrorRefusesSuccess(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	database, err := db.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	repo, err := database.InsertRepo(t.TempDir(), "https://github.com/test/repo", "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := database.InsertRun(repo.ID, "feature", "head", "base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := database.UpdateRunErrorStatus(run.ID, "original publication refusal", types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Exec(`CREATE TRIGGER fail_readback AFTER UPDATE OF pr_url ON runs
+		WHEN OLD.pr_state = 'closed' AND NEW.pr_url = 'https://github.com/test/repo/pull/99'
+		BEGIN UPDATE runs SET created_at = 'injected post-write readback error' WHERE id = NEW.id; END`); err != nil {
+		t.Fatal(err)
+	}
+	run, err = database.GetRun(run.ID)
+	if err != nil || run == nil || run.PRURL != nil || run.PRState == nil || *run.PRState != "none" {
+		t.Fatalf("pre-write read failed or metadata already persisted: %+v %v", run, err)
+	}
+	sctx := &pipeline.StepContext{Ctx: context.Background(), DB: database, Run: run}
+	pr := &scm.PR{URL: "https://github.com/test/repo/pull/99", HeadSHA: "head", BaseBranch: "main"}
+	step := &PRStep{recovery: &publicationPins{HeadSHA: "head", BaseBranch: "main"}}
+	outcome, readErr := step.recoveredExistingPR(sctx, &recordingRetargetHost{state: scm.PRStateClosed}, pr)
+	var state, url, createdAt, status, originalError string
+	var observedAt int64
+	if err := conn.QueryRow(`SELECT pr_state, pr_url, created_at, pr_state_observed_at, status, error FROM runs WHERE id = ?`, run.ID).Scan(&state, &url, &createdAt, &observedAt, &status, &originalError); err != nil {
+		t.Fatal(err)
+	}
+	if state != "closed" || url != pr.URL || observedAt == 0 || createdAt != "injected post-write readback error" {
+		t.Fatalf("fault did not follow both successful writes: state=%q URL=%q observed=%d created=%q", state, url, observedAt, createdAt)
+	}
+	if status != string(types.RunFailed) || originalError != "original publication refusal" {
+		t.Fatalf("readback failure changed original verdict: status=%q error=%q", status, originalError)
+	}
+	if readErr == nil || !strings.Contains(readErr.Error(), "verify recovered PR metadata") || !strings.Contains(readErr.Error(), "injected post-write readback error") || outcome != nil {
+		t.Fatalf("post-write readback failure reported success or lost cause: outcome=%+v error=%v", outcome, readErr)
+	}
+}
+
 func TestPublicationRecoveryRiskPreservesAttributedScopeWithoutPrivateInstructions(t *testing.T) {
 	findings := `{"findings":[],"risk_level":"medium","risk_rationale":"stale risk prose","resolved_by_fix":[{"id":"r1","description":"Restore records","severity":"error","action":"auto-fix"}],"unresolved_notes":[{"id":"n1","description":"Keep the limitation visible","severity":"warning","action":"ask-user"}]}`
 	instructions := `{"findings":[{"id":"r1","description":"Original concern","severity":"error","action":"auto-fix","user_instructions":"PRIVATE DIRECTIVE: do not publish these words"}]}`
