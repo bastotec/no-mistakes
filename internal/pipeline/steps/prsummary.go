@@ -183,7 +183,7 @@ func buildPipelineSummaryFor(steps []*db.StepResult, rounds map[string][]*db.Ste
 		b.WriteString(detail)
 	}
 
-	riskLine := extractRiskLine(steps, rounds, priorDecisions...)
+	riskLine := extractRiskLine(steps, rounds, headSHA, priorDecisions...)
 	return b.String(), riskLine
 }
 
@@ -1410,7 +1410,7 @@ func reviewScopeDecisions(rounds []*db.StepRound, priorDecisions ...*db.BranchDe
 	return rendered
 }
 
-func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound, priorDecisions ...*db.BranchDecisionRound) string {
+func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound, headSHA string, priorDecisions ...*db.BranchDecisionRound) string {
 	for _, sr := range steps {
 		if sr.StepName != types.StepReview {
 			continue
@@ -1427,6 +1427,19 @@ func extractRiskLine(steps []*db.StepResult, rounds map[string][]*db.StepRound, 
 
 		emoji := riskEmoji(src.RiskLevel)
 		label := capitalizeRisk(src.RiskLevel)
+		// A later Test repair (or even a docs-only commit) does not rerun
+		// Review. Its assessment remains evidence about the reviewed head,
+		// not proof of either continuing defects or repairs at this head.
+		// Legacy rounds without head bindings retain their existing rendering.
+		var reviewedHead string
+		for _, round := range rounds[sr.ID] {
+			if round.ReviewedHeadSHA != nil && *round.ReviewedHeadSHA != "" {
+				reviewedHead = *round.ReviewedHeadSHA
+			}
+		}
+		if headSHA != "" && reviewedHead != "" && reviewedHead != headSHA {
+			return fmt.Sprintf("%s %s (recorded Review rating). Review assessed head %s, not certification of the current head %s. Historical Review assessment: %q. Current validity of these claims is unverified; a changed head alone establishes neither a repair nor a continuing defect. No final-head rereview is recorded.%s", emoji, label, reviewedHead, headSHA, src.RiskRationale, scope)
+		}
 		if src.RiskRationale != "" {
 			return fmt.Sprintf("%s %s: %s%s", emoji, label, src.RiskRationale, scope)
 		}
