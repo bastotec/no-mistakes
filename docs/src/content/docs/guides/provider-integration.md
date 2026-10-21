@@ -271,9 +271,7 @@ GitHub Enterprise Server is detected the same way `github.com` is, as long as th
 When the upstream hostname is not `github.com`, `no-mistakes` consults gh's configured hosts (`hosts.yml`, honoring `GH_CONFIG_DIR` then `XDG_CONFIG_HOME/gh`, then `~/.config/gh`) and treats the upstream as GitHub if its host appears there.
 Running `gh auth login --hostname your-ghe.example.com` is enough to make detection succeed; if `gh` is not configured for the host, detection fails closed and the upstream is treated as unsupported.
 
-On GHE, `gh --repo` expects a host-prefixed slug in the form `host/owner/name`.
-`no-mistakes` builds that automatically from the recorded upstream remote or PR URL, so daemon-run `gh` commands resolve the right repository regardless of the daemon's working directory.
-The fork owner extracted from the fork URL keeps the plain `owner/name` form because that side only feeds `--head owner:branch`.
+For hostname-qualified GitHub repository targeting and fork routing, see the [PR step reference](/no-mistakes/reference/pipeline-steps/#pr).
 
 ### Self-hosted GitLab
 
