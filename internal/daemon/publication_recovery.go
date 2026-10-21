@@ -17,8 +17,8 @@ import (
 )
 
 // HandleRecoverPublication owns the same branch lock as launches. It does not
-// revive a terminal run or spend repair authority. The only run write belongs
-// to ordinary PR publication (its PR URL); validation evidence remains immutable.
+// revive a terminal run or spend repair authority. Only PR association metadata
+// (verified URL and provider lifecycle) is written; validation evidence stays immutable.
 func (m *RunManager) HandleRecoverPublication(ctx context.Context, p *ipc.RecoverPublicationParams) (*ipc.RecoverPublicationResult, error) {
 	run, err := m.db.GetRun(p.RunID)
 	if err != nil {

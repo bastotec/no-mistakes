@@ -190,8 +190,8 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 	}
 	if s.recovery != nil {
-		// Check immutable intent before an idempotent return, and do not bind,
-		// retarget, rewrite, or restamp an already published PR.
+		// Check immutable intent before an idempotent return. Record the verified
+		// association locally without retargeting, rewriting, or restamping the PR.
 		if err := s.verifyRecoveryPublication(sctx, s.recovery.BaseSHA, s.recovery.PolicySHA, provider, host); err != nil {
 			return nil, err
 		}
