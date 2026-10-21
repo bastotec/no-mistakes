@@ -39,7 +39,7 @@ func appendReviewDispositionMetadata(f *types.Findings, unresolved []types.Findi
 		f.RiskRationale = rationale
 	}()
 	if len(unresolved) > 0 {
-		f.Summary = strings.TrimSpace(f.Summary + fmt.Sprintf(" Carried review findings still unresolved (not fixed): %d.", len(unresolved)))
+		f.Summary = strings.TrimSpace(f.Summary + fmt.Sprintf(" Carried review findings remain unresolved in the review ledger (current validity not reverified): %d.", len(unresolved)))
 		for _, item := range unresolved {
 			if item.ActionOrDefault() != types.ActionNoOp {
 				switch types.NormalizeFindingSeverity(item.Severity) {
@@ -54,7 +54,11 @@ func appendReviewDispositionMetadata(f *types.Findings, unresolved []types.Findi
 			if len(runes) > 160 {
 				description = string(runes[:160]) + "..."
 			}
-			appendReason(fmt.Sprintf("unresolved %s %s: %s", item.Severity, item.ID, description))
+			// A held claim remains undispositioned, not newly verified. In
+			// particular, a composite repair may address it under another ID.
+			// Preserve the claim as a quotation without certifying either its
+			// continued presence or its repair from selection metadata alone.
+			appendReason(fmt.Sprintf("carried %s %s (current validity not reverified): %q", item.Severity, item.ID, description))
 		}
 	}
 	if len(f.ResolvedByFix) > 0 {
