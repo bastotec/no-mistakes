@@ -390,6 +390,13 @@ func (s *PRStep) recoveredExistingPR(sctx *pipeline.StepContext, host scm.Host, 
 	if err := sctx.DB.UpdateRunPRURL(sctx.Run.ID, pr.URL); err != nil {
 		return nil, fmt.Errorf("persist recovered PR URL: %w", err)
 	}
+	stored, err := sctx.DB.GetRun(sctx.Run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("verify recovered PR metadata: %w", err)
+	}
+	if stored == nil || stored.PRState == nil || *stored.PRState != strings.ToLower(string(state)) || stored.PRURL == nil || *stored.PRURL != pr.URL {
+		return nil, recoveryRefusal("persisted PR metadata does not match the observed lifecycle and URL")
+	}
 	return &pipeline.StepOutcome{PRURL: pr.URL}, nil
 }
 
