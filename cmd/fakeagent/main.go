@@ -110,7 +110,7 @@ func runGhForkPRStub(args []string) int {
 		if repo == "" {
 			repo = "parent/repo"
 		}
-		fmt.Printf("https://github.com/%s/pull/99\n", strings.TrimSuffix(repo, ".git"))
+		fmt.Printf("https://github.com/%s/pull/99\n", strings.TrimSuffix(strings.TrimPrefix(repo, "github.com/"), ".git"))
 		return 0
 	}
 	if len(args) >= 2 && args[0] == "pr" && args[1] == "view" {

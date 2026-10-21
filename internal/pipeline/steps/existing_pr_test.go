@@ -89,7 +89,7 @@ func TestPRStep_ForkOriginWithoutExplicitTargetRetainsCreation(t *testing.T) {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}
 	data, _ := os.ReadFile(log)
-	if !strings.Contains(string(data), "pr list --head feature --repo contributor/widgets") || !strings.Contains(string(data), "pr create --head feature --base main --repo contributor/widgets") {
+	if !strings.Contains(string(data), "pr list --head feature --repo github.com/contributor/widgets") || !strings.Contains(string(data), "pr create --head feature --base main --repo github.com/contributor/widgets") {
 		t.Fatalf("unexpected discovery boundary:\n%s", data)
 	}
 }
@@ -157,7 +157,7 @@ func TestPRStep_ExplicitUpstreamNeverDiscoversAlternate(t *testing.T) {
 			if !valid && strings.Contains(calls, "pr edit") {
 				t.Fatalf("invalid target mutated PR:\n%s", calls)
 			}
-			if valid && (!strings.Contains(calls, "pr edit 168 --repo upstream/widgets") || strings.Contains(calls, "--repo contributor/widgets")) {
+			if valid && (!strings.Contains(calls, "pr edit 168 --repo github.com/upstream/widgets") || strings.Contains(calls, "--repo github.com/contributor/widgets")) {
 				t.Fatalf("wrong update routing:\n%s", calls)
 			}
 			stored, e := sctx.DB.GetRun(sctx.Run.ID)
@@ -247,7 +247,7 @@ func TestPRStep_ExplicitTargetReReadsAHeadTheForgeHasNotCaughtUpWith(t *testing.
 	if strings.Contains(string(calls), "pr list") || strings.Contains(string(calls), "pr create") {
 		t.Fatalf("explicit target fell through to discovery/create:\n%s", calls)
 	}
-	if !strings.Contains(string(calls), "pr edit 168 --repo upstream/widgets") {
+	if !strings.Contains(string(calls), "pr edit 168 --repo github.com/upstream/widgets") {
 		t.Fatalf("settled target was not updated:\n%s", calls)
 	}
 }
@@ -361,7 +361,7 @@ func TestCIStep_ExplicitPRUsesPublishedHeadAndUpstreamHost(t *testing.T) {
 		t.Fatalf("out=%+v err=%v", out, err)
 	}
 	data, _ := os.ReadFile(log)
-	if !strings.Contains(string(data), "pr view 168 --repo upstream/widgets") || strings.Contains(string(data), "--repo contributor/widgets") {
+	if !strings.Contains(string(data), "pr view 168 --repo github.com/upstream/widgets") || strings.Contains(string(data), "--repo github.com/contributor/widgets") {
 		t.Fatalf("wrong CI routing:\n%s", data)
 	}
 	sctx.Env = append(sctx.Env, "FAKE_CLI_EXISTING_PR_ERROR=unavailable")
@@ -411,7 +411,7 @@ func TestPushStep_ExplicitPRValidatesRemoteHeadBeforePublishing(t *testing.T) {
 			if strings.Contains(string(data), "pr list") || strings.Contains(string(data), "pr create") || invalid && strings.Contains(string(data), "pr edit") {
 				t.Fatalf("unsafe PR calls:\n%s", data)
 			}
-			if !invalid && !strings.Contains(string(data), "pr edit 168 --repo upstream/widgets") {
+			if !invalid && !strings.Contains(string(data), "pr edit 168 --repo github.com/upstream/widgets") {
 				t.Fatalf("missing upstream attestation:\n%s", data)
 			}
 		})
