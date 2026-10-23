@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"os"
 	"os/exec"
@@ -221,5 +222,59 @@ func TestPublicationRecoveryRPCRefusesBeforeWorktreeOrRunMutation(t *testing.T) 
 	mgr := NewRunManager(d, p, nil)
 	if _, err := mgr.HandleRecoverPublication(context.Background(), &ipc.RecoverPublicationParams{RepoID: "other", RunID: run.ID}); err == nil || !strings.Contains(err.Error(), "not found in this repository") {
 		t.Fatalf("cross-repository recovery error=%v", err)
+	}
+}
+
+func TestPublicationRecoveryRPCRejectsLegacyEvidenceWithoutRetrofitting(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return nil })
+	repo, head := setupTestGitRepo(t, p, d, "legacy-publication-refusal")
+	// Model the migration's historical default, not the new-run writer's
+	// prospective eligibility marker. No historical consumer payload is invented.
+	raw, err := sql.Open("sqlite", p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	const runID = "historical-publication-rpc-fixture"
+	if _, err := raw.Exec(`INSERT INTO runs (id, repo_id, branch, head_sha, base_sha, status, created_at, updated_at) VALUES (?, ?, 'feature', ?, ?, 'failed', 1, 1)`, runID, repo.ID, head, head); err != nil {
+		t.Fatal(err)
+	}
+	before, err := d.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeWorktrees, err := filepath.Glob(filepath.Join(p.Root(), "publication-recovery-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	var result ipc.RecoverPublicationResult
+	err = client.Call(ipc.MethodRecoverPublication, &ipc.RecoverPublicationParams{RepoID: repo.ID, RunID: runID}, &result)
+	if err == nil || !strings.Contains(err.Error(), "historical run predates publication-intent pinning") {
+		t.Fatalf("historical recovery error=%v", err)
+	}
+	t.Logf("recover_publication(%s): %v", runID, err)
+	after, err := d.GetRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) || result.PRURL != "" {
+		t.Fatalf("legacy refusal changed run or reported publication: before=%+v after=%+v result=%+v", before, after, result)
+	}
+	eligible, err := d.PublicationRecoveryEligible(runID)
+	if err != nil || eligible {
+		t.Fatalf("legacy eligibility changed: %v %v", eligible, err)
+	}
+	pin, err := d.GetPublicationIntent(runID, head)
+	if err != nil || pin != nil {
+		t.Fatalf("refusal retrofitted publication pins: %+v %v", pin, err)
+	}
+	afterWorktrees, err := filepath.Glob(filepath.Join(p.Root(), "publication-recovery-*"))
+	if err != nil || !reflect.DeepEqual(beforeWorktrees, afterWorktrees) {
+		t.Fatalf("legacy refusal created a recovery worktree: %v %v", afterWorktrees, err)
 	}
 }
