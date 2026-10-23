@@ -991,7 +991,7 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 		pp.update(run)
 
 		rv := runViewFromIPC(run)
-		if terminalStatus(rv.Status) {
+		if rv.MonitorStopped || terminalStatus(rv.Status) {
 			return run, false, nil
 		}
 		if gate, ok := rv.awaitingStep(); ok {
@@ -1136,6 +1136,14 @@ func sendRespond(client *ipc.Client, runID string, step types.StepName, action t
 func renderDriveResult(cmd *cobra.Command, run *ipc.RunInfo, ciReady bool) error {
 	rv := runViewFromIPC(run)
 	fields := []toon.Field{runObjectField(rv)}
+	if rv.MonitorStopped {
+		fields = append(fields,
+			toon.Field{Key: "outcome", Value: "monitor-stopped"},
+			toon.Field{Key: "help", Value: []string{"Monitoring is durably stopped; unfinished validation, findings and pipeline custody remain frozen. Do not respond, abort or start another run to bypass this disposition."}},
+		)
+		emitDoc(cmd, fields...)
+		return nil
+	}
 	hasBranchSync := false
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)

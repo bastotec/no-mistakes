@@ -462,6 +462,8 @@ uncertain repairs, changed identity/state, incomplete evidence, and absent owner
 refuse the request. These two exact-pin states are the only supported cessation
 boundaries; this is not a general run-lifecycle control or readiness certification.
 Invoke it outside managed validation worktrees, which refuse pipeline control.
+The daemon checks the authenticated caller's OS-reported working directory as
+well as its ancestry; unverifiable caller topology refuses the request.
 
 Success reports `monitor_stopped: true`, `validation_finished: false`, and
 `custody_returned: false`. The stored validation, readiness evidence, rounds,

@@ -193,6 +193,8 @@ func runViewFromIPC(r *ipc.RunInfo) runView {
 func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	rv := runView{
 		ID:                     r.ID,
+		RepoID:                 r.RepoID,
+		LastPushedSHA:          r.LastPushedSHA,
 		Branch:                 r.Branch,
 		Status:                 string(r.Status),
 		HeadSHA:                r.HeadSHA,

@@ -1454,8 +1454,16 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 	})
 
 	srv.Handle(ipc.MethodStopMonitor, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
-		if err := refuseNested(ctx, false); err != nil {
+		cwd := procreap.ProcessCWD(ipc.PeerPID(ctx))
+		if cwd == "" {
+			return nil, fmt.Errorf("monitor-stop requires verifiable authenticated caller topology")
+		}
+		result, err := classify(ctx, cwd, false, false)
+		if err != nil {
 			return nil, err
+		}
+		if result.Nested {
+			return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(result))
 		}
 		var p db.MonitorDisposition
 		if err := json.Unmarshal(params, &p); err != nil {
