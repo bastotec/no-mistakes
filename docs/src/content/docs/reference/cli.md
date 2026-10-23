@@ -494,8 +494,11 @@ no-mistakes axi monitor-stop --run <id> --repo-id <registered-repo-id> \
   --observed-head <full-current-pipeline-sha> --state parked-review
 ```
 
-All identity flags are required and rechecked by the owning executor against durable
-records. `--state parked-review` requires an unfinished Review approval gate with CI
+Read `axi status --run <id>` for the recorded `repo_id`, `pr` (`--pr-url`),
+`last_pushed_sha` (`--published-head`), and full `head_sha` (`--observed-head`).
+All identity flags are required and rechecked against durable records; the run
+must be running with a recorded open PR and no active push.
+`--state parked-review` requires an unfinished Review approval gate with CI
 still pending; it preserves the gate and all findings. It does **not** assert that a
 historical monitor caused that Review: legacy runs do not record that origin.
 `--state polling` requires a running, post-green CI monitor at the exact published
@@ -512,9 +515,11 @@ Success reports `monitor_stopped: true`, `validation_finished: false`, and
 `custody_returned: false`. The stored validation, readiness evidence, rounds,
 publication binding and commits are unchanged. Live status exposes
 `monitor_stopped: true` and no longer advertises old readiness as current green.
-The frozen run keeps pipeline custody, accepts no gate response or superseding
-launch, and is neither resumed nor failed during daemon crash recovery. There is
-no same-run fix release. Existing PR body, labels and draft status are untouched;
+The frozen run keeps pipeline custody and accepts no gate response, cancellation,
+or superseding launch. There is no same-run fix release. Reattaching with
+`axi run` returns immediately with `outcome: monitor-stopped`, not validation
+success or a custody transfer. [Daemon crash recovery](/no-mistakes/concepts/daemon/#crash-recovery)
+preserves this disposition. Existing PR body, labels and draft status are untouched;
 a do-not-merge publication must already have that policy set by its owner.
 
 Repeating the exact request succeeds while its identity and observed state still
@@ -528,7 +533,8 @@ application; do not restart a shared daemon to make this command available.
 
 ## no-mistakes axi abort
 
-Cancel the active run for the current branch.
+Cancel the active run for the current branch, unless it has a
+[frozen monitor disposition](#no-mistakes-axi-monitor-stop), which refuses cancellation.
 Active runs on other branches are left alone.
 
 ```sh

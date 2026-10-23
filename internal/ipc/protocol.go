@@ -325,12 +325,12 @@ type RespondResult struct {
 	OK bool `json:"ok"`
 }
 
-// CancelRunResult confirms the run cancellation request was accepted.
 // StopMonitorResult confirms a durable frozen disposition, never cancellation.
 type StopMonitorResult struct {
 	MonitorStopped bool `json:"monitor_stopped"`
 }
 
+// CancelRunResult confirms the run cancellation request was accepted.
 type CancelRunResult struct {
 	OK bool `json:"ok"`
 }
