@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +28,10 @@ func publicationRecoveryFixture(t *testing.T) (*pipeline.StepContext, string) {
 }
 
 func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, configure ...func(*pipeline.StepContext)) (*pipeline.StepContext, string) {
+	return publicationRecoveryClassifiedFixture(t, mismatch, false, configure...)
+}
+
+func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, configure ...func(*pipeline.StepContext)) (*pipeline.StepContext, string) {
 	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "fixture"}
@@ -49,6 +54,9 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, c
 	pngJSON, _ := json.Marshal(png)
 	// This is a deterministic recorded run, not a live validation claim.
 	review := `{"findings":[],"summary":"fix-only round completed","risk_level":"medium","risk_rationale":"` + staleRisk + `","round_cap":1,"resolved_by_fix":[{"id":"r1","severity":"error","description":"Restore required parser records","action":"auto-fix"}]}`
+	if privacy {
+		review = `{"findings":[{"id":"repair-budget-review","category":"repair-budget","severity":"warning","action":"ask-user","description":"Automatic repair budget exhausted for review: consumed 2 repairs; approve or abort (run 01ARZ3NDEKTSV4RRFFQ69G5FAV)."}],"risk_level":"low","risk_rationale":"No code defects recorded"}`
+	}
 	test := `{"findings":[],"summary":"fixture","tested":["fixture scenario"],"testing_summary":"recorded fixture evidence","artifacts":[{"kind":"screenshot","label":"Recorded fixture","path":` + string(pngJSON) + `}],"scenarios":[{"name":"fixture scenario","result":"pass","live":true,"evidence":"fixture recorded observation","reason":""}],"verdict":"go","tested_head_sha":"` + head + `"}`
 	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, base); err != nil {
 		t.Fatal(err)
@@ -107,12 +115,34 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, c
 		if strings.Contains(opts.Prompt, staleRisk) {
 			issues = append(issues, "risk rationale presents a repaired finding as a current defect")
 		}
-		out, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, RiskDispositionMismatch: mismatch && len(issues) > 0, Issues: issues})
+		if privacy {
+			issues = nil
+			var written prContent
+			_, payload, found := strings.Cut(opts.Prompt, "Run-written PR content JSON:\n")
+			if !found || json.NewDecoder(strings.NewReader(payload)).Decode(&written) != nil {
+				t.Fatal("missing exact run-written content")
+			}
+			if strings.Contains(written.Body, "01ARZ3NDEKTSV4RRFFQ69G5FAV") {
+				issues = []string{"generated Review repair-budget text exposes an internal run identifier"}
+			}
+		}
+		out, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, RiskDispositionMismatch: !privacy && mismatch && len(issues) > 0, GeneratedHistoryPrivacy: privacy && len(issues) > 0, Issues: issues})
 		return &agent.Result{Output: out}, nil
 	}
 	// Exercise real pinning and the ordinary guard, then model executor's
 	// terminal failure persistence. No test manufactures a recovery-only waiver.
-	_, err = (&PRStep{mediaUploader: &stubMediaUploader{err: os.ErrPermission}}).Execute(sctx)
+	if privacy {
+		// Feed representative pre-amendment generated history to the ORDINARY
+		// exact-content guard. This is not the missing rejected consumer body.
+		host, _ := buildHost(sctx, scm.ProviderGitHub)
+		if e := pinPublication(sctx, "feature", "main", base, base, scm.ProviderGitHub, host); e != nil {
+			t.Fatal(e)
+		}
+		content := prContent{Title: "fix: fixture", Body: "## Pipeline\n\nAutomatic repair budget exhausted for review (run 01ARZ3NDEKTSV4RRFFQ69G5FAV)."}
+		err = (&PRStep{}).validateFinalPRContent(sctx, content, content, "", base, false)
+	} else {
+		_, err = (&PRStep{mediaUploader: &stubMediaUploader{err: os.ErrPermission}}).Execute(sctx)
+	}
 	if err == nil || !strings.Contains(err.Error(), "refusing non-compliant PR publication") {
 		t.Fatalf("ordinary guard error=%v", err)
 	}
@@ -468,7 +498,7 @@ func TestPublicationRecoveryRiskPreservesAttributedScopeWithoutPrivateInstructio
 	round := &db.StepRound{Round: 2, UserFindingsJSON: &instructions, SelectedFindingIDs: &ids, SelectionSource: &source}
 	prior := &db.BranchDecisionRound{RunID: "earlier-run", StepName: types.StepReview, Round: round}
 	text := recoveryRiskLine([]*db.StepResult{row}, map[string][]*db.StepRound{"review": {round}}, prior)
-	for _, want := range []string{"Medium", "Fixed without rereview", "not independently revalidated", "Unresolved review note", "Keep the limitation visible", "earlier run earlier-run (historical decision, not certification of the current head)", "original concern is not certified as repaired", "instructions private"} {
+	for _, want := range []string{"Medium", "Fixed without rereview", "not independently revalidated", "Unresolved review note", "Keep the limitation visible", "earlier run (historical decision, not certification of the current head)", "original concern is not certified as repaired", "instructions private"} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("missing %q in recovery risk text:\n%s", want, text)
 		}
@@ -842,5 +872,100 @@ func TestPublicationRecoveryRefusesInsufficientIdentityPinsWithoutRetrofit(t *te
 	after, err := sctx.DB.GetPublicationIntent(run.ID, run.HeadSHA)
 	if err != nil || after.JSON != string(payload) {
 		t.Fatalf("legacy pins retrofitted: %+v %v", after, err)
+	}
+}
+
+func TestPublicationRecoveryGeneratedHistoryPrivacyProspectiveOnly(t *testing.T) {
+	sctx, _ := publicationRecoveryClassifiedFixture(t, false, true)
+	before, _, digest, err := publicationEvidence(sctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, _ := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+	if pin.Refusal == nil || !strings.Contains(*pin.Refusal, "generated-history privacy:") {
+		t.Fatalf("not classified: %+v", pin)
+	}
+	env, log := fakeGH(t, "")
+	sctx.Env = append(env, "FAKE_CLI_PUBLICATION_STATE="+filepath.Join(t.TempDir(), "forge-state.json"), "FAKE_CLI_PR_HEAD_SHA="+sctx.Run.HeadSHA)
+	for i := 0; i < 2; i++ {
+		outcome, err := RecoverPublication(sctx)
+		if err != nil || outcome == nil || outcome.PRURL == "" {
+			t.Fatalf("recovery=%+v %v", outcome, err)
+		}
+		sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	commands, _ := os.ReadFile(log)
+	if strings.Contains(string(commands), "01ARZ3NDEKTSV4RRFFQ69G5FAV") || strings.Count(string(commands), "pr create") != 1 {
+		t.Fatalf("privacy/idempotence failed: %s", commands)
+	}
+	after, _, afterDigest, _ := publicationEvidence(sctx)
+	a, _ := json.Marshal(before)
+	b, _ := json.Marshal(after)
+	afterPin, _ := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+	if digest != afterDigest || string(a) != string(b) || pin.JSON != afterPin.JSON || *pin.Refusal != *afterPin.Refusal || sctx.Run.Status != types.RunFailed {
+		t.Fatal("recovery changed immutable evidence or terminal refusal")
+	}
+}
+
+func TestPublicationRecoveryRefusesSuccessorOwnership(t *testing.T) {
+	for _, terminal := range []bool{false, true} {
+		t.Run(fmt.Sprint(terminal), func(t *testing.T) {
+			sctx, _ := publicationRecoveryFixture(t)
+			next, err := sctx.DB.InsertRun(sctx.Repo.ID, sctx.Run.Branch, sctx.Run.HeadSHA, sctx.Run.BaseSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if terminal {
+				if err := sctx.DB.UpdateRunStatus(next.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := ValidatePublicationRecoveryRecords(sctx); err == nil || (!strings.Contains(err.Error(), "active owner") && !strings.Contains(err.Error(), "current branch run")) {
+				t.Fatalf("historical recovery allowed: %v", err)
+			}
+		})
+	}
+}
+
+func TestPublicationRecoveryPrivacyDoesNotWaiveResidualLiteralPrivacy(t *testing.T) {
+	sctx, _ := publicationRecoveryClassifiedFixture(t, false, true)
+	ag := sctx.Agent.(*mockAgent)
+	ag.runFn = func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: []byte(`{"title":"fix: fixture","body":"## What Changed\n\nLiteral captured output: private identifier 01ARZ3NDEKTSV4RRFFQ69G5FAV"}`)}, nil
+	}
+	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		digest, err := validationDigestFromPrompt(opts.Prompt)
+		if err != nil {
+			return nil, err
+		}
+		var written prContent
+		_, raw, _ := strings.Cut(opts.Prompt, "Run-written PR content JSON:\n")
+		if json.NewDecoder(strings.NewReader(raw)).Decode(&written) != nil || !strings.Contains(written.Body, "01ARZ3NDEKTSV4RRFFQ69G5FAV") {
+			t.Fatal("literal evidence was masked before exact guard")
+		}
+		output, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{"literal captured output exposes private identifier"}})
+		return &agent.Result{Output: output}, nil
+	}
+	env, log := fakeGH(t, "")
+	sctx.Env = env
+	if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "literal captured output") {
+		t.Fatalf("residual privacy bypassed: %v", err)
+	}
+	commands, _ := os.ReadFile(log)
+	if strings.Contains(string(commands), "pr create") {
+		t.Fatal("created PR despite residual privacy refusal")
+	}
+}
+
+func TestPublicationRecoveryRefusesMovedPrivateHeadDespiteRetainedObject(t *testing.T) {
+	sctx, dir := publicationRecoveryFixture(t)
+	sctx.GateDir = dir
+	gitCmd(t, dir, "checkout", "--detach", sctx.Run.HeadSHA)
+	gitCmd(t, dir, "update-ref", "refs/heads/feature", sctx.Run.BaseSHA)
+	if _, err := RecoverPublication(sctx); err == nil || !strings.Contains(err.Error(), "private branch head") {
+		t.Fatalf("retained object substituted for current head proof: %v", err)
 	}
 }

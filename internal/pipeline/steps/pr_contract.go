@@ -47,8 +47,9 @@ var prContentValidationSchema = json.RawMessage(`{
   "english":{"type":"boolean"},
   "format_compliant":{"type":"boolean"},
   "risk_disposition_mismatch":{"type":"boolean"},
+  "generated_history_privacy":{"type":"boolean"},
   "issues":{"type":"array","items":{"type":"string"}}
- },"required":["content_sha256","english","format_compliant","risk_disposition_mismatch","issues"]
+ },"required":["content_sha256","english","format_compliant","risk_disposition_mismatch","generated_history_privacy","issues"]
 }`)
 
 type prContentValidation struct {
@@ -56,6 +57,7 @@ type prContentValidation struct {
 	English                 bool     `json:"english"`
 	FormatCompliant         bool     `json:"format_compliant"`
 	RiskDispositionMismatch bool     `json:"risk_disposition_mismatch"`
+	GeneratedHistoryPrivacy bool     `json:"generated_history_privacy"`
 	Issues                  []string `json:"issues"`
 }
 
@@ -180,6 +182,7 @@ The SHA-256 binds your verdict to the exact title and body below. Return it unch
 - The Pipeline section is generated round-by-round history, not a set of current claims. A finding listed before a later fix round, or after a "Fixed in round N" status, quotes what a reviewer reported before that fix. Never report such a quote as contradicting the fix, the final step status, or another section.
 %s
 - risk_disposition_mismatch is true only when current risk prose contradicts the recorded review dispositions supplied below. Historical quoted findings are not current claims. A fixed-without-rereview disposition is not a clean rereview or independent revalidation; remaining notes must stay visible.
+- generated_history_privacy is true only for a private internal run identifier in machine-generated repair-budget Review history. It is false for literal evidence, arbitrary findings, approval instructions, or any other privacy violation. This classification never authorizes publication: list the violation in issues and refuse it as usual.
 - List every concrete violation in issues. Do not edit or translate the content.
 
 Recorded review dispositions JSON (authoritative):
@@ -211,13 +214,16 @@ Run-written PR content JSON:
 	if validation.ContentSHA256 != digest {
 		return fmt.Errorf("validator verdict does not bind the final PR content")
 	}
-	if !validation.English || (runWroteNarrative && !validation.FormatCompliant) || validation.RiskDispositionMismatch || len(validation.Issues) != 0 {
+	if !validation.English || (runWroteNarrative && !validation.FormatCompliant) || validation.RiskDispositionMismatch || validation.GeneratedHistoryPrivacy || len(validation.Issues) != 0 {
 		detail := strings.Join(validation.Issues, "; ")
 		if detail == "" {
 			detail = "English or repository-format compliance was not proven"
 		}
+		if validation.GeneratedHistoryPrivacy && len(validation.Issues) > 0 {
+			detail = "generated-history privacy: " + detail
+		}
 		refusal := fmt.Errorf("refusing non-compliant PR publication: %s", detail)
-		if s.recovery == nil && repaired && validation.RiskDispositionMismatch && len(validation.Issues) > 0 && sctx.DB != nil {
+		if s.recovery == nil && ((repaired && validation.RiskDispositionMismatch) || validation.GeneratedHistoryPrivacy) && len(validation.Issues) > 0 && sctx.DB != nil {
 			if err := sctx.DB.RecordPublicationRefusal(sctx.Run.ID, sctx.Run.HeadSHA, safeurl.RedactText(refusal.Error())); err != nil {
 				return fmt.Errorf("record publication refusal: %w", err)
 			}
