@@ -421,6 +421,10 @@ func (m Model) terminalTitle() string {
 		suffix = " - " + branch
 	}
 
+	if m.run != nil && m.run.MonitorStopped {
+		return "Monitor stopped" + suffix
+	}
+
 	// Terminal states.
 	if m.done || m.run == nil {
 		switch {

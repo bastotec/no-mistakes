@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -55,8 +56,34 @@ func executorMonitorFixture(t *testing.T, state string) (*Executor, db.MonitorDi
 	return e, db.MonitorDisposition{RunID: run.ID, RepoID: repo.ID, PRURL: "https://github.com/example/repo/pull/1", PublishedHead: head, ObservedHead: head, State: state}
 }
 
+func monitorStopEvents(t *testing.T, e *Executor) <-chan ipc.Event {
+	t.Helper()
+	events := make(chan ipc.Event, 4)
+	e.onEvent = func(event ipc.Event) {
+		frozen, err := e.db.MonitorFrozen(event.RunID)
+		if err != nil || !frozen {
+			t.Errorf("event preceded durable freeze: frozen=%v err=%v", frozen, err)
+		}
+		events <- event
+	}
+	return events
+}
+
+func assertMonitorStopEvent(t *testing.T, events <-chan ipc.Event, p db.MonitorDisposition) {
+	t.Helper()
+	select {
+	case event := <-events:
+		if event.Type != ipc.EventRunUpdated || ipc.ClassOf(event.Type) != ipc.ClassState || event.RunID != p.RunID || event.RepoID != p.RepoID || event.MonitorStopped == nil || !*event.MonitorStopped || event.CIReady == nil || *event.CIReady || event.CIReadyNoCI == nil || *event.CIReadyNoCI {
+			t.Fatalf("incorrect frozen-state event: %+v", event)
+		}
+	default:
+		t.Fatal("monitor stop acknowledged without publishing state")
+	}
+}
+
 func TestMonitorStopParkedPreservesGateAndRefusesResponses(t *testing.T) {
 	e, p := executorMonitorFixture(t, "parked-review")
+	events := monitorStopEvents(t, e)
 	before, _ := e.db.GetRun(p.RunID)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -65,6 +92,10 @@ func TestMonitorStopParkedPreservesGateAndRefusesResponses(t *testing.T) {
 	}
 	if err := e.StopMonitor(ctx, p); err != nil {
 		t.Fatal(err)
+	}
+	assertMonitorStopEvent(t, events, p)
+	if len(events) != 0 {
+		t.Fatal("exact replay emitted a duplicate transition")
 	}
 	for _, action := range []types.ApprovalAction{types.ActionFix, types.ActionApprove, types.ActionSkip, types.ActionAbort} {
 		if err := e.Respond(types.StepReview, action, nil); err == nil {
@@ -82,6 +113,7 @@ func TestMonitorStopParkedPreservesGateAndRefusesResponses(t *testing.T) {
 
 func TestMonitorStopPollingAcknowledgesOnlyAtBoundary(t *testing.T) {
 	e, p := executorMonitorFixture(t, "polling")
+	events := monitorStopEvents(t, e)
 	before, _ := e.db.GetRun(p.RunID)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -102,6 +134,7 @@ func TestMonitorStopPollingAcknowledgesOnlyAtBoundary(t *testing.T) {
 	case <-ctx.Done():
 		t.Fatal("no acknowledgement")
 	}
+	assertMonitorStopEvent(t, events, p)
 	select {
 	case err := <-finished:
 		t.Fatalf("frozen monitor continued: %v", err)

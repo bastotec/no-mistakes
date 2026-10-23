@@ -90,8 +90,10 @@ func renderCIViewWithSelection(run *ipc.RunInfo, steps []ipc.StepResultInfo, fin
 
 	b.WriteString("\n")
 
-	switch status {
-	case types.StepStatusRunning:
+	switch {
+	case run != nil && run.MonitorStopped:
+		b.WriteString(dimStyle.Render("Monitor stopped; validation unfinished, custody retained") + "\n")
+	case status == types.StepStatusRunning:
 		if activity.AutoFixing {
 			style := lipgloss.NewStyle().Foreground(lipgloss.Color(ansiBlue))
 			b.WriteString(style.Render("\u2699 Auto-fixing CI failures...") + "\n")

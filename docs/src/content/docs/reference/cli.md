@@ -502,7 +502,9 @@ historical monitor caused that Review: legacy runs do not record that origin.
 head with all prior steps completed or skipped. A polling request is acknowledged
 only at a quiescent poll boundary, never by cancelling ongoing work. Active or
 uncertain repairs, changed identity/state, incomplete evidence, and absent owners
-refuse the request.
+refuse the request. These two exact-pin states are the only supported cessation
+boundaries; this is not a general run-lifecycle control or readiness certification.
+Invoke it outside managed validation worktrees, which refuse pipeline control.
 
 Success reports `monitor_stopped: true`, `validation_finished: false`, and
 `custody_returned: false`. The stored validation, readiness evidence, rounds,

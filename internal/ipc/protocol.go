@@ -493,9 +493,10 @@ type Event struct {
 	// delta only when StateRev exceeds the revision it has already applied,
 	// which makes a delta queued before an authoritative snapshot an
 	// idempotent no-op after it.
-	StateRev    int64 `json:"state_rev,omitempty"`
-	CIReady     *bool `json:"ci_ready,omitempty"`
-	CIReadyNoCI *bool `json:"ci_ready_no_ci,omitempty"`
+	StateRev       int64 `json:"state_rev,omitempty"`
+	CIReady        *bool `json:"ci_ready,omitempty"`
+	CIReadyNoCI    *bool `json:"ci_ready_no_ci,omitempty"`
+	MonitorStopped *bool `json:"monitor_stopped,omitempty"`
 	// CIOverrideReason rides run_completed so the live TUI banner can show a
 	// passed-with-override run without a snapshot read. It is derived from the
 	// CI step's OverrideReason the same way RunInfo.CIOverrideReason is, and is
