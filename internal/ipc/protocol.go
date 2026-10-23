@@ -17,6 +17,7 @@ const (
 	// history contract. This path imports locally; it never fires a gate hook.
 	MethodStartHistoryRun = "start_history_run"
 	// Distinct RPC: older daemons must refuse, not launch an ordinary Test.
+	MethodStartDocumentRun     = "start_document_run"
 	MethodStartIsolatedTestRun = "start_isolated_test_run"
 	MethodClaimLaunchReceipt   = "claim_launch_receipt"
 	MethodGetRun               = "get_run"
@@ -141,6 +142,14 @@ type StartHistoryRunParams struct {
 	// Ordinary reattachment may reuse matching pins. A strict new nonce must
 	// never silently acquire another request's receipt or supersede its run.
 	ReuseActive bool `json:"reuse_active,omitempty"`
+}
+
+// StartDocumentRunParams uses a distinct RPC so an older daemon cannot
+// silently launch with its default timeout. The duration is a positive Go
+// duration string; it applies only to Document invocations in this run.
+type StartDocumentRunParams struct {
+	StartHistoryRunParams
+	DocumentTimeout string `json:"document_timeout"`
 }
 
 // ClaimLaunchReceiptParams identifies one exact opaque receipt binding.

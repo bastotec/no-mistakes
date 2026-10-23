@@ -124,6 +124,7 @@ func newAxiRunCmd() *cobra.Command {
 	var existingPR string
 	var retireExistingPR bool
 	var isolateTest bool
+	var documentTimeout time.Duration
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -181,6 +182,15 @@ func newAxiRunCmd() *cobra.Command {
 				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
+				if cmd.Flags().Changed("document-timeout") {
+					if documentTimeout <= 0 {
+						return emitError(cmd, 2, "--document-timeout must be positive")
+					}
+					if isolateTest || retireExistingPR || existingPR != "" || preserveHistoryBase != "" || len(skipSteps) != 0 || launchNonce != "" || validationGeneration != "" {
+						return emitError(cmd, 2, "--document-timeout cannot combine with isolation, PR association, history, skip or launch-receipt flags")
+					}
+					return runAxiDocumentTimeout(cmd, autoYes, intent, baseBranch, wait, documentTimeout)
+				}
 				if isolateTest {
 					if retireExistingPR || existingPR != "" || preserveHistoryBase != "" || len(skipSteps) != 0 || launchNonce != "" || validationGeneration != "" {
 						return emitError(cmd, 2, "--isolate-test cannot combine with PR association, history, skip or launch-receipt flags")
@@ -213,6 +223,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
 	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
 	cmd.Flags().BoolVar(&isolateTest, "isolate-test", false, "opt this run's whole Test descendant tree into Linux/bubblewrap isolation with a private native PostgreSQL database and constrained model channel; refuse unsupported setups")
+	cmd.Flags().DurationVar(&documentTimeout, "document-timeout", 0, "positive per-invocation Document timeout for this run only; requires matching daemon support and returned branch custody")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
