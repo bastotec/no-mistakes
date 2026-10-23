@@ -450,4 +450,5 @@ var migrationStatements = []string{
 		policy_digest TEXT NOT NULL,
 		created_at    INTEGER NOT NULL DEFAULT (unixepoch())
 	)`,
+	`CREATE TABLE IF NOT EXISTS run_document_timeout (run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE, timeout_ns INTEGER NOT NULL CHECK(timeout_ns > 0))`,
 }

@@ -1620,6 +1620,12 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("create_run")
 		return "", fmt.Errorf("create run: %w", err)
 	}
+	if timeout, ok := ctx.Value(documentTimeoutLaunchKey{}).(time.Duration); ok {
+		if err := m.db.PinDocumentTimeout(run.ID, timeout); err != nil {
+			m.db.UpdateRunError(run.ID, "pin Document timeout failed")
+			return "", fmt.Errorf("pin Document timeout: %w", err)
+		}
+	}
 	if ctx.Value(isolatedTestLaunchKey{}) == true {
 		if err := m.db.EnableTestIsolation(run.ID); err != nil {
 			m.db.UpdateRunError(run.ID, "pin Test isolation failed")

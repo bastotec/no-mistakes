@@ -502,6 +502,8 @@ Accepts any positive Go `time.ParseDuration` string: `5m`, `30m`, `1h`, etc.
 Non-positive values are rejected when loading the global config.
 Raise it for repositories whose document, lint, rebase, PR, or CI-fix agent turns legitimately run long.
 It is global-only: repository config and environment variables cannot override it.
+For a Document-only exception without changing global configuration, see
+[`axi run --document-timeout`](/no-mistakes/reference/cli/#run-scoped-document-timeout).
 
 ### review_agent_timeout
 
