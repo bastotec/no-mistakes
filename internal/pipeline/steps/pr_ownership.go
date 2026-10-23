@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 )
 
@@ -124,8 +125,8 @@ func prTitleMatches(provider scm.Provider, published, stored string) bool {
 // generated block. Model-authored copies of ownership markers in evidence are
 // escaped before the actual delimiters are inserted, like foreign attestations.
 func composeOwnedPRContent(parts prOwnedBody, title, appendix string, bodyLimit int) (prContent, error) {
-	before := redactPRContent(prContent{Body: parts.before}).Body
-	after := redactPRContent(prContent{Body: parts.after}).Body
+	before := safepath.RedactText(parts.before)
+	after := safepath.RedactText(parts.after)
 	appendix = prAppendixMarkerPattern.ReplaceAllStringFunc(appendix, func(marker string) string {
 		// Break the namespace without rewriting ordinary mentions of its name.
 		i := strings.LastIndex(marker, "-")

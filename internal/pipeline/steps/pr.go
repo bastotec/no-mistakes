@@ -98,7 +98,7 @@ type pipelineUpdateGroup struct {
 func (s *PRStep) Name() types.StepName { return types.StepPR }
 
 // Execute publishes the pull request. A publication-validator refusal of
-// run-written text is never written to the forge, so it is repaired instead of
+// run-written text opens or edits no pull request, so it is repaired instead of
 // failing the run: the refused literals are stripped, the issues are fed back
 // to the re-draft, and the whole publication is retried a bounded number of
 // times. Only an exhausted repair fails the step, with a next step attached.
@@ -243,6 +243,7 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					if err != nil {
 						return nil, err
 					}
+					draft = redactPRContent(draft)
 					emptyNarrative = neutralizeAttestationMarkers(draft.Body)
 					title = draft.Title
 					headingTranslations = draft.HeadingTranslations

@@ -40,7 +40,7 @@ var internalRefPattern = regexp.MustCompile(`\brefs/no-mistakes/[^\s` + "`" + `'
 // fabrication issue quotes would hide the claim instead of fixing it.
 var privacyIssuePattern = regexp.MustCompile(`(?i)internal|private|privacy|identifier|secret|credential|token|leak|expos|sensitive|confidential|personal|local path|daemon|refs/`)
 
-var fabricationIssuePattern = regexp.MustCompile(`(?i)fabricat|invent|absent|unsupported[\s-]+claim`)
+var fabricationIssuePattern = regexp.MustCompile(`(?i)claim|unsupported|invent|fabricat|absent|not in the diff|does not exist`)
 
 var issueLiteralPattern = regexp.MustCompile("`([^`]*)`")
 
@@ -102,7 +102,7 @@ func insidePublishedURL(text string, i int) bool {
 }
 
 // prPublicationRefusal is the validator's verdict that run-written PR text is
-// not publishable. Nothing has been written to the forge when it is returned.
+// not publishable. No pull request was opened or edited when it is returned.
 type prPublicationRefusal struct {
 	issues []string
 	detail string
@@ -160,30 +160,12 @@ func (r *prPublicationRepair) scrub(text string) string {
 	if r == nil || len(r.literals) == 0 || text == "" {
 		return text
 	}
-	var b strings.Builder
-	for text != "" {
-		start := strings.Index(text, pipelineAttestationCommentPrefix)
-		if start < 0 {
-			b.WriteString(r.scrubSpan(text))
-			break
-		}
-		end := strings.Index(text[start:], pipelineAttestationCommentClosingToken)
-		if end < 0 {
-			b.WriteString(r.scrubSpan(text[:start]))
-			b.WriteString(text[start:])
-			break
-		}
-		end += start + len(pipelineAttestationCommentClosingToken)
-		b.WriteString(r.scrubSpan(text[:start]))
-		b.WriteString(text[start:end])
-		text = text[end:]
-	}
-	return b.String()
-}
-
-func (r *prPublicationRepair) scrubSpan(text string) string {
 	for _, literal := range r.literals {
-		text = strings.ReplaceAll(text, literal, learnedPlaceholder)
+		placeholder := learnedPlaceholder
+		if size := utf8.RuneCountInString(literal); size < len(placeholder) {
+			placeholder = strings.Repeat("*", size)
+		}
+		text = replaceOutsideURLs(text, regexp.MustCompile(regexp.QuoteMeta(literal)), placeholder)
 	}
 	return text
 }
@@ -223,5 +205,5 @@ func (r *prPublicationRepair) promptSection() string {
 // exhaustedPRPublicationError is the terminal PR step failure after every
 // sanitize-and-retry attempt was refused. It always names a next step.
 func exhaustedPRPublicationError(refusal *prPublicationRefusal, branch, baseBranch string) error {
-	return fmt.Errorf("%w (still refused after %d sanitize-and-retry attempts; nothing was published and the pushed branch is intact). Next: run `no-mistakes rerun` on branch %s to re-run the pipeline and re-draft the PR text, or open the pull request by hand, e.g. `gh pr create --head %s --base %s`", refusal, maxPRPublicationRepairs, branch, branch, baseBranch)
+	return fmt.Errorf("%w (still refused after %d sanitize-and-retry attempts; no pull request was opened or edited and the pushed branch is intact). Next: run `no-mistakes rerun` on branch %s to re-run the pipeline and re-draft the PR text, or open the pull request by hand, e.g. `gh pr create --head %s --base %s`", refusal, maxPRPublicationRepairs, branch, branch, baseBranch)
 }

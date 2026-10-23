@@ -10,6 +10,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -36,6 +37,75 @@ func TestRedactRunIdentifiers(t *testing.T) {
 		if got := redactRunIdentifiers(input); got != want {
 			t.Errorf("delimiter %q: got %q, want %q", delimiter, got, want)
 		}
+	}
+}
+
+func TestPROwnershipPreservesAuthorIdentifiers(t *testing.T) {
+	t.Parallel()
+	const runID = "01M5MMEPDZ5K14XG3ENEJZ76R1"
+	const privateRef = "refs/no-mistakes/sync/author-example"
+	_, appendix := ownedFixture(t)
+	appendix += "\nGenerated " + runID + " " + privateRef
+	for _, managed := range []bool{false, true} {
+		parts := prOwnedBody{
+			before:  "Author reproduction /home/person/work " + runID + " " + privateRef + "\n\n",
+			after:   "\nAuthor notes /home/person/notes " + runID + " " + privateRef,
+			managed: managed,
+		}
+		content, err := composeOwnedPRContent(parts, "fix: sanitizes "+runID, appendix, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed, err := parsePROwnedBody(content.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantBefore := strings.ReplaceAll(parts.before, "/home/person", "~")
+		if !managed {
+			wantBefore += "\n\n"
+		}
+		if parsed.before != wantBefore || parsed.after != strings.ReplaceAll(parts.after, "/home/person", "~") {
+			t.Fatalf("author spans changed: %+v", parsed)
+		}
+		if strings.Contains(content.Title, runID) || !strings.Contains(content.Body, "Generated [run id] [internal ref]") {
+			t.Fatalf("run-written content was not sanitized: %+v", content)
+		}
+	}
+}
+
+func TestPRPublicationRepairPreservesURLsAndMachineMarkers(t *testing.T) {
+	t.Parallel()
+	const literal = "gate-token-7f3k"
+	r := &prPublicationRepair{}
+	r.learn([]string{"The body exposes private identifier `" + literal + "`."})
+	const url = "https://github.com/o/r/blob/evidence/" + literal + ".png"
+	const marker = "<!-- no-mistakes:pr-validation:" + literal + " -->"
+	attestation := pipelineAttestationCommentPrefix + `{"note":"` + literal + `"}` + pipelineAttestationCommentClosingToken
+	input := literal + " [evidence](" + url + ")\n" + marker + "\n" + attestation + "\n" + literal
+	want := learnedPlaceholder + " [evidence](" + url + ")\n" + marker + "\n" + attestation + "\n" + learnedPlaceholder
+	if got := r.scrub(input); got != want {
+		t.Fatalf("scrub = %q, want %q", got, want)
+	}
+}
+
+func TestPRPublicationRepairDoesNotGrowBody(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ literal, replacement string }{
+		{"r42", "***"},
+		{"gate-r42", "********"},
+		{"gate-token-7f3k", learnedPlaceholder},
+		{"私密值", "***"},
+	} {
+		t.Run(tc.literal, func(t *testing.T) {
+			r := &prPublicationRepair{}
+			r.learn([]string{"The body exposes private identifier `" + tc.literal + "`."})
+			prefix := strings.Repeat("x", 4000-scm.PRBodyLen(tc.literal))
+			body := prefix + tc.literal
+			got := r.scrub(body)
+			if got != prefix+tc.replacement || len(got) > len(body) || scm.PRBodyLen(got) > 4000 {
+				t.Fatalf("scrub grew or failed to redact the body: bytes=%d, units=%d", len(got), scm.PRBodyLen(got))
+			}
+		})
 	}
 }
 
@@ -71,6 +141,11 @@ func TestPRPublicationRepairLiteralClassification(t *testing.T) {
 		{"The body fabricates a credential test `TestRefresh`.", "TestRefresh", false},
 		{"The private identifier `gate-r42` is absent from the diff.", "gate-r42", false},
 		{"An unsupported claim about the internal token `gate-r42`.", "gate-r42", false},
+		{"The claim that private identifier `gate-r42` was removed is unsupported by the diff.", "gate-r42", false},
+		{"Private identifier `gate-r42` is unsupported by the diff.", "gate-r42", false},
+		{"Private identifier `gate-r42` is not in the diff.", "gate-r42", false},
+		{"Private identifier `gate-r42` does not exist.", "gate-r42", false},
+		{"The body exposes private identifier `claim-token-r42`.", "claim-token-r42", true},
 		{"The body exposes private identifier `ab`.", "ab", false},
 		{"The body exposes private identifier ``.", "", false},
 	} {
@@ -83,6 +158,9 @@ func TestPRPublicationRepairLiteralClassification(t *testing.T) {
 			want := tc.literal
 			if tc.learn {
 				want = learnedPlaceholder
+				if tc.literal == "r42" {
+					want = "***"
+				}
 			}
 			if got := r.scrub(tc.literal); got != want {
 				t.Fatalf("scrub = %q, want %q", got, want)
@@ -104,7 +182,7 @@ func TestRedactPRContentPreservesLearnedHeadingRedaction(t *testing.T) {
 	}
 	content = redactPRContent(r.scrubContent(content))
 	heading := content.HeadingTranslations[0]
-	if content.Body != "## [redacted]" || heading.English != content.Body || !heading.PublicationRedacted {
+	if content.Body != "## ********" || heading.English != content.Body || !heading.PublicationRedacted {
 		t.Fatalf("learned heading redaction was lost: %+v", content)
 	}
 	if err := validateFinalTemplateHeadings(content.Body, requiredTemplateHeadingTranslations("## gate-r42", content.HeadingTranslations)); err != nil {
@@ -217,6 +295,7 @@ func TestPRStep_RetriesAfterValidatorRefusesRunWrittenText(t *testing.T) {
 	}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
+	sctx.UserIntent = "Remove gate-token-7f3k from prose.\n\n## Testing\n\nExercise privacy redaction."
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatalf("Execute() = %v, want a sanitized retry to publish", err)
@@ -232,7 +311,7 @@ func TestPRStep_RetriesAfterValidatorRefusesRunWrittenText(t *testing.T) {
 		t.Fatal(err)
 	}
 	ghLog := string(logData)
-	if !strings.Contains(ghLog, "pr create") || strings.Contains(ghLog, "gate-token-7f3k") || !strings.Contains(ghLog, "repair widget behind "+learnedPlaceholder) {
+	if !strings.Contains(ghLog, "pr create") || strings.Contains(ghLog, "gate-token-7f3k") || !strings.Contains(ghLog, "repair widget behind "+learnedPlaceholder) || !strings.Contains(ghLog, "Remove "+learnedPlaceholder+" from prose.") {
 		t.Fatalf("retry did not publish the sanitized text:\n%s", ghLog)
 	}
 }
@@ -321,7 +400,7 @@ func TestPRStep_ExhaustedPublicationRepairNamesNextStep(t *testing.T) {
 	if err == nil {
 		t.Fatal("Execute() succeeded, want an exhausted refusal")
 	}
-	for _, want := range []string{"refusing non-compliant PR publication", "overstates", "no-mistakes rerun", "gh pr create --head feature --base main"} {
+	for _, want := range []string{"refusing non-compliant PR publication", "overstates", "no pull request was opened or edited", "no-mistakes rerun", "gh pr create --head feature --base main"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Fatalf("error %q is missing %q", err, want)
 		}

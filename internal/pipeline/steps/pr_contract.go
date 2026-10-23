@@ -55,9 +55,9 @@ type prContentValidation struct {
 	Issues          []string `json:"issues"`
 }
 
-func defaultSectionsWithoutIntent(body string, sctx *pipeline.StepContext) string {
+func (s *PRStep) defaultSectionsWithoutIntent(body string, sctx *pipeline.StepContext) string {
 	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
-	section := redactPublicationText("## Intent\n\n" + cleaned)
+	section := redactPublicationText(s.repair.scrub("## Intent\n\n" + cleaned))
 	if cleaned == "" || !strings.HasPrefix(body, section) {
 		return body
 	}
@@ -140,7 +140,7 @@ func (s *PRStep) validateFinalPRContent(sctx *pipeline.StepContext, content, run
 		}
 	}
 	if template == "" && defaultFormat {
-		if err := validateDefaultPRHeadingOrder(defaultSectionsWithoutIntent(content.Body, sctx)); err != nil {
+		if err := validateDefaultPRHeadingOrder(s.defaultSectionsWithoutIntent(content.Body, sctx)); err != nil {
 			return err
 		}
 	}
