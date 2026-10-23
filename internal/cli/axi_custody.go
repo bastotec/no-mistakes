@@ -2,15 +2,13 @@ package cli
 
 import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
-	"github.com/kunchenguid/no-mistakes/internal/git"
-	"github.com/spf13/cobra"
 	toon "github.com/toon-format/toon-go"
 )
 
 // selectedRunCustodyField is observation only. Alignment and absent legacy
 // stamps never prove returned edit ownership. Cached sync describes the caller,
 // not an arbitrary selected historical branch, and is labelled accordingly.
-func selectedRunCustodyField(cmd *cobra.Command, d *db.DB, selected *db.Run, branch string) toon.Field {
+func selectedRunCustodyField(d *db.DB, selected *db.Run, cached *cachedBranchSyncObservation) toon.Field {
 	owner, err := d.GetActiveRun(selected.RepoID, selected.Branch)
 	ownership, ownerID, ownerHead := "unknown", "", ""
 	if err == nil && owner != nil {
@@ -20,14 +18,13 @@ func selectedRunCustodyField(cmd *cobra.Command, d *db.DB, selected *db.Run, bra
 	if selected.CustodyReturnedAt != nil {
 		returned = "recorded_for_selected_run_only"
 	}
+	callerMatches := cached != nil && cached.repoID == selected.RepoID && cached.state.Local.Branch == selected.Branch
 	local, alignment := "", "unknown"
-	if branch == selected.Branch {
-		if head, e := git.HeadSHA(cmd.Context(), "."); e == nil {
-			local = head
-			alignment = "different"
-			if head == selected.HeadSHA {
-				alignment = "equal_not_custody_proof"
-			}
+	if callerMatches && cached.state.Local.Head != "" {
+		local = cached.state.Local.Head
+		alignment = "different"
+		if local == selected.HeadSHA {
+			alignment = "equal_not_custody_proof"
 		}
 	}
 	pinState := "unknown"
@@ -69,16 +66,13 @@ func selectedRunCustodyField(cmd *cobra.Command, d *db.DB, selected *db.Run, bra
 			break
 		}
 	}
-	if service, closeFn, openErr := openSyncService(); openErr == nil {
-		state := service.InspectCached(cmd.Context())
-		closeFn()
-		if state.Local.Branch == selected.Branch {
-			fields = append(fields,
-				toon.Field{Key: "cached_branch_run_id", Value: state.Pipeline.RunID},
-				toon.Field{Key: "cached_branch_state", Value: state.State},
-				toon.Field{Key: "cached_remote_head", Value: state.Remote.ObservedHead},
-				toon.Field{Key: "cached_remote_freshness", Value: state.Remote.Freshness})
-		}
+	if callerMatches {
+		state := cached.state
+		fields = append(fields,
+			toon.Field{Key: "cached_branch_run_id", Value: state.Pipeline.RunID},
+			toon.Field{Key: "cached_branch_state", Value: state.State},
+			toon.Field{Key: "cached_remote_head", Value: state.Remote.ObservedHead},
+			toon.Field{Key: "cached_remote_freshness", Value: state.Remote.Freshness})
 	}
 	if selected.LastPushedSHA != nil {
 		fields = append(fields, toon.Field{Key: "selected_recorded_pushed_head", Value: *selected.LastPushedSHA})
