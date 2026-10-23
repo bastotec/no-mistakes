@@ -56,7 +56,7 @@ func TestScenarioMatchCompletesSuccessfulPRResponsesFromPrompt(t *testing.T) {
 
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	verdict := scenario.Match("Validate final content.\n- content_sha256: " + digest + "\n")
-	if verdict.Structured["content_sha256"] != digest || verdict.Structured["english"] != true || verdict.Structured["format_compliant"] != true || verdict.Structured["risk_disposition_mismatch"] != false {
+	if verdict.Structured["content_sha256"] != digest || verdict.Structured["english"] != true || verdict.Structured["format_compliant"] != true || verdict.Structured["risk_disposition_mismatch"] != false || verdict.Structured["generated_history_privacy"] != false {
 		t.Fatalf("validation response = %#v, want prompt-bound successful verdict", verdict.Structured)
 	}
 	if issues, ok := verdict.Structured["issues"].([]any); !ok || len(issues) != 0 {
@@ -70,12 +70,13 @@ func TestScenarioMatchPreservesExplicitPRFailureResponse(t *testing.T) {
 		"english":                   false,
 		"format_compliant":          false,
 		"risk_disposition_mismatch": true,
+		"generated_history_privacy": true,
 		"issues":                    []any{"not English"},
 		"unsupported_rules":         []any{"unsupported policy"},
 	}}}}
 
 	action := scenario.Match("unsupported_rules\n- content_sha256: 0123456789abcdef\n")
-	if action.Structured["content_sha256"] != "deliberately-unbound" || action.Structured["english"] != false || action.Structured["format_compliant"] != false || action.Structured["risk_disposition_mismatch"] != true {
+	if action.Structured["content_sha256"] != "deliberately-unbound" || action.Structured["english"] != false || action.Structured["format_compliant"] != false || action.Structured["risk_disposition_mismatch"] != true || action.Structured["generated_history_privacy"] != true {
 		t.Fatalf("explicit failure response was overwritten: %#v", action.Structured)
 	}
 	if got := action.Structured["unsupported_rules"].([]any); len(got) != 1 {

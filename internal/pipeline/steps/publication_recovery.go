@@ -158,6 +158,25 @@ func ValidatePublicationRecoveryRecords(sctx *pipeline.StepContext) (*publicatio
 	if json.Unmarshal([]byte(pin.JSON), &pins) != nil || pins.PolicySHA == "" || pins.BaseBranch == "" || pins.ForgeIdentity == "" {
 		return nil, recoveryRefusal("invalid publication intent")
 	}
+	active, err := sctx.DB.GetActiveRun(sctx.Run.RepoID, sctx.Run.Branch)
+	if err != nil {
+		return nil, err
+	}
+	if active != nil {
+		return nil, recoveryRefusal("branch has an active owner; historical selection grants no custody")
+	}
+	runs, err := sctx.DB.GetRunsByRepo(sctx.Run.RepoID)
+	if err != nil {
+		return nil, err
+	}
+	for _, run := range runs {
+		if run.Branch == sctx.Run.Branch {
+			if run.ID != sctx.Run.ID {
+				return nil, recoveryRefusal("selected run is not the current branch run; historical custody is not proven")
+			}
+			break
+		}
+	}
 	rows, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
 		return nil, err
@@ -243,7 +262,7 @@ func ValidatePublicationRecoveryRecords(sctx *pipeline.StepContext) (*publicatio
 	if live == nil || live.Verdict != types.TestVerdictGo {
 		return nil, recoveryRefusal("missing exact-head go verdict for Test")
 	}
-	var repaired bool
+	var repaired, generatedBudget bool
 	for _, row := range validation {
 		if row.StepName == types.StepReview {
 			f := reviewStepFindings(row, rounds[row.ID])
@@ -251,15 +270,39 @@ func ValidatePublicationRecoveryRecords(sctx *pipeline.StepContext) (*publicatio
 				return nil, recoveryRefusal("unreadable review dispositions")
 			}
 			repaired = len(f.ResolvedByFix) > 0
+			generatedBudget = hasPrivateBudgetNotice(f)
+			for _, round := range rounds[row.ID] {
+				if round.FindingsJSON == nil {
+					continue
+				}
+				if historical, err := types.ParseFindingsJSON(*round.FindingsJSON); err == nil {
+					generatedBudget = generatedBudget || hasPrivateBudgetNotice(&historical)
+				}
+			}
 		}
 	}
-	if !repaired {
+	generatedPrivacy := strings.HasPrefix(*pin.Refusal, "refusing non-compliant PR publication: generated-history privacy: ")
+	if generatedPrivacy && !generatedBudget {
+		return nil, recoveryRefusal("generated-history classification lacks recorded generated budget evidence")
+	}
+	if !repaired && !generatedPrivacy {
 		return nil, recoveryRefusal("no recorded repaired review dispositions to reconcile")
 	}
 	if sctx.Run.LastPushedSHA == nil || *sctx.Run.LastPushedSHA != sctx.Run.HeadSHA || sctx.Run.PushTargetFingerprint == nil || *sctx.Run.PushTargetFingerprint != pins.PushTarget || sctx.Run.PushRef == nil || *sctx.Run.PushRef != "refs/heads/"+pins.Branch || sctx.Run.PushActive {
 		return nil, recoveryRefusal("missing exact source-head publication binding")
 	}
 	return &pins, nil
+}
+
+func hasPrivateBudgetNotice(f *types.Findings) bool {
+	for _, items := range [][]types.Finding{f.Items, f.ResolvedByFix, f.UnresolvedNotes} {
+		for _, item := range items {
+			if publicHistoryFindingDescription(item) != item.Description {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // RecoverPublication calls the ordinary PR step, not Push or a new validation
@@ -298,6 +341,12 @@ func (s *PRStep) verifyRecoveryPublication(sctx *pipeline.StepContext, draftedBa
 	}
 	if current != *pins {
 		return recoveryRefusal("target branch/base, policy, configuration, or evidence differs from original publication intent")
+	}
+	if sctx.GateDir != "" {
+		privateHead, err := git.ResolveRef(ctx, sctx.GateDir, "refs/heads/"+pins.Branch)
+		if err != nil || privateHead != sctx.Run.HeadSHA {
+			return recoveryRefusal("current private branch head differs from the selected run head")
+		}
 	}
 	head, err := git.HeadSHA(sctx.Ctx, sctx.WorkDir)
 	if err != nil || head != sctx.Run.HeadSHA {
@@ -338,13 +387,13 @@ func recoveryRiskLine(rows []*db.StepResult, rounds map[string][]*db.StepRound, 
 		var b strings.Builder
 		fmt.Fprintf(&b, "%s %s (recorded review rating).", riskEmoji(f.RiskLevel), capitalizeRisk(f.RiskLevel))
 		for _, item := range f.ResolvedByFix {
-			fmt.Fprintf(&b, "\n\n- Fixed without rereview (recorded disposition; not independently revalidated): %s", item.Description)
+			fmt.Fprintf(&b, "\n\n- Fixed without rereview (recorded disposition; not independently revalidated): %s", publicHistoryFindingDescription(item))
 		}
 		for _, item := range f.UnresolvedNotes {
-			fmt.Fprintf(&b, "\n\n- Unresolved review note (not fixed): %s", item.Description)
+			fmt.Fprintf(&b, "\n\n- Unresolved review note (not fixed): %s", publicHistoryFindingDescription(item))
 		}
 		for _, item := range f.Items {
-			fmt.Fprintf(&b, "\n\n- Remaining finding: %s", item.Description)
+			fmt.Fprintf(&b, "\n\n- Remaining finding: %s", publicHistoryFindingDescription(item))
 		}
 		if scope := strings.Join(reviewScopeDecisions(rounds[row.ID], priorDecisions...), "; "); scope != "" {
 			fmt.Fprintf(&b, "\n\nRecorded repair scope: %s", scope)

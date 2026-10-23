@@ -9,6 +9,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strings"
@@ -1398,7 +1399,7 @@ func reviewScopeDecisions(rounds []*db.StepRound, priorDecisions ...*db.BranchDe
 		if entry == nil || entry.StepName != types.StepReview {
 			continue
 		}
-		appendRound(entry.Round, fmt.Sprintf("earlier run %s (historical decision, not certification of the current head), Review ", sanitizePromptText(entry.RunID)))
+		appendRound(entry.Round, "earlier run (historical decision, not certification of the current head), Review ")
 	}
 	for _, r := range rounds {
 		appendRound(r, "")
@@ -1845,9 +1846,22 @@ func writeRoundFindingItems(b *strings.Builder, sr *db.StepResult, findings *typ
 		if severity == "" {
 			severity = "finding"
 		}
-		b.WriteString(fmt.Sprintf("- ✅ Fixed in round %d (%s)%s - reported before the fix: %s\n", round, severity, loc, escapePRText(f.Description, flavor)))
+		b.WriteString(fmt.Sprintf("- ✅ Fixed in round %d (%s)%s - reported before the fix: %s\n", round, severity, loc, escapePRText(publicHistoryFindingDescription(f), flavor)))
 	}
 	writeFindingItems(b, sr, &types.Findings{Items: open, Scenarios: findings.Scenarios, Verdict: findings.Verdict, Tested: findings.Tested}, flavor)
+}
+
+// publicHistoryFindingDescription projects only machine-generated budget notices.
+// Literal evidence and arbitrary finding prose are deliberately not scrubbed;
+// the ordinary exact-content guard must still refuse genuine private content.
+var budgetRunSuffix = regexp.MustCompile(` \(run [0-9A-HJKMNP-TV-Z]{26}\)\.$`)
+
+func publicHistoryFindingDescription(f types.Finding) string {
+	if (f.Category == "repair-budget" || f.Category == "repair-budget-hard-ceiling") && strings.HasPrefix(f.ID, "repair-budget-") &&
+		(strings.HasPrefix(f.Description, "Automatic repair budget exhausted for ") || strings.HasPrefix(f.Description, "Automatic repair authority exhausted for ") || strings.HasPrefix(f.Description, "The unconfigured ")) {
+		return budgetRunSuffix.ReplaceAllString(f.Description, ".")
+	}
+	return f.Description
 }
 
 // writeFindingItems renders each finding as a `file:line - description` bullet,
@@ -1863,7 +1877,7 @@ func writeFindingItems(b *strings.Builder, sr *db.StepResult, findings *types.Fi
 			}
 			loc += "` - "
 		}
-		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(f.Description, flavor)))
+		b.WriteString(fmt.Sprintf("- %s %s%s\n", emoji, loc, escapePRText(publicHistoryFindingDescription(f), flavor)))
 	}
 	writeTestedDetails(b, sr, findings, flavor)
 }

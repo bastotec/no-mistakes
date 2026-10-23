@@ -166,6 +166,9 @@ func (a Action) withPromptDefaults(prompt string) Action {
 		if _, ok := structured["risk_disposition_mismatch"]; !ok {
 			structured["risk_disposition_mismatch"] = false
 		}
+		if _, ok := structured["generated_history_privacy"]; !ok {
+			structured["generated_history_privacy"] = false
+		}
 		if _, ok := structured["issues"]; !ok {
 			structured["issues"] = []any{}
 		}

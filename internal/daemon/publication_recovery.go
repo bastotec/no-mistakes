@@ -59,6 +59,10 @@ func (m *RunManager) HandleRecoverPublication(ctx context.Context, p *ipc.Recove
 		if err != nil || head != run.HeadSHA {
 			return "", fmt.Errorf("publication recovery refused: recorded source head is missing")
 		}
+		branchHead, err := git.ResolveRef(ctx, gateDir, "refs/heads/"+run.Branch)
+		if err != nil || branchHead != run.HeadSHA {
+			return "", fmt.Errorf("publication recovery refused: current private branch head does not equal the selected run head")
+		}
 		// Disposable detached checkout: never move the caller, private branch, or
 		// original run's worktree. No push, receive hook, or new full run is launched.
 		parent, err := os.MkdirTemp(m.paths.Root(), "publication-recovery-")
