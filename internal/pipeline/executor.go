@@ -63,6 +63,8 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
+	monitorFrozen               bool
+	monitorStopCh               chan monitorStopRequest
 	mu                          sync.Mutex
 	publicationRefreshCh        chan *PublicationRefreshRequest
 	approvalCh                  chan approvalResponse // buffered channel for approval responses
@@ -122,6 +124,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		agent:                 ag,
 		steps:                 steps,
 		onEvent:               onEvent,
+		monitorStopCh:         make(chan monitorStopRequest),
 		approvalCh:            make(chan approvalResponse, 1),
 		publicationRefreshCh:  make(chan *PublicationRefreshRequest),
 		gateReconcileInterval: defaultGateReconcileInterval,
@@ -239,6 +242,10 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 // findings on a fix action before the fix agent runs.
 func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
 	e.mu.Lock()
+	if e.monitorFrozen {
+		e.mu.Unlock()
+		return fmt.Errorf("monitor disposition freezes unfinished validation; no response accepted")
+	}
 	if !e.waiting {
 		e.mu.Unlock()
 		return fmt.Errorf("no step awaiting approval")
@@ -590,6 +597,7 @@ func (e *Executor) resumeWatch(ctx context.Context, run *db.Run, repo *db.Repo, 
 	run.CIReadyAt = nil
 	run.CIReadyNoCI = false
 	sctx := &StepContext{
+		MonitorCheckpoint:  e.monitorCheckpoint,
 		Ctx:                ctx,
 		Run:                run,
 		Repo:               repo,
@@ -1384,6 +1392,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
+		MonitorCheckpoint:  e.monitorCheckpoint,
 		Ctx:                ctx,
 		Run:                run,
 		Repo:               repo,
