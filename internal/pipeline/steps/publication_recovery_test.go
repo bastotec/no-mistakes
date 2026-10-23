@@ -9,12 +9,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/forgecontext"
+	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -31,7 +33,7 @@ func publicationRecoveryFixtureWithClassification(t *testing.T, mismatch bool, c
 	return publicationRecoveryClassifiedFixture(t, mismatch, false, configure...)
 }
 
-func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, configure ...func(*pipeline.StepContext)) (*pipeline.StepContext, string) {
+func preparePublicationRecoveryFixture(t *testing.T, privacy bool, configure ...func(*pipeline.StepContext)) (*pipeline.StepContext, string) {
 	t.Helper()
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "fixture"}
@@ -61,15 +63,12 @@ func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, 
 	if err := sctx.DB.UpdateRunReviewApprovedHeadSHA(sctx.Run.ID, base); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepPR, types.StepCI} {
+	for _, name := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint, types.StepPush, types.StepCI} {
 		row, err := sctx.DB.InsertStepResult(sctx.Run.ID, name)
 		if err != nil {
 			t.Fatal(err)
 		}
 		status := types.StepStatusCompleted
-		if name == types.StepPR {
-			status = types.StepStatusRunning
-		}
 		if name == types.StepCI {
 			status = types.StepStatusPending
 		}
@@ -92,7 +91,7 @@ func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, 
 				t.Fatal(err)
 			}
 		default:
-			if name != types.StepPR && name != types.StepCI {
+			if name != types.StepCI {
 				if _, err := sctx.DB.InsertStepRound(row.ID, 1, "initial", nil, nil, 1); err != nil {
 					t.Fatal(err)
 				}
@@ -106,7 +105,23 @@ func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, 
 	if err != nil {
 		t.Fatal(err)
 	}
+	return sctx, dir
+}
+
+func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, configure ...func(*pipeline.StepContext)) (*pipeline.StepContext, string) {
+	t.Helper()
+	sctx, dir := preparePublicationRecoveryFixture(t, privacy, configure...)
+	row, err := sctx.DB.InsertStepResult(sctx.Run.ID, types.StepPR)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sctx.DB.UpdateStepStatus(row.ID, types.StepStatusRunning); err != nil {
+		t.Fatal(err)
+	}
+	ag := sctx.Agent.(*mockAgent)
+	attempts := 0
 	ag.validationFn = func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		attempts++
 		digest, err := validationDigestFromPrompt(opts.Prompt)
 		if err != nil {
 			return nil, err
@@ -117,32 +132,14 @@ func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, 
 		}
 		if privacy {
 			issues = nil
-			var written prContent
-			_, payload, found := strings.Cut(opts.Prompt, "Run-written PR content JSON:\n")
-			if !found || json.NewDecoder(strings.NewReader(payload)).Decode(&written) != nil {
-				t.Fatal("missing exact run-written content")
-			}
-			if strings.Contains(written.Body, "01ARZ3NDEKTSV4RRFFQ69G5FAV") {
-				issues = []string{"generated Review repair-budget text exposes an internal run identifier"}
+			if attempts <= maxPRPublicationRepairs+1 {
+				issues = []string{fmt.Sprintf("generated Review repair-budget text exposes an internal run identifier (verdict %d)", attempts)}
 			}
 		}
 		out, _ := json.Marshal(prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, RiskDispositionMismatch: !privacy && mismatch && len(issues) > 0, GeneratedHistoryPrivacy: privacy && len(issues) > 0, Issues: issues})
 		return &agent.Result{Output: out}, nil
 	}
-	// Exercise real pinning and the ordinary guard, then model executor's
-	// terminal failure persistence. No test manufactures a recovery-only waiver.
-	if privacy {
-		// Feed representative pre-amendment generated history to the ORDINARY
-		// exact-content guard. This is not the missing rejected consumer body.
-		host, _ := buildHost(sctx, scm.ProviderGitHub)
-		if e := pinPublication(sctx, "feature", "main", base, base, scm.ProviderGitHub, host); e != nil {
-			t.Fatal(e)
-		}
-		content := prContent{Title: "fix: fixture", Body: "## Pipeline\n\nAutomatic repair budget exhausted for review (run 01ARZ3NDEKTSV4RRFFQ69G5FAV)."}
-		err = (&PRStep{}).validateFinalPRContent(sctx, content, content, "", base, false)
-	} else {
-		_, err = (&PRStep{mediaUploader: &stubMediaUploader{err: os.ErrPermission}}).Execute(sctx)
-	}
+	_, err = (&PRStep{mediaUploader: &stubMediaUploader{err: os.ErrPermission}}).Execute(sctx)
 	if err == nil || !strings.Contains(err.Error(), "refusing non-compliant PR publication") {
 		t.Fatalf("ordinary guard error=%v", err)
 	}
@@ -162,6 +159,97 @@ func publicationRecoveryClassifiedFixture(t *testing.T, mismatch, privacy bool, 
 		t.Fatal(err)
 	}
 	return sctx, dir
+}
+
+func TestPublicationRecoveryTerminalRefusalMatchesExecutorPersistence(t *testing.T) {
+	for _, terminal := range []string{"privacy", "risk", "unclassified", "agent-error", "wrong-digest"} {
+		t.Run(terminal, func(t *testing.T) {
+			sctx, dir := preparePublicationRecoveryFixture(t, terminal == "privacy")
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			var attempts int
+			ag := sctx.Agent.(*mockAgent)
+			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				attempts++
+				pin, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+				if err != nil || pin == nil || pin.Refusal != nil {
+					t.Fatalf("nonterminal attempt acquired refusal evidence: %+v %v", pin, err)
+				}
+				digest, err := validationDigestFromPrompt(opts.Prompt)
+				if err != nil {
+					return nil, err
+				}
+				verdict := prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, GeneratedHistoryPrivacy: true, Issues: []string{fmt.Sprintf("earlier privacy refusal %d", attempts)}}
+				if attempts == maxPRPublicationRepairs+1 {
+					verdict.GeneratedHistoryPrivacy = terminal == "privacy"
+					verdict.RiskDispositionMismatch = terminal == "risk"
+					verdict.Issues = []string{"final " + terminal + " refusal https://user:secret@example.com/repo"}
+					if terminal == "agent-error" {
+						return nil, fmt.Errorf("validator transport failed")
+					}
+					if terminal == "wrong-digest" {
+						verdict.ContentSHA256 = "not-the-final-content"
+					}
+				}
+				output, err := json.Marshal(verdict)
+				return &agent.Result{Output: output}, err
+			}
+			env, log := fakeGH(t, "")
+			executor := pipeline.NewExecutor(sctx.DB, p, sctx.Config, ag, []pipeline.Step{
+				reconcileEnvStep{step: &PRStep{}, env: env},
+			}, nil)
+			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			defer cancel()
+			if err := executor.Execute(ctx, sctx.Run, sctx.Repo, dir); err == nil {
+				t.Fatal("publication unexpectedly passed")
+			}
+			if attempts != maxPRPublicationRepairs+1 {
+				t.Fatalf("validator attempts=%d", attempts)
+			}
+			var err error
+			sctx.Run, err = sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil || sctx.Run.Status != types.RunFailed {
+				t.Fatalf("terminal run=%+v error=%v", sctx.Run, err)
+			}
+			pin, err := sctx.DB.GetPublicationIntent(sctx.Run.ID, sctx.Run.HeadSHA)
+			if err != nil || pin == nil {
+				t.Fatalf("missing prospective pin: %+v %v", pin, err)
+			}
+			classified := terminal == "privacy" || terminal == "risk"
+			if classified {
+				if pin.Refusal == nil || sctx.Run.Error == nil || *sctx.Run.Error != "step pr failed: "+*pin.Refusal {
+					t.Fatalf("terminal refusal mismatch: pin=%+v run=%+v", pin, sctx.Run)
+				}
+				if !strings.Contains(*pin.Refusal, "final "+terminal+" refusal") || !strings.Contains(*pin.Refusal, "sanitize-and-retry attempts") || strings.Contains(*pin.Refusal, "earlier privacy refusal") || strings.Contains(*pin.Refusal, "secret") {
+					t.Fatalf("incorrect terminal refusal: %s", *pin.Refusal)
+				}
+				rows, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, row := range rows {
+					if row.StepName == types.StepPR && (row.Status != types.StepStatusFailed || row.Error == nil || *row.Error != *pin.Refusal) {
+						t.Fatalf("step refusal mismatch: %+v", row)
+					}
+				}
+			} else if pin.Refusal != nil {
+				t.Fatalf("unrelated terminal failure gained recovery evidence: %s", *pin.Refusal)
+			}
+			_, err = ValidatePublicationRecoveryRecords(sctx)
+			if classified && err != nil || !classified && err == nil {
+				t.Fatalf("recovery eligibility for %s: %v", terminal, err)
+			}
+			commands, err := os.ReadFile(log)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.Contains(string(commands), "pr create") || strings.Contains(string(commands), "pr edit") {
+				t.Fatalf("refused content reached forge write: %s", commands)
+			}
+		})
+	}
 }
 
 func TestOrdinaryPublicationResumeRetainsPinsAndUsesCurrentPolicy(t *testing.T) {
@@ -934,7 +1022,7 @@ func TestPublicationRecoveryPrivacyDoesNotWaiveResidualLiteralPrivacy(t *testing
 	sctx, _ := publicationRecoveryClassifiedFixture(t, false, true)
 	ag := sctx.Agent.(*mockAgent)
 	ag.runFn = func(_ context.Context, _ agent.RunOpts) (*agent.Result, error) {
-		return &agent.Result{Output: []byte(`{"title":"fix: fixture","body":"## What Changed\n\nLiteral captured output: private identifier 01ARZ3NDEKTSV4RRFFQ69G5FAV"}`)}, nil
+		return &agent.Result{Output: []byte(`{"title":"fix: fixture","body":"## What Changed\n\nLiteral captured output URL: https://example.com/captured/01ARZ3NDEKTSV4RRFFQ69G5FAV"}`)}, nil
 	}
 	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 		digest, err := validationDigestFromPrompt(opts.Prompt)

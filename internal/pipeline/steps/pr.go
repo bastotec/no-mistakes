@@ -15,6 +15,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safepath"
+	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -119,7 +120,13 @@ func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 		}
 		if attempt >= maxPRPublicationRepairs {
 			branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
-			return nil, exhaustedPRPublicationError(refusal, branch, effectivePRBaseBranch(sctx))
+			terminal := exhaustedPRPublicationError(refusal, branch, effectivePRBaseBranch(sctx))
+			if s.recovery == nil && refusal.recoverable && sctx.DB != nil {
+				if err := sctx.DB.RecordPublicationRefusal(sctx.Run.ID, sctx.Run.HeadSHA, safeurl.RedactText(terminal.Error())); err != nil {
+					return nil, fmt.Errorf("record publication refusal: %w", err)
+				}
+			}
+			return nil, terminal
 		}
 		learned := repair.learn(refusal.issues)
 		sctx.Log(fmt.Sprintf("publication validator refused run-written PR text (%s); sanitizing %d flagged identifier(s) and re-drafting, attempt %d of %d", refusal.detail, learned, attempt+1, maxPRPublicationRepairs))

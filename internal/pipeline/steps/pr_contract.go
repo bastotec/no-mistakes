@@ -8,7 +8,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 )
 
 const prContentValidationPurpose = "pr-content-validation"
@@ -221,13 +220,11 @@ Run-written PR content JSON:
 		if validation.GeneratedHistoryPrivacy && len(validation.Issues) > 0 {
 			detail = "generated-history privacy: " + detail
 		}
-		refusal := &prPublicationRefusal{issues: append([]string(nil), validation.Issues...), detail: detail}
-		if s.recovery == nil && ((repaired && validation.RiskDispositionMismatch) || validation.GeneratedHistoryPrivacy) && len(validation.Issues) > 0 && sctx.DB != nil {
-			if err := sctx.DB.RecordPublicationRefusal(sctx.Run.ID, sctx.Run.HeadSHA, safeurl.RedactText(refusal.Error())); err != nil {
-				return fmt.Errorf("record publication refusal: %w", err)
-			}
+		return &prPublicationRefusal{
+			issues:      append([]string(nil), validation.Issues...),
+			detail:      detail,
+			recoverable: ((repaired && validation.RiskDispositionMismatch) || validation.GeneratedHistoryPrivacy) && len(validation.Issues) > 0,
 		}
-		return refusal
 	}
 	return nil
 }
