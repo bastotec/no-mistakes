@@ -154,8 +154,9 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
-// scrub strips learned literals from run-written text. The machine-readable
-// pipeline attestation comment is left byte for byte: consumers parse it.
+// scrub strips learned literals from run-written text without growing it.
+// URL tokens and no-mistakes machine markers stay byte for byte, so evidence
+// links and machine-readable attestations remain usable.
 func (r *prPublicationRepair) scrub(text string) string {
 	if r == nil || len(r.literals) == 0 || text == "" {
 		return text

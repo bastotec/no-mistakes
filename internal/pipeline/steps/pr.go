@@ -587,10 +587,11 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 	return content, nil
 }
 
-// redactPRContent removes the operator's home directory from the content about
-// to be published. Ordinary drafts call it after length caps; the placeholder
-// never grows a path. Owned composition calls it before its integrity guard
-// and non-truncating size check so publication cannot invalidate that guard.
+// redactPRContent is the deterministic publication boundary for run-written
+// text: it removes home prefixes, internal identifiers and private refs using
+// redactPublicationText. Ordinary drafts call it after length caps. Owned
+// composition calls it before its integrity guard and non-truncating size check;
+// preserved author spans receive only home-directory redaction separately.
 func redactPRContent(content prContent) prContent {
 	content.Title = redactPublicationText(content.Title)
 	content.Body = redactPublicationText(content.Body)
