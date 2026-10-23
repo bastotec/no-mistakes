@@ -257,9 +257,6 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 			if err != nil {
 				return nil, err
 			}
-			if err := retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx)); err != nil {
-				return nil, err
-			}
 			// The repository template is a rule for the narrative this run
 			// writes, not a rule the run imposes on somebody else's prose. An
 			// existing description - including the empty one on a pull request
@@ -276,7 +273,10 @@ func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, err
 					validationTemplate = template
 				}
 				runWritten := prContent{Title: title, Body: strings.TrimSpace(narrative + "\n\n" + appendix), HeadingTranslations: headingTranslations}
-				return s.validateFinalPRContent(sctx, content, redactPRContent(runWritten), validationTemplate, policySHA, false)
+				if err := s.validateFinalPRContent(sctx, content, redactPRContent(runWritten), validationTemplate, policySHA, false); err != nil {
+					return err
+				}
+				return retargetExistingPRIfNeeded(sctx, host, existing, runPRBaseBranch(sctx))
 			}
 			if err := updateOwnedPR(sctx, host, existing, live, title, emptyNarrative, appendix, bodyLimit, validate); err != nil {
 				return nil, err
@@ -597,16 +597,13 @@ func redactPRContent(content prContent) prContent {
 	for i := range content.HeadingTranslations {
 		original := content.HeadingTranslations[i].English
 		content.HeadingTranslations[i].English = redactPublicationText(original)
-		content.HeadingTranslations[i].PublicationRedacted = content.HeadingTranslations[i].English != original
+		content.HeadingTranslations[i].PublicationRedacted = content.HeadingTranslations[i].PublicationRedacted || content.HeadingTranslations[i].English != original
 	}
 	return content
 }
 
-// redactPublicationText is the single publication scrub: the operator's home
-// directory first, then no-mistakes' own run ids, private refs and daemon-local
-// paths, which reach the body through generated findings and step history.
 func redactPublicationText(text string) string {
-	return redactRunIdentifiers(safepath.RedactText(text))
+	return safepath.RedactText(redactRunIdentifiers(text))
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {

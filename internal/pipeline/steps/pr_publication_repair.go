@@ -5,6 +5,10 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/kunchenguid/no-mistakes/internal/safepath"
 )
 
 // maxPRPublicationRepairs bounds how many times the PR step sanitizes and
@@ -36,23 +40,21 @@ var internalRefPattern = regexp.MustCompile(`\brefs/no-mistakes/[^\s` + "`" + `'
 // fabrication issue quotes would hide the claim instead of fixing it.
 var privacyIssuePattern = regexp.MustCompile(`(?i)internal|private|privacy|identifier|secret|credential|token|leak|expos|sensitive|confidential|personal|local path|daemon|refs/`)
 
-// issueLiteralPattern extracts back-quoted, whitespace-free spans from a
-// validator issue, e.g. the run id in "exposes the internal run identifier
-// `01M5...`".
-var issueLiteralPattern = regexp.MustCompile("`([^`\\s]{6,})`")
+var fabricationIssuePattern = regexp.MustCompile(`(?i)fabricat|invent|absent|unsupported[\s-]+claim`)
+
+var issueLiteralPattern = regexp.MustCompile("`([^`]*)`")
 
 // redactRunIdentifiers removes no-mistakes run ids and private refs from
 // run-written publication text, including the run id segment of a daemon-local
-// path. The rest of such a path stays readable: safepath already reduced its
-// home to "~", and the existing PR contract keeps ~/.no-mistakes/... visible.
-// A relocated NM_HOME root outside the home directory is replaced whole. URLs
-// are left intact: a published evidence link may carry a run id in its path.
+// path.
 func redactRunIdentifiers(text string) string {
 	if text == "" {
 		return text
 	}
 	if root := strings.TrimSpace(os.Getenv("NM_HOME")); len(root) >= 4 && (strings.HasPrefix(root, "/") || strings.Contains(root, `:\`)) {
-		text = strings.ReplaceAll(text, root, localPathPlaceholder)
+		if strings.ReplaceAll(safepath.RedactText(root), `\`, "/") != "~/.no-mistakes" {
+			text = strings.ReplaceAll(text, root, localPathPlaceholder)
+		}
 	}
 	text = replaceOutsideURLs(text, internalRefPattern, internalRefPlaceholder)
 	return replaceOutsideURLs(text, runIDPattern, runIDPlaceholder)
@@ -91,12 +93,12 @@ func replaceOutsideURLs(text string, pattern *regexp.Regexp, placeholder string)
 	return b.String()
 }
 
-// insidePublishedURL reports whether position i follows a "://" with no
-// whitespace in between, i.e. sits inside a URL's host or path.
 func insidePublishedURL(text string, i int) bool {
 	prefix := text[:i]
 	scheme := strings.LastIndex(prefix, "://")
-	return scheme >= 0 && !strings.ContainsAny(prefix[scheme:], " \t\r\n")
+	return scheme >= 0 && strings.IndexFunc(prefix[scheme:], func(r rune) bool {
+		return unicode.IsSpace(r) || strings.ContainsRune("\"'`<>()[]{},", r)
+	}) < 0
 }
 
 // prPublicationRefusal is the validator's verdict that run-written PR text is
@@ -128,12 +130,13 @@ func (r *prPublicationRepair) learn(issues []string) int {
 			continue
 		}
 		r.issues = append(r.issues, issue)
-		if !privacyIssuePattern.MatchString(issue) {
+		classification := issueLiteralPattern.ReplaceAllString(issue, "")
+		if !privacyIssuePattern.MatchString(classification) || fabricationIssuePattern.MatchString(classification) {
 			continue
 		}
 		for _, match := range issueLiteralPattern.FindAllStringSubmatch(issue, -1) {
 			literal := match[1]
-			if !containsString(r.literals, literal) {
+			if utf8.RuneCountInString(literal) >= 3 && !containsString(r.literals, literal) {
 				r.literals = append(r.literals, literal)
 				added++
 			}

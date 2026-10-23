@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -21,12 +22,93 @@ func TestRedactRunIdentifiers(t *testing.T) {
 		{"see ~/.no-mistakes/logs/" + runID + "/pr.log", "see ~/.no-mistakes/logs/[run id]/pr.log"},
 		{"evidence https://github.com/o/r/blob/ev/" + runID + "/shot.png", "evidence https://github.com/o/r/blob/ev/" + runID + "/shot.png"},
 		{"<!-- no-mistakes:pr-validation:" + runID + " -->", "<!-- no-mistakes:pr-validation:" + runID + " -->"},
+		{"{\"url\":\"https://example.com\",\"run_id\":\"" + runID + "\"}", "{\"url\":\"https://example.com\",\"run_id\":\"[run id]\"}"},
 		{"commit 0123456789abcdef0123456789abcdef01234567 and .no-mistakes.yaml", "commit 0123456789abcdef0123456789abcdef01234567 and .no-mistakes.yaml"},
 	}
 	for _, tc := range cases {
 		if got := redactRunIdentifiers(tc.in); got != tc.want {
 			t.Errorf("redactRunIdentifiers(%q) = %q, want %q", tc.in, got, tc.want)
 		}
+	}
+	for _, delimiter := range []string{" ", "\t", "\n", "\u00a0", "\"", "'", "`", "<", ">", "(", ")", "[", "]", "{", "}", ","} {
+		input := "https://example.com/" + runID + delimiter + runID + " refs/no-mistakes/sync/private"
+		want := "https://example.com/" + runID + delimiter + runIDPlaceholder + " " + internalRefPlaceholder
+		if got := redactRunIdentifiers(input); got != want {
+			t.Errorf("delimiter %q: got %q, want %q", delimiter, got, want)
+		}
+	}
+}
+
+func TestRedactPRContentNMHome(t *testing.T) {
+	const runID = "01M5MMEPDZ5K14XG3ENEJZ76R1"
+	for _, tc := range []struct{ root, want string }{
+		{"/Users/alex/custom-nm", "[local path]/logs/[run id]/pr.log"},
+		{"/srv/custom-nm", "[local path]/logs/[run id]/pr.log"},
+		{"/Users/alex/.no-mistakes", "~/.no-mistakes/logs/[run id]/pr.log"},
+		{`C:\Users\alex\.no-mistakes`, `~\.no-mistakes/logs/[run id]/pr.log`},
+	} {
+		t.Run(tc.root, func(t *testing.T) {
+			t.Setenv("NM_HOME", tc.root)
+			input := tc.root + "/logs/" + runID + "/pr.log"
+			got := redactPRContent(prContent{Title: input, Body: input})
+			if got.Title != tc.want || got.Body != tc.want {
+				t.Fatalf("redactPRContent = %+v, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPRPublicationRepairLiteralClassification(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		issue, literal string
+		learn          bool
+	}{
+		{"The body exposes the private identifier `r42`.", "r42", true},
+		{"The body exposes local path `/srv/private workspace/output.log`.", "/srv/private workspace/output.log", true},
+		{"The body invents the test `TestTokenRefresh`, which is absent from the diff.", "TestTokenRefresh", false},
+		{"The body claims `TestTokenRefresh` was added, but the diff has no such test.", "TestTokenRefresh", false},
+		{"The body fabricates a credential test `TestRefresh`.", "TestRefresh", false},
+		{"The private identifier `gate-r42` is absent from the diff.", "gate-r42", false},
+		{"An unsupported claim about the internal token `gate-r42`.", "gate-r42", false},
+		{"The body exposes private identifier `ab`.", "ab", false},
+		{"The body exposes private identifier ``.", "", false},
+	} {
+		t.Run(tc.issue, func(t *testing.T) {
+			r := &prPublicationRepair{}
+			added := r.learn([]string{tc.issue})
+			if (added == 1) != tc.learn || len(r.issues) != 1 {
+				t.Fatalf("learn = %d, issues = %q", added, r.issues)
+			}
+			want := tc.literal
+			if tc.learn {
+				want = learnedPlaceholder
+			}
+			if got := r.scrub(tc.literal); got != want {
+				t.Fatalf("scrub = %q, want %q", got, want)
+			}
+		})
+	}
+}
+
+func TestRedactPRContentPreservesLearnedHeadingRedaction(t *testing.T) {
+	t.Setenv("NM_HOME", "")
+	r := &prPublicationRepair{}
+	r.learn([]string{"The heading exposes private identifier `gate-r42`."})
+	content := prContent{
+		Title: "Sanitizes headings",
+		Body:  "## gate-r42",
+		HeadingTranslations: []templateHeadingTranslation{{
+			Source: "## gate-r42", English: "## gate-r42",
+		}},
+	}
+	content = redactPRContent(r.scrubContent(content))
+	heading := content.HeadingTranslations[0]
+	if content.Body != "## [redacted]" || heading.English != content.Body || !heading.PublicationRedacted {
+		t.Fatalf("learned heading redaction was lost: %+v", content)
+	}
+	if err := validateFinalTemplateHeadings(content.Body, requiredTemplateHeadingTranslations("## gate-r42", content.HeadingTranslations)); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -152,6 +234,66 @@ func TestPRStep_RetriesAfterValidatorRefusesRunWrittenText(t *testing.T) {
 	ghLog := string(logData)
 	if !strings.Contains(ghLog, "pr create") || strings.Contains(ghLog, "gate-token-7f3k") || !strings.Contains(ghLog, "repair widget behind "+learnedPlaceholder) {
 		t.Fatalf("retry did not publish the sanitized text:\n%s", ghLog)
+	}
+}
+
+func TestPRStep_OwnedPublicationValidatesBeforeRetarget(t *testing.T) {
+	t.Parallel()
+	for _, exhausted := range []bool{false, true} {
+		t.Run(map[bool]string{false: "retry succeeds", true: "retries exhausted"}[exhausted], func(t *testing.T) {
+			sctx, ag, trusted := templateTestContext(t)
+			gitCmd(t, sctx.WorkDir, "branch", "epic/feature", trusted)
+			env, logFile := fakeGHWithBase(t, "https://github.com/test/repo/pull/42", "main")
+			bodyFile := filepath.Join(t.TempDir(), "body.md")
+			const authorBody = "Human description to preserve."
+			if err := os.WriteFile(bodyFile, []byte(authorBody), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			sctx.Env = append(env, "FAKE_CLI_PR_BODY_FILE="+bodyFile)
+			base, url := "epic/feature", "https://github.com/test/repo/pull/42"
+			sctx.Run.PRBaseBranch = &base
+			sctx.Run.PRURL = &url
+			validations := 0
+			ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+				validations++
+				logData, err := os.ReadFile(logFile)
+				if err != nil {
+					return nil, err
+				}
+				if strings.Contains(string(logData), "pr edit") || strings.Contains(string(logData), "pr create") {
+					t.Fatalf("forge was mutated before validation:\n%s", logData)
+				}
+				digest, err := validationDigestFromPrompt(opts.Prompt)
+				if err != nil {
+					return nil, err
+				}
+				verdict := prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}}
+				if exhausted || validations == 1 {
+					verdict.Issues = []string{"The appendix exposes a private identifier."}
+				}
+				payload, _ := json.Marshal(verdict)
+				return &agent.Result{Output: payload}, nil
+			}
+			_, err := (&PRStep{}).Execute(sctx)
+			if (err != nil) != exhausted {
+				t.Fatalf("Execute = %v, exhausted = %v", err, exhausted)
+			}
+			logData, readErr := os.ReadFile(logFile)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			body, readErr := os.ReadFile(bodyFile)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if exhausted {
+				if validations != maxPRPublicationRepairs+1 || strings.Contains(string(logData), "pr edit") || string(body) != authorBody {
+					t.Fatalf("exhausted refusal changed the forge: validations=%d, body=%q, log=%s", validations, body, logData)
+				}
+			} else if validations != 2 || !strings.Contains(string(logData), "--base epic/feature") || !strings.Contains(string(body), authorBody) || !hasPRAppendixMarkers(string(body)) {
+				t.Fatalf("validated retry did not retarget and publish: validations=%d, body=%q, log=%s", validations, body, logData)
+			}
+		})
 	}
 }
 
