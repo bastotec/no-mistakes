@@ -91,7 +91,9 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
 		fields = append(fields, *syncField)
 	}
-	if gate, ok := rv.awaitingStep(); ok {
+	if rv.MonitorStopped {
+		fields = append(fields, toon.Field{Key: "help", Value: []string{"Monitoring is durably stopped; unfinished validation, findings and pipeline custody remain frozen. Do not respond, abort or start another run to bypass this disposition."}})
+	} else if gate, ok := rv.awaitingStep(); ok {
 		// The label above and the commands below deliberately use different
 		// evidence rules. Branch equality is enough to label the selected run,
 		// but not enough to attach a bare mutation command to it: another active

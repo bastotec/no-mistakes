@@ -438,6 +438,47 @@ Step logs include native subprocess agent lifecycle lines such as `codex started
 They also include fix-loop markers such as `auto-fix round 1/3 starting after round 1` and `user-fix round starting after round 2`.
 `--step` accepts the ten core step names and valid repository gate names such as `gate.test.mutation-budget`. Use the exact gate name shown by `axi status`.
 
+## no-mistakes axi monitor-stop
+
+Freeze monitoring for an explicitly selected publication without aborting validation,
+responding to a gate, cancelling a repair, changing Git or the forge, or returning
+edit custody. This is a one-way frozen disposition, not a successful validation or a
+pause/resume interface. It never approves unfinished work.
+
+```sh
+no-mistakes axi monitor-stop --run <id> --repo-id <registered-repo-id> \
+  --pr-url <exact-recorded-url> --published-head <full-last-pushed-sha> \
+  --observed-head <full-current-pipeline-sha> --state parked-review
+```
+
+All identity flags are required and rechecked by the owning executor against durable
+records. `--state parked-review` requires an unfinished Review approval gate with CI
+still pending; it preserves the gate and all findings. It does **not** assert that a
+historical monitor caused that Review: legacy runs do not record that origin.
+`--state polling` requires a running, post-green CI monitor at the exact published
+head with all prior steps completed or skipped. A polling request is acknowledged
+only at a quiescent poll boundary, never by cancelling ongoing work. Active or
+uncertain repairs, changed identity/state, incomplete evidence, and absent owners
+refuse the request.
+
+Success reports `monitor_stopped: true`, `validation_finished: false`, and
+`custody_returned: false`. The stored validation, readiness evidence, rounds,
+publication binding and commits are unchanged. Live status exposes
+`monitor_stopped: true` and no longer advertises old readiness as current green.
+The frozen run keeps pipeline custody, accepts no gate response or superseding
+launch, and is neither resumed nor failed during daemon crash recovery. There is
+no same-run fix release. Existing PR body, labels and draft status are untouched;
+a do-not-merge publication must already have that policy set by its owner.
+
+Repeating the exact request succeeds while its identity and observed state still
+match. A timeout or disconnected client reports cessation **unconfirmed**, never
+success; repeat the same exact request to reconcile a possibly accepted write.
+The command uses the distinct `stop_monitor` RPC and never falls back to abort or
+starts a daemon. Both CLI and the running daemon must contain this feature; an
+older daemon refuses it. Installing only a newer CLI cannot add the owner boundary
+to an already-running daemon. Coordinate a normal authorized daemon rollout before
+application; do not restart a shared daemon to make this command available.
+
 ## no-mistakes axi abort
 
 Cancel the active run for the current branch.

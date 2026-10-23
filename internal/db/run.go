@@ -617,7 +617,7 @@ func (d *DB) ReconcileTerminalPRRuns() (int, error) {
 	}
 	defer tx.Rollback()
 
-	rows, err := tx.Query(`SELECT id FROM runs WHERE status IN (?, ?) AND pr_state IN ('merged', 'closed')`, types.RunPending, types.RunRunning)
+	rows, err := tx.Query(`SELECT id FROM runs WHERE status IN (?, ?) AND pr_state IN ('merged', 'closed') AND NOT EXISTS (SELECT 1 FROM run_monitor_dispositions f WHERE f.run_id=runs.id)`, types.RunPending, types.RunRunning)
 	if err != nil {
 		return 0, fmt.Errorf("reconcile terminal PR runs: list runs: %w", err)
 	}
@@ -926,7 +926,29 @@ func (d *DB) RecoverStaleRunsExcept(errMsg string, preserved map[string]struct{}
 	}
 	defer tx.Rollback()
 
-	placeholders, args := recoveryExclusionClause(preserved)
+	// Frozen unfinished validations are neither resumed nor crash-failed.
+	frozenRows, err := tx.Query(`SELECT run_id FROM run_monitor_dispositions`)
+	if err != nil {
+		return 0, err
+	}
+	keep := make(map[string]struct{}, len(preserved))
+	for id := range preserved {
+		keep[id] = struct{}{}
+	}
+	for frozenRows.Next() {
+		var id string
+		if err := frozenRows.Scan(&id); err != nil {
+			frozenRows.Close()
+			return 0, err
+		}
+		keep[id] = struct{}{}
+	}
+	err = frozenRows.Err()
+	frozenRows.Close()
+	if err != nil {
+		return 0, err
+	}
+	placeholders, args := recoveryExclusionClause(keep)
 
 	// A daemon restart during the long-lived CI monitor should not turn an
 	// already-pushed PR into a failed run. Recover those runs before the broad

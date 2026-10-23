@@ -479,6 +479,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	}
 
 	for {
+		if sctx.MonitorCheckpoint != nil {
+			if err := sctx.MonitorCheckpoint(ctx); err != nil {
+				return nil, err
+			}
+		}
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}

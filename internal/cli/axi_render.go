@@ -112,10 +112,13 @@ type stepView struct {
 // runView is a render-ready view of a pipeline run.
 type runView struct {
 	ID                     string
+	RepoID                 string
+	LastPushedSHA          *string
 	Branch                 string
 	Status                 string
 	HeadSHA                string
 	PRURL                  string
+	MonitorStopped         bool
 	CIReady                bool
 	CIReadyNoCI            bool
 	SubmittedHeadSHA       *string
@@ -138,9 +141,12 @@ type runView struct {
 func runViewFromIPC(r *ipc.RunInfo) runView {
 	rv := runView{
 		ID:                     r.ID,
+		RepoID:                 r.RepoID,
+		LastPushedSHA:          r.LastPushedSHA,
 		Branch:                 r.Branch,
 		Status:                 string(r.Status),
 		HeadSHA:                r.HeadSHA,
+		MonitorStopped:         r.MonitorStopped,
 		CIReady:                r.CIReady,
 		CIReadyNoCI:            r.CIReadyNoCI,
 		SubmittedHeadSHA:       r.SubmittedHeadSHA,
@@ -473,6 +479,15 @@ func runObjectFieldWithKey(key string, rv runView) toon.Field {
 		{Key: "id", Value: rv.ID},
 		{Key: "branch", Value: rv.Branch},
 		{Key: "status", Value: rv.Status},
+	}
+	if rv.RepoID != "" {
+		fields = append(fields, toon.Field{Key: "repo_id", Value: rv.RepoID})
+	}
+	if rv.LastPushedSHA != nil {
+		fields = append(fields, toon.Field{Key: "last_pushed_sha", Value: *rv.LastPushedSHA})
+	}
+	if rv.MonitorStopped {
+		fields = append(fields, toon.Field{Key: "monitor_stopped", Value: true}, toon.Field{Key: "validation_finished", Value: false}, toon.Field{Key: "custody_returned", Value: false})
 	}
 	// Surface the parked-awaiting-agent signal right after status so one read
 	// distinguishes a run waiting for the agent to drive a gate from one that
