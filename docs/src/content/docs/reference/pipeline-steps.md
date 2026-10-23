@@ -363,7 +363,7 @@ Monitors PR health after creation and auto-fixes CI failures. Mergeability polli
 **Behavior:**
 
 - Polls provider CI status at increasing intervals: every 30s for the first 5 minutes, every 60s for 5-15 minutes, every 120s after that
-- Continues its normal monitoring loop until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses, then parks at an approval gate instead of ending the run
+- Continues its normal monitoring loop until the PR is merged, closed, declined, or the configured `ci_timeout` idle window elapses, then parks at an approval gate instead of ending the run; an explicit [monitor-only stop](/no-mistakes/reference/cli/#no-mistakes-axi-monitor-stop) is a separate frozen disposition, not completion
 - If the provider check read keeps failing (6 consecutive polls while the PR is still open), parks at an ask-user approval gate instead of spinning invisibly to `ci_timeout`; the provider-neutral finding names the provider CLI or credentials and includes the underlying error (for GitHub, `gh` < 2.50 rejecting `gh pr checks --json`), and the streak resets as soon as one read succeeds
 - The [`ci_timeout` reference](/no-mistakes/reference/global-config/#ci_timeout) owns idle re-arming, unlimited monitoring, and fail-closed reconciliation while that gate is parked
 - On GitHub, GitLab, Forgejo, and Azure DevOps, polls provider mergeability alongside CI checks while the PR remains open

@@ -115,7 +115,11 @@ reason about in one long-lived process than inside independent hook invocations.
 
 ## Crash recovery
 
-On startup, the daemon checks runs left in `pending` or `running` status by a crash or orderly shutdown:
+On startup, the daemon checks runs left in `pending` or `running` status by a crash or orderly shutdown.
+Runs with a [frozen monitor disposition](/no-mistakes/reference/cli/#no-mistakes-axi-monitor-stop)
+are excluded from the recovery and terminal-PR reconciliation below: they are
+neither resumed nor failed, and their worktrees, evidence and parked markers remain preserved.
+For other runs, startup:
 
 - Completes legacy active rows whose persisted PR state is already `merged` or `closed`, including their CI step, before active-run recovery and parked-run planning
 - Resumes fully recorded parked approval gates whose worktree and step history can be validated, plus repairs whose pre-launch authorization and dispatch state were durably recorded; incomplete or ambiguous active runs fail closed
