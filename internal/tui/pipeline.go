@@ -296,6 +296,10 @@ func renderOutcomeBanner(run *ipc.RunInfo, steps []ipc.StepResultInfo) string {
 	if run == nil {
 		return ""
 	}
+	if run.MonitorStopped {
+		style := lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color(ansiYellow))
+		return style.Render("Monitor stopped; validation unfinished, custody retained")
+	}
 
 	// Sum step durations for elapsed time.
 	elapsed := ""

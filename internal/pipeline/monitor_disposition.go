@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -40,10 +41,7 @@ func (e *Executor) StopMonitor(ctx context.Context, p db.MonitorDisposition) err
 			e.mu.Unlock()
 			return err
 		}
-		err := e.db.FreezeMonitor(p)
-		if err == nil {
-			e.monitorFrozen = true
-		}
+		err := e.freezeMonitor(p)
 		e.mu.Unlock()
 		return err
 	}
@@ -62,6 +60,23 @@ func (e *Executor) StopMonitor(ctx context.Context, p db.MonitorDisposition) err
 	}
 }
 
+func (e *Executor) freezeMonitor(p db.MonitorDisposition) error {
+	if err := e.db.FreezeMonitor(p); err != nil {
+		return err
+	}
+	e.monitorFrozen = true
+	stopped, ready := true, false
+	e.onEvent(ipc.Event{
+		Type:           ipc.EventRunUpdated,
+		RunID:          p.RunID,
+		RepoID:         p.RepoID,
+		MonitorStopped: &stopped,
+		CIReady:        &ready,
+		CIReadyNoCI:    &ready,
+	})
+	return nil
+}
+
 func (e *Executor) monitorCheckpoint(ctx context.Context) error {
 	select {
 	case req := <-e.monitorStopCh:
@@ -71,10 +86,7 @@ func (e *Executor) monitorCheckpoint(ctx context.Context) error {
 			err = ctx.Err()
 		}
 		if err == nil {
-			err = e.db.FreezeMonitor(req.pin)
-		}
-		if err == nil {
-			e.monitorFrozen = true
+			err = e.freezeMonitor(req.pin)
 		}
 		req.result <- err
 		e.mu.Unlock()

@@ -203,6 +203,7 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 	}
 	if database != nil {
 		rv.SurvivedWork, _ = database.GetRunSurvivedWork(r.ID)
+		rv.MonitorStopped, _ = database.MonitorFrozen(r.ID)
 	}
 	if r.PRURL != nil {
 		rv.PRURL = *r.PRURL
@@ -251,6 +252,9 @@ func runViewFromDB(r *db.Run, steps []*db.StepResult, database *db.DB) runView {
 // awaitingStep returns the step currently blocking on a human decision, if any.
 // At most one step awaits at a time, so the first match is the active gate.
 func (rv runView) awaitingStep() (stepView, bool) {
+	if rv.MonitorStopped {
+		return stepView{}, false
+	}
 	for _, s := range rv.Steps {
 		if s.Status == string(types.StepStatusAwaitingApproval) || s.Status == string(types.StepStatusFixReview) {
 			return s, true
