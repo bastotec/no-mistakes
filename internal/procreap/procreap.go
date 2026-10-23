@@ -62,6 +62,13 @@ const (
 	DefaultGrace = 3 * time.Second
 )
 
+func ProcessCWD(pid int) string {
+	if pid <= 0 {
+		return ""
+	}
+	return processCWDs([]int{pid})[pid]
+}
+
 // Process is one entry of the system process table.
 type Process struct {
 	PID     int

@@ -13,6 +13,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/procreap"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -88,9 +89,29 @@ func TestFrozenMonitorOwnerReplayRecoveryAndRetention(t *testing.T) {
 	must(err)
 	defer client.Close()
 	var result ipc.StopMonitorResult
-	must(client.Call(ipc.MethodStopMonitor, &pin, &result))
-	if !result.MonitorStopped {
-		t.Fatal("replay unacknowledged")
+	if procreap.ProcessCWD(os.Getpid()) != "" {
+		gitCmd(t, repo.WorkingPath, "init")
+		gitCmd(t, repo.WorkingPath, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "fixture")
+		gitCmd(t, repo.WorkingPath, "clone", "--bare", repo.WorkingPath, p.RepoDir(repo.ID))
+		wt := p.WorktreeDir(repo.ID, run.ID)
+		gitCmd(t, repo.WorkingPath, "--git-dir="+p.RepoDir(repo.ID), "worktree", "add", "--detach", wt, "HEAD")
+		t.Chdir(wt)
+		t.Setenv("NO_MISTAKES_GATE", "")
+		if err := client.Call(ipc.MethodStopMonitor, &pin, &result); err == nil || !strings.Contains(err.Error(), "nested_gate_context") {
+			t.Fatalf("direct managed-worktree RPC was not contained: result=%+v err=%v", result, err)
+		}
+		unchanged, err := d.GetRun(run.ID)
+		must(err)
+		if !reflect.DeepEqual(before, unchanged) {
+			t.Fatal("refused RPC changed preserved run evidence")
+		}
+		t.Chdir(repo.WorkingPath)
+		must(client.Call(ipc.MethodStopMonitor, &pin, &result))
+		if !result.MonitorStopped {
+			t.Fatal("replay unacknowledged")
+		}
+	} else if err := client.Call(ipc.MethodStopMonitor, &pin, &result); err == nil || !strings.Contains(err.Error(), "verifiable authenticated caller topology") {
+		t.Fatalf("unverifiable caller was not refused: result=%+v err=%v", result, err)
 	}
 	if err := mgr.HandleCancel(run.ID); err == nil {
 		t.Fatal("frozen run aborted")
