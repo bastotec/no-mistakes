@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -24,6 +25,9 @@ type PRStep struct {
 	// the GitHub host's user-attachments client. Tests inject a stub so they
 	// never talk to live GitHub.
 	mediaUploader userAssetUploader
+	// repair is what earlier publication refusals in this execution taught.
+	// Execute sets it on a per-attempt copy; it is nil on the first attempt.
+	repair *prPublicationRepair
 }
 
 type prContent struct {
@@ -93,7 +97,33 @@ type pipelineUpdateGroup struct {
 
 func (s *PRStep) Name() types.StepName { return types.StepPR }
 
+// Execute publishes the pull request. A publication-validator refusal of
+// run-written text is never written to the forge, so it is repaired instead of
+// failing the run: the refused literals are stripped, the issues are fed back
+// to the re-draft, and the whole publication is retried a bounded number of
+// times. Only an exhausted repair fails the step, with a next step attached.
 func (s *PRStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
+	repair := &prPublicationRepair{}
+	for attempt := 0; ; attempt++ {
+		current := *s
+		if attempt > 0 {
+			current.repair = repair
+		}
+		outcome, err := current.execute(sctx)
+		var refusal *prPublicationRefusal
+		if !errors.As(err, &refusal) {
+			return outcome, err
+		}
+		if attempt >= maxPRPublicationRepairs {
+			branch := strings.TrimPrefix(sctx.Run.Branch, "refs/heads/")
+			return nil, exhaustedPRPublicationError(refusal, branch, effectivePRBaseBranch(sctx))
+		}
+		learned := repair.learn(refusal.issues)
+		sctx.Log(fmt.Sprintf("publication validator refused run-written PR text (%s); sanitizing %d flagged identifier(s) and re-drafting, attempt %d of %d", refusal.detail, learned, attempt+1, maxPRPublicationRepairs))
+	}
+}
+
+func (s *PRStep) execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, error) {
 	if err := assertPipelineHeadContinuity(sctx, s.Name()); err != nil {
 		return nil, err
 	}
@@ -561,15 +591,22 @@ func (s *PRStep) buildPRContentWithPolicy(sctx *pipeline.StepContext, branch, ba
 // never grows a path. Owned composition calls it before its integrity guard
 // and non-truncating size check so publication cannot invalidate that guard.
 func redactPRContent(content prContent) prContent {
-	content.Title = safepath.RedactText(content.Title)
-	content.Body = safepath.RedactText(content.Body)
+	content.Title = redactPublicationText(content.Title)
+	content.Body = redactPublicationText(content.Body)
 	content.HeadingTranslations = append([]templateHeadingTranslation(nil), content.HeadingTranslations...)
 	for i := range content.HeadingTranslations {
 		original := content.HeadingTranslations[i].English
-		content.HeadingTranslations[i].English = safepath.RedactText(original)
+		content.HeadingTranslations[i].English = redactPublicationText(original)
 		content.HeadingTranslations[i].PublicationRedacted = content.HeadingTranslations[i].English != original
 	}
 	return content
+}
+
+// redactPublicationText is the single publication scrub: the operator's home
+// directory first, then no-mistakes' own run ids, private refs and daemon-local
+// paths, which reach the body through generated findings and step history.
+func redactPublicationText(text string) string {
+	return redactRunIdentifiers(safepath.RedactText(text))
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
@@ -583,7 +620,7 @@ func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, 
 	} else {
 		content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
 	}
-	return content, nil
+	return s.repair.scrubContent(content), nil
 }
 
 // draftPRNarrative performs no evidence rendering or uploads. Owned updates
@@ -623,7 +660,7 @@ Diff stat:
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, policySHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
-	prompt += prCreationSkill + prBodyBudgetPromptSection(bodyLimit) + publicationDecisionsPromptSection(sctx)
+	prompt += prCreationSkill + prBodyBudgetPromptSection(bodyLimit) + publicationDecisionsPromptSection(sctx) + s.repair.promptSection()
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
 		Prompt:     prompt,
@@ -658,7 +695,7 @@ Final diff paths and statuses:
 	if content.Title != originalTitle {
 		slog.Warn("normalized agent PR title", "from", originalTitle, "to", content.Title)
 	}
-	return content, nil
+	return s.repair.scrubContent(content), nil
 }
 
 func (s *PRStep) draftConfiguredPRTitle(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string) (string, error) {
@@ -683,7 +720,7 @@ Rules:
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, policySHA, sctx.Run.HeadSHA, baseBranch, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCreationSkillTitle + publicationDecisionsPromptSection(sctx)
+	prompt += prCreationSkillTitle + publicationDecisionsPromptSection(sctx) + s.repair.promptSection()
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{
 		Prompt:     prompt,
 		CWD:        sctx.WorkDir,
@@ -701,7 +738,7 @@ Final diff paths and statuses:
 	if err != nil {
 		return "", err
 	}
-	return title, nil
+	return s.repair.scrub(title), nil
 }
 
 func prTitlePromptRules(sctx *pipeline.StepContext) string {

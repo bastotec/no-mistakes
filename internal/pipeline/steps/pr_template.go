@@ -236,7 +236,7 @@ Trusted repository template (JSON string):
 
 Final diff paths and statuses:
 %s%s%s`, branch, baseBranch, baseSHA, policySHA, sctx.Run.HeadSHA, titleRules, scopeRules, quoted, paths, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
-	prompt += prCreationSkillTemplate + publicationDecisionsPromptSection(sctx)
+	prompt += prCreationSkillTemplate + publicationDecisionsPromptSection(sctx) + s.repair.promptSection()
 	result, err := sctx.RunAgentContext(sctx.Ctx, agent.RunOpts{Prompt: prompt, CWD: sctx.WorkDir, JSONSchema: templatePRContentSchema, OnChunk: sctx.LogChunk})
 	if err != nil {
 		return prContent{}, fmt.Errorf("draft pr.template narrative (template will not be replaced by a generic fallback): %w", err)
@@ -265,7 +265,7 @@ Final diff paths and statuses:
 		return prContent{}, err
 	}
 	content.prContent.HeadingTranslations = append([]templateHeadingTranslation(nil), content.HeadingTranslations...)
-	return content.prContent, nil
+	return s.repair.scrubContent(content.prContent), nil
 }
 
 // This is a structural guard, not a Markdown/template interpreter. It binds
@@ -382,7 +382,7 @@ func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provid
 		return "", fmt.Errorf("cannot publish template narrative without the no-mistakes signature")
 	}
 	if provider == scm.ProviderBitbucket {
-		return noMistakesPRSignature + "\n\n```text\n" + attestation + "\n```", nil
+		return s.repair.scrub(noMistakesPRSignature + "\n\n```text\n" + attestation + "\n```"), nil
 	}
-	return noMistakesPRSignature + "\n\n" + attestation, nil
+	return s.repair.scrub(noMistakesPRSignature + "\n\n" + attestation), nil
 }

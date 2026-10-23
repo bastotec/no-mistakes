@@ -8,7 +8,6 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
-	"github.com/kunchenguid/no-mistakes/internal/safepath"
 )
 
 const prContentValidationPurpose = "pr-content-validation"
@@ -58,7 +57,7 @@ type prContentValidation struct {
 
 func defaultSectionsWithoutIntent(body string, sctx *pipeline.StepContext) string {
 	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
-	section := safepath.RedactText("## Intent\n\n" + cleaned)
+	section := redactPublicationText("## Intent\n\n" + cleaned)
 	if cleaned == "" || !strings.HasPrefix(body, section) {
 		return body
 	}
@@ -205,7 +204,7 @@ Run-written PR content JSON:
 		if detail == "" {
 			detail = "English or repository-format compliance was not proven"
 		}
-		return fmt.Errorf("refusing non-compliant PR publication: %s", detail)
+		return &prPublicationRefusal{issues: append([]string(nil), validation.Issues...), detail: detail}
 	}
 	return nil
 }
