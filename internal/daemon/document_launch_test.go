@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"database/sql"
 	"strings"
 	"testing"
 	"time"
@@ -34,6 +35,16 @@ func TestDocumentLaunchImportsWithoutPushPinsTimeoutAndRefusesRepin(t *testing.T
 	runs, err := d.GetRunsByRepo(repo.ID)
 	if err != nil || len(runs) != 0 {
 		t.Fatalf("invalid request created run: %v %v", runs, err)
+	}
+	previous, err := d.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.UpdateRunStatus(previous.ID, types.RunFailed); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.SetRunCustodyReturned(previous.ID); err != nil {
+		t.Fatal(err)
 	}
 	request.DocumentTimeout = "90m"
 	if err := client.Call(ipc.MethodStartDocumentRun, &request, &result); err != nil {
@@ -89,5 +100,75 @@ func TestDocumentLaunchRefusesOwnedBranchWithoutCreatingRun(t *testing.T) {
 	runs, err := d.GetRunsByRepo(repo.ID)
 	if err != nil || len(runs) != 1 {
 		t.Fatalf("refusal created run: %v %v", runs, err)
+	}
+}
+
+func TestDocumentLaunchRefusesUnresolvedCustodyBeforeImport(t *testing.T) {
+	for _, evidence := range []string{"no-runs", "other-branch", "legacy", "legacy-returned", "user-owned"} {
+		t.Run(evidence, func(t *testing.T) {
+			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepDocument}} })
+			repo, base := setupTestGitRepo(t, p, d, "unresolved-document")
+			gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+			gitCmd(t, repo.WorkingPath, "commit", "--allow-empty", "-m", "source")
+			head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			gitCmd(t, p.RepoDir(repo.ID), "update-ref", "refs/heads/feature", base)
+			if evidence != "no-runs" {
+				branch := "feature"
+				if evidence == "other-branch" {
+					branch = "other"
+				}
+				previous, err := d.InsertRun(repo.ID, branch, head, base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if evidence == "user-owned" {
+					if err := d.RecordRunTerminalHeadEvidence(previous.ID, head); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := d.UpdateRunStatus(previous.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+				if evidence != "user-owned" {
+					raw, err := sql.Open("sqlite", p.DB())
+					if err != nil {
+						t.Fatal(err)
+					}
+					defer raw.Close()
+					if _, err := raw.Exec("UPDATE runs SET submitted_head_sha = NULL WHERE id = ?", previous.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if evidence == "legacy-returned" {
+					if err := d.SetRunCustodyReturned(previous.ID); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			before, err := d.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			request := ipc.StartDocumentRunParams{StartHistoryRunParams: ipc.StartHistoryRunParams{StartFreshRunParams: ipc.StartFreshRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "same task", LaunchNonce: "unresolved-document", ValidationGeneration: "v1"}, WorkDir: repo.WorkingPath}, DocumentTimeout: "90m"}
+			var result ipc.StartFreshRunResult
+			if err := client.Call(ipc.MethodStartDocumentRun, &request, &result); err == nil || !strings.Contains(err.Error(), "custody") {
+				t.Fatalf("unresolved custody accepted: %v", err)
+			}
+			after, err := d.GetRunsByRepo(repo.ID)
+			if err != nil || len(after) != len(before) {
+				t.Fatalf("refusal created run: %v %v", after, err)
+			}
+			if got := gitOutput(t, p.RepoDir(repo.ID), "rev-parse", "refs/heads/feature"); got != base {
+				t.Fatal("refusal changed gate head")
+			}
+			if _, err := git.Run(context.Background(), p.RepoDir(repo.ID), "cat-file", "-e", head); err == nil {
+				t.Fatal("refusal imported caller head")
+			}
+		})
 	}
 }

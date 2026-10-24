@@ -40,11 +40,14 @@ func runAxiDocumentTimeout(cmd *cobra.Command, autoYes bool, intent, baseBranch 
 	}
 	var result ipc.StartFreshRunResult
 	// No push, no hook, no fallback. An old daemon must reject this new method.
-	err = env.client.Call(ipc.MethodStartDocumentRun, &ipc.StartDocumentRunParams{StartHistoryRunParams: ipc.StartHistoryRunParams{
+	err = env.client.CallWithContext(driveCtx, ipc.MethodStartDocumentRun, &ipc.StartDocumentRunParams{StartHistoryRunParams: ipc.StartHistoryRunParams{
 		StartFreshRunParams: ipc.StartFreshRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: head, Intent: intent, PRBaseBranch: baseBranch, LaunchNonce: rand.Text(), ValidationGeneration: "document-timeout-v1"},
 		WorkDir:             wd, ReuseActive: true,
-	}, DocumentTimeout: timeout.String()}, &result)
+	}, DocumentTimeout: timeout.String()}, &result, wait)
 	if err != nil {
+		if isAxiWaitElapsed(ctx, driveCtx, err) {
+			return emitAxiWaitElapsed(cmd, wait, "no-mistakes axi status")
+		}
 		return emitError(cmd, 1, fmt.Sprintf("start Document timeout run: %v", err), "Both CLI and daemon must support per-run Document timeouts; no ordinary fallback or shared daemon restart is attempted")
 	}
 	emitLaunchReceipt(cmd, result.Receipt)
