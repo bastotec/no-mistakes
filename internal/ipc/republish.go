@@ -10,10 +10,9 @@ type RepublishPublicationParams struct {
 	HeadSHA string `json:"head_sha"`
 }
 
-// RepublishPublicationResult reports what the continuation published. The
-// steps JSON is the attestation's step list, verbatim, so the operator can see
-// which recorded statuses the published evidence claims without re-reading the
-// PR. Nothing here re-runs a step.
+// RepublishPublicationResult reports the publication URL and recorded step
+// statuses as name:status strings, excluding PR and CI. Steps is a status
+// summary, not the attestation's full step objects. Nothing here re-runs a step.
 type RepublishPublicationResult struct {
 	RunID   string   `json:"run_id"`
 	HeadSHA string   `json:"head_sha"`

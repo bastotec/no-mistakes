@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -101,6 +102,23 @@ func TestRepublishPublication_RefusesIneligibleRuns(t *testing.T) {
 			}
 			return mkParams(run)
 		}, "no failed PR step"},
+		{"preserve-history", func() ipc.RepublishPublicationParams {
+			run, err := d.InsertRunWithIntentAndLaunchNonce(repo.ID, "protected-branch", head, head, nil, "", "", "", "main", head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			return mkParams(run)
+		}, "preserve-history run"},
+		{"active-branch", func() ipc.RepublishPublicationParams {
+			run := terminalRunWithFailedPR(t, d, repo.ID, "owned-branch", head)
+			if _, err := d.InsertRun(repo.ID, "owned-branch", head, head); err != nil {
+				t.Fatal(err)
+			}
+			return mkParams(run)
+		}, "has active run"},
 		{"absent-head", func() ipc.RepublishPublicationParams {
 			// A head the gate does not have: the run recorded an object that
 			// never reached the bare repo, so the recorded head itself is absent.
@@ -319,6 +337,27 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 	repo, head := republishReachableFixture(t, p, d, "republish-positive", "feature")
 	rmt := repo
 	run := terminalRunWithFailedPR(t, d, rmt.ID, "feature", head)
+	rowsBefore, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A publication continuation must not upgrade a failed validation or
+	// synthesize the Intent/Rebase rows this fixture never recorded.
+	for _, row := range rowsBefore {
+		if row.StepName == types.StepTest {
+			if err := d.FailStep(row.ID, "recorded test failure", 5); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	rowsBefore, err = d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeJSON, err := json.Marshal(rowsBefore)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	mgr := NewRunManager(d, p, nil)
 	gateRefsBefore := gitOutput(t, p.RepoDir(rmt.ID), "for-each-ref", "--format=%(refname) %(objectname)")
@@ -339,6 +378,45 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 	}
 	if !strings.Contains(string(body), "repair widget behind "+learnedPlaceholderForDaemon()) {
 		t.Fatalf("published PR body lost the sanitized narrative:\n%s", body)
+	}
+	// Decode the generated public attestation contract, not implementation
+	// source: every recorded status must survive, with no invented rows.
+	_, payload, found := strings.Cut(string(body), "<!-- no-mistakes-pipeline-attestation:v1 ")
+	if !found {
+		t.Fatalf("published body has no attestation:\n%s", body)
+	}
+	payload, _, found = strings.Cut(payload, " -->")
+	if !found {
+		t.Fatal("published attestation is unterminated")
+	}
+	var attestation struct {
+		HeadSHA string `json:"head_sha"`
+		Steps   []struct {
+			Step   types.StepName   `json:"step"`
+			Status types.StepStatus `json:"status"`
+		} `json:"steps"`
+	}
+	if err := json.Unmarshal([]byte(payload), &attestation); err != nil {
+		t.Fatalf("decode published attestation: %v", err)
+	}
+	if attestation.HeadSHA != head || len(attestation.Steps) != len(rowsBefore) {
+		t.Fatalf("published attestation changed head or step inventory: %+v", attestation)
+	}
+	for i, row := range rowsBefore {
+		if got := attestation.Steps[i]; got.Step != row.StepName || got.Status != row.Status {
+			t.Fatalf("published step %d = %+v, want %s:%s", i, got, row.StepName, row.Status)
+		}
+	}
+	rowsAfter, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterJSON, err := json.Marshal(rowsAfter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(beforeJSON) != string(afterJSON) {
+		t.Fatalf("continuation changed recorded step rows:\nbefore: %s\nafter: %s", beforeJSON, afterJSON)
 	}
 	// The PR URL lands on the terminal run record, exactly like the ordinary
 	// PR step's durable write, and nothing else about the run changes.

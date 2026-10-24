@@ -29,23 +29,18 @@ const republishTimeout = 35 * time.Minute
 
 // republishPrivateRefPrefix namespaces the operation-private refs a
 // continuation fetches into. They live in the gate repository's ref store but
-// outside every ref the gate or another run reads (refs/remotes/origin/,
-// refs/heads/, refs/no-mistakes/), and each is deleted before the operation
-// returns, so a continuation never moves the gate's tracking refs even when
-// the default or target branch advanced since the run failed.
+// outside its shared tracking, branch and recovery refs. Cleanup attempts to
+// delete each before the operation returns, so fetching a default or target
+// branch that advanced cannot move the gate's tracking refs.
 const republishPrivateRefPrefix = "refs/no-mistakes/republish/"
 
 // HandleRepublishPublication continues a TERMINAL run's publication without
-// re-running validation. The motivating gap: PRStep's sanitize-and-retry loop
-// only fires while an executor owns the run, so a run that ended with an
-// exhausted publication refusal had no eligible command at all - the only
-// supported continuation was a whole-pipeline rerun, which re-runs
-// Intent/Rebase/Review/Test from scratch and can abort again for unrelated
-// reasons (verified live: cancelled builder rerun 01M5QFJVN4G5M7CN5ZEATD3AKD).
+// re-running validation. PRStep's bounded sanitize-and-retry loop normally
+// requires a live executor; terminal publication needs a separate entry point
+// so retrying prose does not require repeating Intent/Rebase/Review/Test.
 //
 // This path is deliberately NOT a rerun and NOT a live executor: it operates on
-// the terminal run record itself (a terminal run has no executor -
-// preview-terminal-executor-030), creates a throwaway detached worktree at the
+// the terminal run record itself, creates a throwaway detached worktree at the
 // run's recorded head, and executes the ordinary PR step against the recorded
 // step rows. Every guard the ordinary PR step applies still applies:
 // assertPipelineHeadContinuity, explicit-target validation, the publication
