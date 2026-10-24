@@ -81,13 +81,9 @@ func (m *RunManager) HandleStartDocumentRun(ctx context.Context, request *ipc.St
 		svc := branchsync.Service{DB: m.db, Repo: repo, WorkDir: p.WorkDir, GateDir: gateDir, Paths: m.paths}
 		state := svc.InspectCached(ctx)
 		switch state.State {
-		case branchsync.StateCustodyReturned, branchsync.StateSynchronized, branchsync.StateLocalAhead:
+		case branchsync.StateUserOwned, branchsync.StateCustodyReturned, branchsync.StateSynchronized, branchsync.StateLocalAhead:
 		default:
 			return "", fmt.Errorf("document-launch: branch custody unavailable: %s", state.Safety)
-		}
-		custodyRun, err := m.db.GetRun(state.Pipeline.RunID)
-		if err != nil || custodyRun == nil || custodyRun.CustodyReturnedAt == nil || custodyRun.SubmittedHeadSHA == nil {
-			return "", fmt.Errorf("document-launch: supported branch custody return is required")
 		}
 		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()

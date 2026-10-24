@@ -3,10 +3,14 @@ package daemon
 import (
 	"context"
 	"database/sql"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/branchsync"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
@@ -103,8 +107,115 @@ func TestDocumentLaunchRefusesOwnedBranchWithoutCreatingRun(t *testing.T) {
 	}
 }
 
+func TestDocumentLaunchAcceptsVerifiedUnmovedHeadWithPreservedDirtyDocument(t *testing.T) {
+	p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepDocument}} })
+	repo, head := setupTestGitRepo(t, p, d, "document-released")
+	gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+	gitCmd(t, p.RepoDir(repo.ID), "update-ref", "refs/heads/feature", head)
+	previous, err := d.InsertRun(repo.ID, "feature", head, head)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := "validate all work"
+	if err := d.UpdateRunIntent(previous.ID, db.RunIntent{Summary: intent, Source: db.RunIntentSourceAgent}); err != nil {
+		t.Fatal(err)
+	}
+	dir := p.WorktreeDir(repo.ID, previous.ID)
+	if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), dir, head); err != nil {
+		t.Fatal(err)
+	}
+	staged := []byte("staged Document edits\n")
+	files := map[string][]byte{"test.txt": []byte("unfinished Document edits\n"), "partial.bin": {'d', 'o', 'c', 0, 255, '\n'}}
+	if err := os.WriteFile(filepath.Join(dir, "test.txt"), staged, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", "test.txt")
+	for name, data := range files {
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	step, err := d.InsertStepResult(previous.ID, types.StepDocument)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.FailStep(step.ID, "agent timed out after 10m; recent output observed", 600000); err != nil {
+		t.Fatal(err)
+	}
+	if got, verified := preserveRunHead(d, dir, previous); !verified || got != head {
+		t.Fatalf("terminal head = %q, verified = %v", got, verified)
+	}
+	if err := d.UpdateRunStatusWithVerifiedHead(previous.ID, types.RunFailed, head); err != nil {
+		t.Fatal(err)
+	}
+	m := NewRunManager(d, p, nil)
+	m.removeRunWorktree(repo.ID, previous.ID, p.RepoDir(repo.ID), dir, "run_finished")
+	cleanupOrphanWorktrees(d, p, nil)
+	preserved := t.TempDir()
+	for name, want := range files {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil || string(data) != string(want) {
+			t.Fatalf("retained %s = %q, %v", name, data, err)
+		}
+		if err := os.WriteFile(filepath.Join(preserved, name), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	index := gitOutput(t, dir, "write-tree")
+	stagedBytes, err := git.RunRaw(context.Background(), dir, "show", ":test.txt")
+	if err != nil || string(stagedBytes) != string(staged) {
+		t.Fatalf("retained staged bytes = %q, %v", stagedBytes, err)
+	}
+	if err := os.WriteFile(filepath.Join(preserved, "staged.txt"), stagedBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	svc := branchsync.Service{DB: d, Repo: repo, WorkDir: repo.WorkingPath, GateDir: p.RepoDir(repo.ID), Paths: p}
+	if state := svc.InspectCached(context.Background()); state.State != branchsync.StateUserOwned {
+		t.Fatalf("unchanged terminal head not released: %+v", state)
+	}
+	if state := svc.Recover(context.Background(), false); state.State != branchsync.StateUserOwned || !state.Recovered || state.Changed {
+		t.Fatalf("supported recovery = %+v", state)
+	}
+	client, err := ipc.Dial(p.Socket())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	request := ipc.StartDocumentRunParams{StartHistoryRunParams: ipc.StartHistoryRunParams{StartFreshRunParams: ipc.StartFreshRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: intent, LaunchNonce: "released-document", ValidationGeneration: "v1"}, WorkDir: repo.WorkingPath}, DocumentTimeout: "90m"}
+	var result ipc.StartFreshRunResult
+	if err := client.Call(ipc.MethodStartDocumentRun, &request, &result); err != nil {
+		t.Fatal(err)
+	}
+	run := waitForRunTerminalState(t, d, result.Receipt.RunID)
+	if run.ID == previous.ID || run.Status != types.RunCompleted || run.HeadSHA != head || run.Intent == nil || *run.Intent != intent {
+		t.Fatalf("continuation = %+v", run)
+	}
+	if timeout, err := d.DocumentTimeout(run.ID); err != nil || timeout != 90*time.Minute {
+		t.Fatalf("continuation timeout = %s, %v", timeout, err)
+	}
+	previous, err = d.GetRun(previous.ID)
+	if err != nil || previous == nil || previous.CustodyReturnedAt != nil || previous.TerminalHeadVerifiedAt == nil {
+		t.Fatalf("released run evidence = %+v, %v", previous, err)
+	}
+	for name := range files {
+		want, err := os.ReadFile(filepath.Join(preserved, name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, err := os.ReadFile(filepath.Join(dir, name)); err != nil || string(got) != string(want) {
+			t.Fatalf("continuation changed retained %s: %q, %v", name, got, err)
+		}
+	}
+	if got := gitOutput(t, dir, "write-tree"); got != index {
+		t.Fatal("continuation changed retained index")
+	}
+	if got := gitOutput(t, dir, "rev-parse", "HEAD"); got != head {
+		t.Fatal("continuation changed retained head")
+	}
+}
+
 func TestDocumentLaunchRefusesUnresolvedCustodyBeforeImport(t *testing.T) {
-	for _, evidence := range []string{"no-runs", "other-branch", "legacy", "legacy-returned", "user-owned"} {
+	for _, evidence := range []string{"no-runs", "other-branch", "legacy", "legacy-returned", "unverified"} {
 		t.Run(evidence, func(t *testing.T) {
 			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepDocument}} })
 			repo, base := setupTestGitRepo(t, p, d, "unresolved-document")
@@ -121,15 +232,10 @@ func TestDocumentLaunchRefusesUnresolvedCustodyBeforeImport(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if evidence == "user-owned" {
-					if err := d.RecordRunTerminalHeadEvidence(previous.ID, head); err != nil {
-						t.Fatal(err)
-					}
-				}
 				if err := d.UpdateRunStatus(previous.ID, types.RunFailed); err != nil {
 					t.Fatal(err)
 				}
-				if evidence != "user-owned" {
+				if evidence != "unverified" {
 					raw, err := sql.Open("sqlite", p.DB())
 					if err != nil {
 						t.Fatal(err)
