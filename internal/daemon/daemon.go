@@ -959,6 +959,25 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if pipeline.SurvivedWorkMarked(workDir, isolated) {
 		return "interrupted repair left unrecorded uncommitted work; preserving worktree"
 	}
+	steps, err := d.GetStepsByRun(run.ID)
+	if err != nil {
+		return "cannot read Document completion evidence"
+	}
+	for _, step := range steps {
+		if step.StepName != types.StepDocument || step.Status != types.StepStatusFailed {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		status, err := git.Run(ctx, workDir, "-c", "core.fsmonitor=false", "-c", "core.hooksPath="+os.DevNull, "status", "--porcelain", "--untracked-files=all", "--ignored=matching", "--ignore-submodules=none")
+		if err != nil || strings.TrimSpace(status) != "" {
+			return "failed Document has uncommitted or unreadable work; preserving worktree"
+		}
+		head, err := git.HeadSHA(ctx, workDir)
+		if err != nil || head != run.HeadSHA {
+			return "failed Document has unrecorded or unreadable HEAD; preserving worktree"
+		}
+	}
 	work, err := d.GetRunSurvivedWork(run.ID)
 	if err != nil {
 		return "cannot read survived-work evidence"
