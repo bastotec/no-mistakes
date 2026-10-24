@@ -94,7 +94,8 @@ func (m Model) rerunCmd(requestID uint64) tea.Cmd {
 // while a gate with only non-actionable (no-op) findings - or none at all - is
 // approved as-is. A step is fixed at most once; the fix re-runs the step and
 // re-enters the gate as a fix_review, which yolo then approves so the pipeline
-// runs to completion without looping. Each terminal action fires once so
+// runs to completion without looping. A CI gate may be fixed but is never
+// approved: it stays parked for an explicit decision. Each terminal action fires once so
 // duplicate events while waiting for the round-trip don't resend it.
 func (m Model) maybeAutoApproveCmd() tea.Cmd {
 	if !m.yoloMode {
@@ -114,6 +115,11 @@ func (m Model) maybeAutoApproveCmd() tea.Cmd {
 		m.yoloFixed[step.StepName] = true
 		m.resetFindingSelection(step.StepName)
 		return m.respondCmd(types.ActionFix)
+	}
+	if !pipeline.UnattendedMayApprove(step.StepName) {
+		// A red CI gate is never approved unattended; leave it parked for an
+		// explicit operator decision.
+		return nil
 	}
 	m.yoloApproved[step.StepName] = true
 	return m.respondCmd(types.ActionApprove)

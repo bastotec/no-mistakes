@@ -303,9 +303,10 @@ review them.
 
 ## Escalate ` + "`ask-user`" + ` findings
 
-A gate whose findings are all ` + "`auto-fix`" + ` or ` + "`no-op`" + ` is safe to drive on your
+Outside CI, a gate whose findings are all ` + "`auto-fix`" + ` or ` + "`no-op`" + ` is safe to drive on your
 own judgment: respond with ` + "`--action fix`" + ` or ` + "`--action approve`" + ` as
-appropriate. But a finding marked
+appropriate. CI approval or skip always requires the explicit user decision
+described below. A finding marked
 ` + "`ask-user`" + ` is a decision that belongs to the user, not you - the pipeline
 flagged it because it challenges their deliberate intent or changes product
 behavior. Do not approve, fix, or skip it on your own. Instead, stop and bring
@@ -335,6 +336,15 @@ or skip it. Approval is rejected. Have the operator inspect and resolve the
 reported edit, then send ` + "`--action fix`" + ` to retry the unfinished step.
 The [protected-path reference](https://kunchenguid.github.io/no-mistakes/reference/repo-config/#protected_paths)
 owns the staging guard's scope and limitations.
+
+A CI gate is never approved or skipped under ` + "`--yes`" + `, including a fix-review
+gate or one with no actionable findings. It may be fixed at most once per
+invocation, subject to the other gate exceptions; otherwise leave it parked.
+Relay the failing checks to the user and ask for an explicit decision before
+sending ` + "`axi respond --action approve`" + ` or ` + "`--action skip`" + ` without ` + "`--yes`" + `.
+Adding ` + "`--yes`" + ` to either response is rejected with exit code 2.
+The [CLI reference](https://kunchenguid.github.io/no-mistakes/reference/cli/#no-mistakes-axi-run)
+owns CI gate handling and approval-override outcomes.
 
 A repair-budget exhaustion gate also requires a new explicit authority-bearing
 response, even under ` + "`--yes`" + `. Relay the failed findings, consumed limit,
