@@ -2,8 +2,10 @@ package git
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -36,12 +38,35 @@ func CallbackFreeArgs(ctx context.Context, dir string, args ...string) ([]string
 	return append(overrides, args...), nil
 }
 
-func WorktreeAddWithoutCallbacks(ctx context.Context, repoDir, wtPath, sha string) error {
-	args, err := CallbackFreeArgs(ctx, repoDir, "worktree", "add", "--detach", wtPath, sha)
+func WorktreeAddWithoutCallbacks(ctx context.Context, repoDir, wtPath, sha string) (err error) {
+	if !filepath.IsAbs(wtPath) {
+		wtPath, err = filepath.Abs(filepath.Join(repoDir, wtPath))
+		if err != nil {
+			return err
+		}
+	}
+	args, err := CallbackFreeArgs(ctx, repoDir, "worktree", "add", "--no-checkout", "--detach", wtPath, sha)
 	if err != nil {
 		return err
 	}
-	_, err = Run(ctx, repoDir, args...)
+	if _, err = Run(ctx, repoDir, args...); err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			cleanupCtx := context.WithoutCancel(ctx)
+			cleanupArgs, cleanupErr := CallbackFreeArgs(cleanupCtx, repoDir, "worktree", "remove", "--force", wtPath)
+			if cleanupErr == nil {
+				_, cleanupErr = Run(cleanupCtx, repoDir, cleanupArgs...)
+			}
+			err = errors.Join(err, cleanupErr)
+		}
+	}()
+	args, err = CallbackFreeArgs(ctx, wtPath, "reset", "--hard", "HEAD")
+	if err != nil {
+		return err
+	}
+	_, err = Run(ctx, wtPath, args...)
 	return err
 }
 

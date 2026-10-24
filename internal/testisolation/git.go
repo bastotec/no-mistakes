@@ -159,11 +159,7 @@ func prepareGitAttributes(ctx context.Context, workdir, privateDir string) error
 	for _, file := range [][2]string{{external, filepath.Join(privateDir, "attributes")}, {info, filepath.Join(privateDir, "info", "attributes")}} {
 		var data []byte
 		if file[0] != "" {
-			source := file[0]
-			if !filepath.IsAbs(source) {
-				source = filepath.Join(workdir, source)
-			}
-			data, err = os.ReadFile(source)
+			data, err = readGitAttributes(workdir, file[0])
 			if err != nil && !errors.Is(err, os.ErrNotExist) {
 				return fmt.Errorf("read isolated Git attributes: %w", err)
 			}
@@ -177,6 +173,29 @@ func prepareGitAttributes(ctx context.Context, workdir, privateDir string) error
 	}
 	_, err = runGit(ctx, workdir, "", "config", "--file", filepath.Join(privateDir, "config"), "core.attributesFile", filepath.Join(privateDir, "attributes"))
 	return err
+}
+
+func readGitAttributes(workdir, source string) ([]byte, error) {
+	if filepath.IsAbs(source) {
+		relative, err := filepath.Rel(workdir, source)
+		if err != nil || !filepath.IsLocal(relative) {
+			canonical, canonicalErr := filepath.EvalSymlinks(workdir)
+			if canonicalErr != nil {
+				return nil, canonicalErr
+			}
+			relative, err = filepath.Rel(canonical, source)
+			if err != nil || !filepath.IsLocal(relative) {
+				return os.ReadFile(source)
+			}
+		}
+		source = relative
+	}
+	root, err := os.OpenRoot(workdir)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	return root.ReadFile(source)
 }
 
 func validHead(head string) bool {
