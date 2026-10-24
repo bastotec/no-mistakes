@@ -13,14 +13,13 @@ The audited baseline is `997828ed`, not an earlier review draft. The checks belo
 
 The merged `ad930085` disposition helper (`internal/pipeline/review_disposition.go`) supplements a **new review assessment** with unresolved findings and unreviewed-fix uncertainty. It is not evidence that a later CI repair fixed an old review claim. Reusing it to rewrite historical review rows would misattribute a new conclusion to the original reviewer.
 
-## Behavior added here
+## Operation reference
 
-An active CI monitor is not terminal. The new refresh request is consumed by that monitor between polls, so it cannot run concurrently with its repair/push path. It uses exact numbered PR/source identity proof rather than branch discovery, and checks the same run, PR, recorded/pushed/remote/forge head before effects and immediately before its body-only write. It does not invoke PRStep, load config, fetch policy, publish evidence, invoke agents, or write run/step/round history.
-
-The independently attributed publication snapshot reports live CI outcomes and recorded published repair rounds. It deliberately does not map green CI onto historical finding resolution: without finding-specific verification, old R1/R2/R3 claims remain historical claims, not newly certified fixes. Skips, timeouts, missing checks, unknown states, and read errors cannot become a fabricated passing result. Historical risk is not lowered.
+The [`axi refresh-publication` reference](src/content/docs/reference/cli.md#no-mistakes-axi-refresh-publication) owns eligibility, preservation guarantees, disposition semantics, and provider-update limitations.
 
 ## Runnable synthetic evidence
 
+- `go test ./internal/daemon -run '^TestRefreshPublication_RPCMonitorJourney$' -count=1` runs the registered publication-refresh RPC over a disposable IPC server into an actual executor and active CI monitor, with local Git transport and a fake `gh` executable. Its cases inspect the response and published body, check exact binding refusals and non-passing observations, compare recorded run/step/round history, and reject non-body forge mutations. It seeds a published repair rather than replaying a validation pipeline or performing a real CI repair.
 - `go test -race ./internal/pipeline ./internal/pipeline/steps -run '^TestRefreshPublication' -count=1` exercises dispatch/serialization, cancellation, non-monitor refusals, real temporary local Git remotes, mocked forge identity/check/content adapters, exact binding refusals before writes, head movement during preparation, body races, edited ownership blocks, size limits, history preservation, and unreadable/empty/pending/failed/skipped check snapshots.
 - `go test ./internal/daemon -run '^TestRepublishPublication' -count=1` reuses the existing synthetic terminal-continuation fixtures. It is not a replay of any retained validation run.
 

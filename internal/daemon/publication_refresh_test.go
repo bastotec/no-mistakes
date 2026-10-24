@@ -332,6 +332,9 @@ func TestRefreshPublication_RPCMonitorJourney(t *testing.T) {
 				t.Fatalf("forge body edits=%d, refused=%t", edits, refused)
 			}
 			t.Logf("synthetic RPC/CI monitor scenario %s: disposition=%q refused=%t; history unchanged", scenario, result.Disposition, refused)
+			if scenario == "passed" {
+				t.Logf("synthetic RPC response: %+v\nMock-forge published PR body:\n%s", result, body)
+			}
 		})
 	}
 }
