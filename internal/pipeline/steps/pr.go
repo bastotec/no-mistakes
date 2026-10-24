@@ -949,7 +949,7 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 	sections := appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	cleaned := neutralizePRAppendixMarkers(neutralizeAttestationMarkers(publicPRIntent(sctx)))
 	if cleaned == "" {
 		return sections
 	}
@@ -996,9 +996,12 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int) string {
-	body = neutralizeAttestationMarkers(body)
-	riskLine = neutralizeAttestationMarkers(riskLine)
-	testingMD = neutralizeAttestationMarkers(testingMD)
+	body = neutralizePRAppendixMarkers(neutralizeAttestationMarkers(body))
+	riskLine = neutralizePRAppendixMarkers(neutralizeAttestationMarkers(riskLine))
+	testingMD = neutralizePRAppendixMarkers(neutralizeAttestationMarkers(testingMD))
+	// Ordinary drafts have no outer ownership wrapper. No generated component,
+	// including quoted round history, may claim one; keep the real attestation.
+	pipelineMD = neutralizePRAppendixMarkers(pipelineMD)
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
@@ -1705,7 +1708,7 @@ func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	cleaned := neutralizePRAppendixMarkers(neutralizeAttestationMarkers(publicPRIntent(sctx)))
 	if cleaned == "" {
 		return body
 	}

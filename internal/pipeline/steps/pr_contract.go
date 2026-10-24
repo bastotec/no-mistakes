@@ -75,8 +75,8 @@ func finalPRLiteralEvidence(content prContent) []prLiteralEvidenceRange {
 	for _, evidence := range content.LiteralEvidence {
 		// Assembly neutralizes foreign attestations and redacts paths after
 		// rendering. Bind roles only to complete blocks that survived caps.
-		block := strings.TrimSpace(redactPublicationText(neutralizeAttestationMarkers(evidence.Block)))
-		fence := strings.TrimSpace(redactPublicationText(neutralizeAttestationMarkers(evidence.Fence)))
+		block := strings.TrimSpace(redactPublicationText(neutralizePRAppendixMarkers(neutralizeAttestationMarkers(evidence.Block))))
+		fence := strings.TrimSpace(redactPublicationText(neutralizePRAppendixMarkers(neutralizeAttestationMarkers(evidence.Fence))))
 		if block == "" || fence == "" {
 			continue
 		}

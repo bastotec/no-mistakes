@@ -7,12 +7,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/scm/gitlab"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 func ownedFixture(t *testing.T) (prContent, string) {
@@ -309,6 +312,60 @@ func TestGitLabDraftMarkerWrittenByUpdatePRRoundTripsReadbackComparison(t *testi
 	}
 }
 
+func TestPROwnershipOrdinaryAssemblyEmbedsTemplateEvidenceAndRestamps(t *testing.T) {
+	t.Parallel()
+	dir, baseSHA, headSHA := setupGitRepo(t)
+	template, err := composeOwnedPRContent(prOwnedBody{before: "# Overview\n\nReview only.\n\n- [ ] Maintainer approves rollout"}, "Template preview", noMistakesPRSignature+"\n\n"+buildPipelineAttestation(nil, nil, testPipelineHeadSHA), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "template-evidence.md")
+	if err := os.WriteFile(path, []byte(template.Body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, baseSHA, headSHA, config.Commands{})
+	sctx.EvidenceDir = dir
+	insertCompletedStep(t, sctx, types.StepTest, findingsJSON(t, types.Findings{
+		TestingSummary: "Captured a generated template PR.",
+		Artifacts:      []types.TestArtifact{{Kind: "other", Label: "Exact generated template PR Markdown", Path: path}},
+	}), "")
+	content, err := (&PRStep{}).buildPRContentForTest(sctx, "feature", "main", baseSHA, scm.ProviderGitHub, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Unknown author bytes added outside generated evidence remain outside the
+	// normalization and restamp scopes, even if they resemble generated sections.
+	authorBefore := "Author's plan\n\n## Pipeline\n\n- [x] Human note\n\n"
+	authorAfter := "\n\nCloses test/other#9\n"
+	host := &attestationTestHost{body: authorBefore + content.Body + authorAfter, title: "Author's title"}
+	before := host.body
+	newHead := strings.Repeat("ab", 20)
+	if err := restampPRAttestation(context.Background(), host, &scm.PR{Number: "42"}, newHead, nil); err != nil {
+		t.Fatal(err)
+	}
+	want, rebound := rebindPipelineAttestationWithSteps(before, newHead, nil, pipelineAttestationPolicy{})
+	if !rebound || host.body != want || host.title != "Author's title" || !strings.HasPrefix(host.body, authorBefore) || !strings.HasSuffix(host.body, authorAfter) {
+		t.Fatal("restamp changed more than the real attestation")
+	}
+	assertFirstAttestationBindsHead(t, host.body, newHead)
+	if strings.Count(host.body, pipelineAttestationCommentPrefix) != 1 || hasPRAppendixMarkers(host.body) {
+		t.Fatal("embedded template acquired ownership or shadowed the live attestation")
+	}
+	// Evidence remains readable and is still identified as literal data for the
+	// final language judge after assembly's control-prefix escaping.
+	expectedEvidence := strings.ReplaceAll(neutralizeAttestationMarkers(template.Body), "no-mistakes-pr-appendix", `no-mistakes-pr\-appendix`)
+	if !strings.Contains(host.body, expectedEvidence) {
+		t.Fatalf("assembly changed evidence beyond its control prefixes:\n%s", content.Body)
+	}
+	ranges := finalPRLiteralEvidence(content)
+	if len(ranges) != 1 || !strings.Contains(ranges[0].Text, expectedEvidence) || content.Body[ranges[0].StartByte:ranges[0].EndByte] != ranges[0].Text {
+		t.Fatalf("literal evidence lost its assembly-bound range: %+v", ranges)
+	}
+	if raw, err := os.ReadFile(path); err != nil || string(raw) != template.Body {
+		t.Fatalf("durable evidence was modified: %v", err)
+	}
+}
+
 func TestPROwnershipRestampPreservesAuthorsAndConsumerContract(t *testing.T) {
 	t.Parallel()
 	content, _ := ownedFixture(t)
@@ -332,9 +389,15 @@ func TestPROwnershipRestampPreservesAuthorsAndConsumerContract(t *testing.T) {
 	if got, out := runVerifyPy(t, host.body, newHead); got != "success" {
 		t.Fatalf("restamped body failed consumer: %s", out)
 	}
-	host.body = strings.Replace(host.body, "Low recorded risk.", "Human note inside evidence", 1)
-	host.updates = 0
-	if err := restampPRAttestation(context.Background(), host, &scm.PR{Number: "42"}, testPipelineHeadSHA, nil); err == nil || host.updates != 0 {
-		t.Fatalf("edited evidence overwritten during restamp: err=%v, writes=%d", err, host.updates)
+	for name, body := range map[string]string{
+		"edited":    strings.Replace(host.body, "Low recorded risk.", "Human note inside evidence", 1),
+		"malformed": strings.Replace(host.body, prAppendixEnd, "", 1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			host.body, host.updates = body, 0
+			if err := restampPRAttestation(context.Background(), host, &scm.PR{Number: "42"}, testPipelineHeadSHA, nil); err == nil || host.updates != 0 || host.body != body {
+				t.Fatalf("unproven ownership overwritten during restamp: err=%v, writes=%d", err, host.updates)
+			}
+		})
 	}
 }
