@@ -218,7 +218,7 @@ Press `y` to toggle yolo mode when you want paused approval gates to resolve aut
 Yolo fixes gates with `auto-fix` and `ask-user` findings by selecting every finding, then approves the resulting fix-review gate.
 It approves gates with no findings or only `action: no-op` findings as-is, and fixes each step at most once so unresolved findings do not loop forever.
 Protected-path refusals, repair-budget exhaustion, and repair-reconciliation gates are exceptions to this automatic handling and remain parked for an explicit response.
-A red CI gate is never approved or skipped by yolo: it may be fixed once, then stays parked until you approve, skip, or fix it yourself.
+CI gates follow the [CLI's fail-closed gate policy](/no-mistakes/reference/cli/#no-mistakes-axi-run): yolo may fix once but never approves or skips them. Use an explicit action to approve, skip, or request another fix.
 
 ## Outcome banner
 

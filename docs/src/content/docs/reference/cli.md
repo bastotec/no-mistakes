@@ -154,7 +154,8 @@ With `--yes`, `axi run` treats both `action: auto-fix` and `action: ask-user` fi
 Gates with no findings or only `action: no-op` findings are approved as-is, and each step is fixed at most once so unresolved findings do not loop forever.
 Protected-path refusals, repair-budget exhaustion, repair reconciliation after daemon recovery, and steps interrupted by orderly daemon shutdown are exceptions to this automatic handling. `--yes` leaves each parked for its explicit, gate-specific response.
 
-A CI gate is never approved or skipped under `--yes`. Every CI gate means the PR is not green (a failing check, a cancelled check no rerun replaces, a merge conflict, a review-bot failure, or checks awaiting approval), so `--yes` may answer it with one fix round but otherwise leaves it parked. `axi respond --action approve --yes` and `--action skip --yes` are rejected at a CI gate. Approving past a red check takes an explicit `axi respond --action approve` without `--yes`, and only that path ends the run `passed-with-override`.
+A CI gate is never approved or skipped under `--yes`. Every CI-step gate is treated as not green, regardless of its findings or whether it is a fix-review gate. This includes failing checks, cancelled checks no rerun replaces, merge conflicts, review-bot failures, and checks awaiting approval. `--yes` may request a fix at most once per invocation, subject to the exceptions above, but otherwise leaves the gate parked. Approving or skipping requires an explicit operator response without `--yes`; approval over still-failing checks is recorded as `passed-with-override`.
+
 Without `--yes`, an agent driving `axi run` should stop when a gate contains `action: ask-user` findings and relay each finding's ID, file, and full description to the user before responding.
 Review gates include a `note` field reminding agents that `auto_fix.review` defaults to `0`, so blocking and ask-user review findings park for a decision unless configuration explicitly opts back into review auto-fix.
 Long-running `axi run` calls are working, not stalled; if one returns a `gate:`, read that output and answer it with `axi respond`.
@@ -297,7 +298,8 @@ no-mistakes axi respond --action abort # only repair-reconciliation or daemon-sh
 
 A repair-budget gate follows the [one-repair explicit response rule](/no-mistakes/concepts/auto-fix/#how-it-works). A repair-reconciliation gate accepts `fix` only when no repair process identity was registered; otherwise use `abort` rather than replaying an uncertain repair. A `daemon-shutdown` gate accepts only `abort` because the interrupted ordinary step cannot be resumed or trusted. `--action abort` is rejected at every other gate; use [`axi abort`](#no-mistakes-axi-abort) to cancel an ordinary active run.
 
-After the explicit response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
+At a CI gate, `axi respond --action approve --yes` and `axi respond --action skip --yes` are rejected with exit code `2` before sending a response, including when `--step babysit` uses the legacy CI alias. Omit `--yes` only for an explicit operator decision to approve or skip; `--action fix --yes` remains available.
+After an accepted response, `--yes` uses the same [auto-resolution behavior and exceptions as `axi run --yes`](#no-mistakes-axi-run).
 Each `axi respond` blocks until the next gate, CI-ready decision point, or final outcome, subject to the same default `--wait 8m` boundary as `axi run`. That boundary also covers its initial active-run and run-state reads plus event-subscription acknowledgement, so a caller can interrupt establishment as well as the later event wait.
 If it returns another `gate:`, answer that gate; do not idle-wait for the run to move forward by itself.
 When the daemon is already running, `axi respond` can continue an active run even if the global config file has become invalid, because it is not starting a fresh run.
