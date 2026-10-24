@@ -1751,16 +1751,16 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 			continue
 		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
-			// A terminal unpublished run can be superseded only by a newer
-			// exact binding whose pushed head is proven, in the local gate, to
-			// contain the preserved head. Active ownership remains absolute.
+			// The retained-work path supersedes a terminal unpublished run only
+			// with a newer exact binding proven, in the local gate, to retain
+			// its preserved work. Active ownership remains absolute.
 			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
 				continue
 			}
-			// A newer binding already seen in this newest-first walk proves a
-			// proven never-started preflight attempt obsolete: that attempt
-			// never executed anything and its unchanged submitted head was
-			// published by the newer run. Selection skips only the
+			// A newer binding already seen in this newest-first walk can make
+			// a proven never-started preflight attempt obsolete: that attempt
+			// never executed anything, and the newer run published its result
+			// from the same submitted head. Selection skips only the
 			// obstruction; its history stays untouched.
 			if unpublishedPipelineHead(candidate) && s.supersededPreflightRunByBindings(ctx, candidate, newerPushBindings, branch) {
 				continue
@@ -2250,18 +2250,20 @@ func (s *Service) provenNeverStartedPreflightAttempt(ctx context.Context, older 
 // that can make an older terminal run non-authoritative: the older attempt is
 // a proven never-started preflight failure (it died inside launch preflight,
 // with its submitted head unchanged and no execution or publication binding of
-// its own), and a newer run published that same submitted head. The newer run
-// must carry its own authority: terminal, verified head, exact current
-// repository/branch push binding, no live push, and the bare gate's exact
-// non-symbolic branch head equal to that binding. Unlike retained-work
-// supersession there is no content proof between the two final heads, because
-// the older attempt has no final head of its own: its head is the submitted
-// head, which the newer run proves it published. A newer ACTIVE run is never
-// supersession evidence at all - it owns the branch while it runs - so this
-// only ever runs for a newer terminal binding, and only from selection paths
-// that have already established the strict older/newer ordering. Everything
-// unreadable, symbolic, stale, or merely absent leaves the older run
-// authoritative. Read-only: nothing here stamps, rewrites, or erases.
+// its own), and a newer run published its result from that same submitted
+// head. The newer run must carry its own authority: terminal, verified head,
+// exact current repository/branch push binding, no live push, and the bare
+// gate's exact non-symbolic branch head equal to that binding. Unlike
+// retained-work supersession there is no content proof between the two final
+// heads: the older attempt executed no work, so matching submitted heads
+// makes it obsolete without certifying retention by the newer final head.
+// Ordinary synchronization still checks the caller's relation to that head.
+// A newer ACTIVE run is never supersession evidence at all - it owns the
+// branch while it runs - so this only ever runs for a newer terminal binding,
+// and only from selection paths that have already established the strict
+// older/newer ordering. Unreadable, symbolic, stale, or missing required proof
+// leaves the older run authoritative. Read-only: nothing here stamps,
+// rewrites, or erases.
 func (s *Service) supersededNeverStartedPreflightRun(ctx context.Context, older, newer *db.Run, branch string) bool {
 	if s == nil || s.Repo == nil || s.DB == nil || older == nil || newer == nil || branch == "" {
 		return false
