@@ -31,10 +31,8 @@ func (s *Service) supersededPreflightRun(ctx context.Context, older, newer *db.R
 		older.ExistingPRURL != nil || older.PRURL != nil || older.AwaitingAgentSince != nil || older.WorktreeDir == nil || strings.TrimSpace(*older.WorktreeDir) == "" {
 		return false
 	}
-	// e6624fb0 is the inspected producer source, not a version-range guess. Both
-	// linker forms identify that exact revision (Makefile's short stamp or full).
 	switch ptr(older.NoMistakesBuildSHA) {
-	case "e6624fb0", "e6624fb072e9e029d727948640e441e9474ac418":
+	case "e6624fb", "e6624fb0", "e6624fb072e9e029d727948640e441e9474ac418":
 	default:
 		return false
 	}

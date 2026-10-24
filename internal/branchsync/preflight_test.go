@@ -16,7 +16,7 @@ import (
 // These are producer provenance, not authority inferred from the lack of steps.
 // This exact source revision binds submitted custody before checking the PR,
 // and pins gates only after that check and before starting the executor.
-const preflightProducer = "e6624fb072e9e029d727948640e441e9474ac418"
+const preflightProducer = "e6624fb"
 
 type preflightFixture struct {
 	*supersededFixture
@@ -150,10 +150,20 @@ func (f *preflightFixture) snapshot() string {
 
 func TestPreflightSupersessionSelectsVerifiedPublicationReadOnly(t *testing.T) {
 	t.Parallel()
-	for _, anchor := range []string{"create", "advance", "noop"} {
-		t.Run(anchor, func(t *testing.T) {
+	for _, tc := range []struct {
+		anchor   string
+		producer string
+	}{
+		{"create", preflightProducer},
+		{"advance", preflightProducer},
+		{"noop", preflightProducer},
+		{"create", "e6624fb0"},
+		{"create", "e6624fb072e9e029d727948640e441e9474ac418"},
+	} {
+		t.Run(tc.anchor+"/"+tc.producer, func(t *testing.T) {
 			t.Parallel()
-			f := newPreflightFixture(t, anchor)
+			f := newPreflightFixture(t, tc.anchor)
+			f.exec("UPDATE runs SET no_mistakes_build_sha=? WHERE id=?", tc.producer, f.older.ID)
 			before := f.snapshot()
 			local := mustRun(t, f.work, "show-ref")
 			gate := mustRun(t, f.gate, "show-ref")
@@ -221,6 +231,12 @@ func TestPreflightSupersessionRejectsUncertainOrUniqueCustody(t *testing.T) {
 		}},
 		{"unknown producer", func(f *preflightFixture) {
 			f.exec("UPDATE runs SET no_mistakes_build_sha='unknown' WHERE id=?", f.older.ID)
+		}},
+		{"shorter producer prefix", func(f *preflightFixture) {
+			f.exec("UPDATE runs SET no_mistakes_build_sha='e6624f' WHERE id=?", f.older.ID)
+		}},
+		{"different producer with shared prefix", func(f *preflightFixture) {
+			f.exec("UPDATE runs SET no_mistakes_build_sha='e6624fb1' WHERE id=?", f.older.ID)
 		}},
 		{"missing producer", func(f *preflightFixture) { f.exec("UPDATE runs SET no_mistakes_build_sha=NULL WHERE id=?", f.older.ID) }},
 		{"missing positive failure route", func(f *preflightFixture) { f.exec("UPDATE runs SET error='setup failed' WHERE id=?", f.older.ID) }},
