@@ -1750,9 +1750,9 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 			continue
 		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
-			// A terminal unpublished run can be superseded only by a newer
-			// exact binding whose pushed head is proven, in the local gate, to
-			// contain the preserved head. Active ownership remains absolute.
+			// Only proven retained work or the narrow pre-executor refusal in
+			// supersededPreflightRun can yield to a newer exact publication.
+			// Active ownership remains absolute.
 			if unpublishedPipelineHead(candidate) && (s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) || s.supersededPreflightRun(ctx, candidate, newerPushed, branch)) {
 				continue
 			}
