@@ -23,7 +23,7 @@ func (s *Service) supersededPreflightRun(ctx context.Context, older, newer *db.R
 		older.RepoID != s.Repo.ID || newer.RepoID != s.Repo.ID || older.Branch != branch || newer.Branch != branch ||
 		!(older.CreatedAt < newer.CreatedAt || older.CreatedAt == newer.CreatedAt && older.ID < newer.ID) ||
 		older.Status != types.RunFailed || !runHeadUnmoved(older) || strings.TrimSpace(older.HeadSHA) == "" ||
-		older.HeadSHA != ptr(newer.SubmittedHeadSHA) || !terminalRunStatus(newer.Status) || newer.TerminalHeadVerifiedAt == nil ||
+		!terminalRunStatus(newer.Status) || newer.TerminalHeadVerifiedAt == nil ||
 		!exactPushedBinding(s.Repo, newer, branch) || older.PushActive || older.LastPushedSHA != nil || older.LastPushedAt != nil ||
 		older.PushTargetKind != nil || older.PushTargetFingerprint != nil || older.PushRef != nil || older.PushGeneration != nil ||
 		older.CustodyReturnedAt != nil || older.TerminalHeadVerifiedAt != nil || older.ReviewApprovedHeadSHA != nil ||
@@ -96,5 +96,35 @@ func (s *Service) supersededPreflightRun(ctx context.Context, older, newer *db.R
 			}
 		}
 	}
-	return true
+	if older.HeadSHA == ptr(newer.SubmittedHeadSHA) {
+		return true
+	}
+	// A(S) -> B(S->P) -> C(P->Q): C need not have resubmitted S. Keep
+	// B's exact same-submitted publication as the witness, but only if its
+	// published work is provably retained by the current, gate-bound C. This
+	// is not transitive run supersession: every old preflight check above
+	// still applies, and neither an unverified witness nor chronology alone
+	// can replace that publication/content proof.
+	runs, err := s.DB.GetRunsByRepo(s.Repo.ID)
+	if err != nil {
+		return false
+	}
+	for _, witness := range runs {
+		if witness.RepoID != s.Repo.ID || witness.Branch != branch ||
+			ptr(witness.SubmittedHeadSHA) != older.HeadSHA ||
+			!(older.CreatedAt < witness.CreatedAt || older.CreatedAt == witness.CreatedAt && older.ID < witness.ID) ||
+			!(witness.CreatedAt < newer.CreatedAt || witness.CreatedAt == newer.CreatedAt && witness.ID < newer.ID) ||
+			!terminalRunStatus(witness.Status) || witness.TerminalHeadVerifiedAt == nil ||
+			!exactPushedBinding(s.Repo, witness, branch) || pushStepRunning(s.DB, witness.ID) {
+			continue
+		}
+		if isAncestor(ctx, s.GateDir, witness.HeadSHA, newer.HeadSHA) {
+			return true
+		}
+		retention, err := git.ComparePatchRetention(ctx, s.GateDir, newer.HeadSHA, witness.HeadSHA)
+		if err == nil && retention.RetainsAll() {
+			return true
+		}
+	}
+	return false
 }

@@ -381,6 +381,201 @@ func TestPreflightSupersessionRejectsUncertainOrUniqueCustody(t *testing.T) {
 	}
 }
 
+// A(S) was refused before execution, B(S->P) published, then C(P->Q)
+// published. B remains the same-submitted witness even though C is selected.
+func newFollowupPreflightFixture(t *testing.T) (*preflightFixture, *db.Run) {
+	t.Helper()
+	f := newPreflightFixture(t, "advance")
+	witness := f.newer
+	mustRun(t, f.work, "checkout", "--detach", f.pushed)
+	mustWrite(t, filepath.Join(f.work, "followup.txt"), "published followup\n")
+	mustRun(t, f.work, "add", "followup.txt")
+	mustRun(t, f.work, "commit", "-m", "followup publication")
+	head := mustRun(t, f.work, "rev-parse", "HEAD")
+	ref := "refs/heads/" + f.branch
+	mustRun(t, f.work, "push", f.gate, head+":"+ref)
+	mustRun(t, f.work, "push", f.svc.Repo.PushURL(), head+":"+ref)
+	mustRun(t, f.work, "checkout", f.branch)
+	later, err := f.database.InsertRun(f.svc.Repo.ID, f.branch, f.pushed, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunHeadSHA(later.ID, head); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunPushBinding(later.ID, db.PushBinding{HeadSHA: head, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.svc.Repo.PushURL()), Ref: ref}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunStatusWithVerifiedHead(later.ID, types.RunFailed, head); err != nil {
+		t.Fatal(err)
+	}
+	f.exec("UPDATE runs SET created_at=3 WHERE id=?", later.ID)
+	f.newer, err = f.database.GetRun(later.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return f, witness
+}
+
+func TestPreflightSupersessionSurvivesFollowupPublication(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		change func(*preflightFixture, *db.Run)
+	}{
+		{"retained witness", nil},
+		{"missing witness", func(f *preflightFixture, b *db.Run) { f.exec("DELETE FROM runs WHERE id=?", b.ID) }},
+		{"different witness submission", func(f *preflightFixture, b *db.Run) {
+			f.exec("UPDATE runs SET submitted_head_sha=? WHERE id=?", f.base, b.ID)
+		}},
+		{"unverified witness", func(f *preflightFixture, b *db.Run) {
+			f.exec("UPDATE runs SET terminal_head_verified_at=NULL WHERE id=?", b.ID)
+		}},
+		{"wrong witness target", func(f *preflightFixture, b *db.Run) {
+			f.exec("UPDATE runs SET push_target_fingerprint='other' WHERE id=?", b.ID)
+		}},
+		{"witness predates refusal", func(f *preflightFixture, b *db.Run) { f.exec("UPDATE runs SET created_at=0 WHERE id=?", b.ID) }},
+		{"witness postdates current", func(f *preflightFixture, b *db.Run) { f.exec("UPDATE runs SET created_at=4 WHERE id=?", b.ID) }},
+		{"missing witness object", func(f *preflightFixture, b *db.Run) {
+			f.exec("UPDATE runs SET head_sha=?,last_pushed_sha=? WHERE id=?", strings.Repeat("a", 40), strings.Repeat("a", 40), b.ID)
+		}},
+		{"unverified current", func(f *preflightFixture, _ *db.Run) {
+			f.exec("UPDATE runs SET terminal_head_verified_at=NULL WHERE id=?", f.newer.ID)
+		}},
+		{"wrong current head", func(f *preflightFixture, _ *db.Run) {
+			f.exec("UPDATE runs SET head_sha=? WHERE id=?", f.base, f.newer.ID)
+		}},
+		{"wrong gate", func(f *preflightFixture, _ *db.Run) { mustRun(t, f.gate, "update-ref", "refs/heads/"+f.branch, f.base) }},
+		{"lost witness work", func(f *preflightFixture, _ *db.Run) {
+			f.exec("UPDATE runs SET head_sha=?,last_pushed_sha=? WHERE id=?", f.base, f.base, f.newer.ID)
+			mustRun(t, f.gate, "update-ref", "refs/heads/"+f.branch, f.base)
+		}},
+		{"unique old custody", func(f *preflightFixture, _ *db.Run) {
+			mustRun(t, f.gate, "update-ref", recoverAnchorRef(f.older.ID), f.newer.HeadSHA)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			f, witness := newFollowupPreflightFixture(t)
+			if tc.change != nil {
+				tc.change(f, witness)
+			}
+			before := f.snapshot()
+			local, gate := mustRun(t, f.work, "show-ref"), mustRun(t, f.gate, "show-ref")
+			for reopen := 0; reopen < 2; reopen++ {
+				current, err := f.database.GetRun(f.newer.ID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if got := f.svc.supersededPreflightRun(f.ctx, f.older, current, f.branch); got != (tc.change == nil) {
+					t.Fatalf("historical witness accepted: %v", got)
+				}
+				state := f.svc.InspectCached(f.ctx)
+				want := f.older.ID
+				if tc.change == nil || tc.name == "wrong current head" {
+					// An inconsistent current head itself owns unpublished
+					// custody before selection can even reach the old refusal.
+					want = f.newer.ID
+				}
+				if state.Pipeline.RunID != want {
+					t.Fatalf("selected %s, want %s: %#v", state.Pipeline.RunID, want, state)
+				}
+				ids, _, _, _ := f.svc.missingHeadKeepLocalRuns(f.ctx, &state, f.newer)
+				foundOld := false
+				for _, id := range ids {
+					foundOld = foundOld || id == f.older.ID
+				}
+				if foundOld != (tc.change != nil) {
+					t.Fatalf("missing-head stack old refusal membership: %v", ids)
+				}
+				if before != f.snapshot() || local != mustRun(t, f.work, "show-ref") || gate != mustRun(t, f.gate, "show-ref") || mustRun(t, f.work, "rev-parse", "HEAD") != f.olderSHA {
+					t.Fatal("selection changed durable state or refs")
+				}
+				if err := f.database.Close(); err != nil {
+					t.Fatal(err)
+				}
+				reopened, err := db.Open(f.dbPath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				f.database, f.svc.DB = reopened, reopened
+			}
+		})
+	}
+}
+
+func TestPreflightSupersessionFollowupRetainsRebasedWitness(t *testing.T) {
+	t.Parallel()
+	f, witness := newFollowupPreflightFixture(t)
+	mustRun(t, f.work, "checkout", "--detach", f.base)
+	mustWrite(t, filepath.Join(f.work, "later-base.txt"), "later upstream change\n")
+	mustRun(t, f.work, "add", "later-base.txt")
+	mustRun(t, f.work, "commit", "-m", "later base")
+	base := mustRun(t, f.work, "rev-parse", "HEAD")
+	mustRun(t, f.work, "checkout", "--detach", f.newer.HeadSHA)
+	mustRun(t, f.work, "rebase", "--onto", base, f.base)
+	head := mustRun(t, f.work, "rev-parse", "HEAD")
+	mustRun(t, f.work, "checkout", f.branch)
+	if isAncestor(f.ctx, f.work, witness.HeadSHA, head) {
+		t.Fatal("fixture retained the original witness ancestry")
+	}
+	mustRun(t, f.work, "push", f.gate, head+":refs/heads/fixture-rebased")
+	mustRun(t, f.gate, "update-ref", "refs/heads/"+f.branch, head)
+	f.exec("UPDATE runs SET head_sha=?,last_pushed_sha=? WHERE id=?", head, head, f.newer.ID)
+	before := f.snapshot()
+	local, gate := mustRun(t, f.work, "show-ref"), mustRun(t, f.gate, "show-ref")
+	for reopen := 0; reopen < 2; reopen++ {
+		state := f.svc.InspectCached(f.ctx)
+		if state.Pipeline.RunID != f.newer.ID {
+			t.Fatalf("rebased publication lost same-submitted witness: %#v", state)
+		}
+		if before != f.snapshot() || local != mustRun(t, f.work, "show-ref") || gate != mustRun(t, f.gate, "show-ref") {
+			t.Fatal("rebased witness inspection changed durable state or refs")
+		}
+		if err := f.database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := db.Open(f.dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.database, f.svc.DB = reopened, reopened
+	}
+}
+
+func TestPreflightSupersessionFollowupMissingHeadStack(t *testing.T) {
+	t.Parallel()
+	f, _ := newFollowupPreflightFixture(t)
+	missing := strings.Repeat("a", 40)
+	stranded, err := f.database.InsertRun(f.svc.Repo.ID, f.branch, f.newer.HeadSHA, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunStatusWithVerifiedHead(stranded.ID, types.RunFailed, missing); err != nil {
+		t.Fatal(err)
+	}
+	f.exec("UPDATE runs SET created_at=4 WHERE id=?", stranded.ID)
+	before := f.snapshot()
+	for reopen := 0; reopen < 2; reopen++ {
+		state := f.svc.InspectCached(f.ctx)
+		if state.Pipeline.RunID != stranded.ID || state.NextAction == nil || state.NextAction.Code != "recover_custody" || !strings.Contains(state.NextAction.Command, "--keep-local") {
+			t.Fatalf("missing-head recovery still obstructed by obsolete refusal: %#v", state)
+		}
+		if before != f.snapshot() {
+			t.Fatal("missing-head inspection changed durable history")
+		}
+		if err := f.database.Close(); err != nil {
+			t.Fatal(err)
+		}
+		reopened, err := db.Open(f.dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		f.database, f.svc.DB = reopened, reopened
+	}
+}
+
 func TestPreflightSupersessionPreservesActiveRemoteDirtyAndDivergenceGuards(t *testing.T) {
 	t.Parallel()
 	t.Run("newer active ownership", func(t *testing.T) {
