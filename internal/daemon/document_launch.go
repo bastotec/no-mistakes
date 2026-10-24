@@ -8,6 +8,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
 	"github.com/kunchenguid/no-mistakes/internal/db"
+	"github.com/kunchenguid/no-mistakes/internal/gate"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 )
@@ -93,12 +94,8 @@ func (m *RunManager) HandleStartDocumentRun(ctx context.Context, request *ipc.St
 		if err := validateHistoryCaller(ctx, repo, p); err != nil {
 			return "", err
 		}
-		if gateHead, exists, err := git.ExactRefTarget(ctx, gateDir, "refs/heads/"+p.Branch); err != nil {
-			return "", err
-		} else if exists {
-			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", gateHead, p.HeadSHA); err != nil {
-				return "", fmt.Errorf("document-launch: reconcile private gate custody before launch")
-			}
+		if _, err := gate.ReconcileStaleBranch(ctx, gateDir, p.WorkDir, p.Branch, p.HeadSHA, ""); err != nil {
+			return "", fmt.Errorf("document-launch: reconcile private gate custody: %w", err)
 		}
 		launchCtx := context.WithValue(ctx, documentTimeoutLaunchKey{}, timeout)
 		id, err := m.startRunWithIntentSourceLocked(launchCtx, repo, p.Branch, p.HeadSHA, p.HeadSHA, "document-timeout", nil, p.Intent, db.RunIntentSourceAgent, p.LaunchNonce, p.ValidationGeneration, digestIntent(p.Intent), base, "", "", "")

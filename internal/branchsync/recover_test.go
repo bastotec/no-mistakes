@@ -581,14 +581,137 @@ func TestRecoverDivergedRefusesButKeepLocalReturnsCustody(t *testing.T) {
 	}
 }
 
-// TestMirrorKeepLocalOfferRequiresVerifiedTerminalHead pins the offer/execution
-// contract of the mirror consultation: status may advertise the mirror-backed
-// keep-local custody return only for a run whose terminal head Recover will
-// accept. A run terminalized without head verification (a daemon crash between
-// the head update and the mirror refresh) is refused by Recover --keep-local,
-// so offering the action there would ping-pong an agent between `axi sync
-// --check` and a refusing recovery. Unverified heads keep the
-// manual-reconciliation offer Recover actually enforces.
+func newTerminalMirrorRecoverFixture(t *testing.T) *recoverFixture {
+	t.Helper()
+	f := newRecoverFixture(t, types.RunFailed)
+	mustRun(t, f.gate, "update-ref", "refs/tags/before-final", f.preserved)
+	managed := filepath.Join(t.TempDir(), "managed")
+	mustRun(t, f.gate, "worktree", "add", "--detach", managed, f.base)
+	configureIdentity(t, managed)
+	mustWrite(t, filepath.Join(managed, "file.txt"), "final conflicting rewrite\n")
+	mustWrite(t, filepath.Join(managed, "receipt.txt"), "test receipt\n")
+	mustRun(t, managed, "add", ".")
+	mustRun(t, managed, "commit", "-m", "final work")
+	f.preserved = mustRun(t, managed, "rev-parse", "HEAD")
+	if err := f.db.SetRunWorktreeDir(f.run.ID, managed); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunHeadSHA(f.run.ID, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.db.UpdateRunStatusWithVerifiedHead(f.run.ID, types.RunFailed, f.preserved); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, f.gate, "update-ref", f.anchorRef(), f.preserved)
+	mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.submitted)
+	mustRun(t, f.gate, "worktree", "remove", managed)
+	if _, err := os.Stat(managed); !os.IsNotExist(err) {
+		t.Fatalf("managed worktree remains: %v", err)
+	}
+	if objectExists(f.ctx, f.local, f.preserved) || preservedContainsLocalWork(f.ctx, f.gate, f.submitted, f.preserved) || isAncestor(f.ctx, f.gate, f.submitted, f.preserved) {
+		t.Fatal("fixture does not reproduce unavailable divergent final history")
+	}
+	return f
+}
+
+func TestTerminalMirrorKeepLocalReturnsCustodyWithCleanCaller(t *testing.T) {
+	t.Parallel()
+	f := newTerminalMirrorRecoverFixture(t)
+	assertMirrorPreservedKeepLocalOffer(t, f.service.InspectCached(f.ctx))
+	beforeRefs := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+	beforeTree := mustRun(t, f.local, "write-tree")
+	beforeFile := readOptional(t, filepath.Join(f.local, "file.txt"))
+	runs, err := f.db.GetRunsByRepo(f.repo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookMarker := filepath.Join(f.gate, "receive-hook-fired")
+	mustWrite(t, filepath.Join(f.gate, "hooks", "post-receive"), "#!/bin/sh\ntouch '"+hookMarker+"'\nexit 99\n")
+	if err := os.Chmod(filepath.Join(f.gate, "hooks", "post-receive"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	mustRun(t, f.gate, "config", "core.hooksPath", filepath.Join(f.gate, "hooks"))
+	state := f.service.Recover(f.ctx, true)
+	if !state.Recovered || state.Changed || !f.custodyReturned() {
+		t.Fatalf("keep-local = %+v", state)
+	}
+	if got := mustRun(t, f.local, "rev-parse", "HEAD"); got != f.submitted {
+		t.Fatal("caller head moved")
+	}
+	if got := mustRun(t, f.local, "write-tree"); got != beforeTree || readOptional(t, filepath.Join(f.local, "file.txt")) != beforeFile {
+		t.Fatal("caller bytes changed")
+	}
+	if got := mustRun(t, f.local, "status", "--porcelain"); got != "" {
+		t.Fatalf("caller became dirty: %s", got)
+	}
+	if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != beforeRefs {
+		t.Fatal("gate refs changed")
+	}
+	if got := mustRun(t, f.local, "rev-parse", f.anchorRef()); got != f.preserved {
+		t.Fatal("final history not retained locally")
+	}
+	if got := mustRun(t, f.local, "show", f.anchorRef()+":receipt.txt"); got != "test receipt" {
+		t.Fatal("committed receipt changed")
+	}
+	if _, err := os.Stat(hookMarker); !os.IsNotExist(err) {
+		t.Fatalf("receive hook fired: %v", err)
+	}
+	after, err := f.db.GetRunsByRepo(f.repo.ID)
+	if err != nil || len(after) != len(runs) {
+		t.Fatalf("recovery created run: %v, %v", after, err)
+	}
+}
+
+func TestTerminalMirrorKeepLocalOfferFailsClosed(t *testing.T) {
+	t.Parallel()
+	for _, mutation := range []string{"active", "unverified", "missing-anchor", "moved-anchor", "symbolic-anchor", "unrelated-gate", "symbolic-branch", "competing-terminal"} {
+		t.Run(mutation, func(t *testing.T) {
+			t.Parallel()
+			f := newTerminalMirrorRecoverFixture(t)
+			switch mutation {
+			case "active":
+				if err := f.db.UpdateRunStatus(f.run.ID, types.RunRunning); err != nil {
+					t.Fatal(err)
+				}
+			case "unverified":
+				if err := f.db.UpdateRunStatus(f.run.ID, types.RunFailed); err != nil {
+					t.Fatal(err)
+				}
+			case "missing-anchor":
+				mustRun(t, f.gate, "update-ref", "-d", f.anchorRef())
+			case "moved-anchor":
+				mustRun(t, f.gate, "update-ref", f.anchorRef(), f.submitted)
+			case "symbolic-anchor":
+				mustRun(t, f.gate, "update-ref", "refs/no-mistakes/symbolic-target", f.preserved)
+				mustRun(t, f.gate, "symbolic-ref", f.anchorRef(), "refs/no-mistakes/symbolic-target")
+			case "unrelated-gate":
+				mustRun(t, f.gate, "update-ref", "refs/heads/feature/recover", f.base)
+			case "symbolic-branch":
+				mustRun(t, f.gate, "symbolic-ref", "refs/heads/feature/recover", "refs/heads/main")
+			case "competing-terminal":
+				other, err := f.db.InsertRun(f.repo.ID, "feature/recover", f.submitted, f.base)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.UpdateRunHeadSHA(other.ID, f.preserved); err != nil {
+					t.Fatal(err)
+				}
+				if err := f.db.UpdateRunStatusWithVerifiedHead(other.ID, types.RunFailed, f.preserved); err != nil {
+					t.Fatal(err)
+				}
+			}
+			before := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)")
+			state := f.service.InspectCached(f.ctx)
+			if state.NextAction != nil && state.NextAction.Code == "recover_custody" {
+				t.Fatalf("unsafe recovery offered: %+v", state)
+			}
+			if got := mustRun(t, f.gate, "for-each-ref", "--format=%(refname) %(objectname) %(symref)"); got != before || f.custodyReturned() {
+				t.Fatal("inspection mutated custody")
+			}
+		})
+	}
+}
+
 func TestMirrorKeepLocalOfferRequiresVerifiedTerminalHead(t *testing.T) {
 	t.Parallel()
 
