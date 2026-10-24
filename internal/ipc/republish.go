@@ -15,9 +15,8 @@ type RepublishPublicationParams struct {
 // which recorded statuses the published evidence claims without re-reading the
 // PR. Nothing here re-runs a step.
 type RepublishPublicationResult struct {
-	RunID    string   `json:"run_id"`
-	HeadSHA  string   `json:"head_sha"`
-	PRURL    string   `json:"pr_url"`
-	Attempts int      `json:"attempts"`
-	Steps    []string `json:"steps,omitempty"`
+	RunID   string   `json:"run_id"`
+	HeadSHA string   `json:"head_sha"`
+	PRURL   string   `json:"pr_url"`
+	Steps   []string `json:"steps,omitempty"`
 }

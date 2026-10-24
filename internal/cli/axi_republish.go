@@ -17,15 +17,19 @@ func newAxiRepublishPublicationCmd() *cobra.Command {
 		Long: "Continue the publication of an ALREADY-TERMINAL run whose PR step failed, without\n" +
 			"re-running any validation step. Requires explicit --run and the exact recorded --head\n" +
 			"from axi status; never resolves the latest run.\n" +
-			"The daemon re-drafts and republishes the PR text for that recorded head through the\n" +
-			"ordinary guarded PR path: the publication validator, identifier redaction, and the\n" +
-			"bounded sanitize-and-retry loop all apply exactly as during the run. Recorded step\n" +
-			"statuses are rendered as they were recorded - no step is re-run, skipped, invented or\n" +
-			"waived, and this never grants merge authority or CI readiness.\n" +
-			"Refused for: non-terminal runs, an active run on the branch, a head mismatch, a run\n" +
-			"whose PR step did not fail, preserve-history runs, or a head absent from the gate\n" +
-			"(recover custody first). Nothing is pushed and no validation step executes: the\n" +
-			"run's head is already on the remote.\n" +
+			"The daemon verifies the live remote source branch still equals the recorded head, then\n" +
+			"re-drafts and republishes the PR text for that recorded head to the run's recorded\n" +
+			"target branch through the ordinary guarded PR path: the publication validator,\n" +
+			"identifier redaction, and the bounded sanitize-and-retry loop all apply exactly as\n" +
+			"during the run. Recorded step statuses are rendered as they were recorded - no step\n" +
+			"is re-run, skipped, invented or waived, and this never grants merge authority or CI\n" +
+			"readiness.\n" +
+			"Refused for: non-terminal runs, an active run on the branch, a head mismatch, a remote\n" +
+			"source branch that moved past the recorded head (recover custody instead), a run with\n" +
+			"no recorded PR target branch, a run whose PR step did not fail, preserve-history runs,\n" +
+			"or a head absent from the gate (recover custody first). Nothing is pushed, no fresh\n" +
+			"evidence is published, and no validation step executes: the run's head is already on\n" +
+			"the remote.\n" +
 			"Both CLI and daemon must support this operation; an older daemon refuses with no\n" +
 			"fallback or restart.",
 		Args: cobra.NoArgs,

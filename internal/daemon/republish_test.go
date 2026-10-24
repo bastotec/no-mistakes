@@ -18,10 +18,12 @@ import (
 )
 
 // terminalRunWithFailedPR inserts a terminal run whose PR step row records a
-// failure, mirroring what an exhausted publication refusal leaves behind.
+// failure, mirroring what an exhausted publication refusal leaves behind. The
+// run's PR target is pinned to main, as a launch that resolved its target
+// would have recorded.
 func terminalRunWithFailedPR(t *testing.T, d *db.DB, repoID, branch, head string) *db.Run {
 	t.Helper()
-	run, err := d.InsertRun(repoID, branch, head, head)
+	run, err := d.InsertRunWithIntent(repoID, branch, head, head, nil, "main")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +75,7 @@ func TestRepublishPublication_RefusesIneligibleRuns(t *testing.T) {
 			return params
 		}, "recorded head"},
 		{"no-failed-pr-step", func() ipc.RepublishPublicationParams {
-			run, err := d.InsertRun(repo.ID, "green-branch", head, head)
+			run, err := d.InsertRunWithIntent(repo.ID, "green-branch", head, head, nil, "main")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -90,7 +92,7 @@ func TestRepublishPublication_RefusesIneligibleRuns(t *testing.T) {
 			return mkParams(run)
 		}, "no failed PR step"},
 		{"missing-pr-row", func() ipc.RepublishPublicationParams {
-			run, err := d.InsertRun(repo.ID, "no-pr-row-branch", head, head)
+			run, err := d.InsertRunWithIntent(repo.ID, "no-pr-row-branch", head, head, nil, "main")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -107,6 +109,48 @@ func TestRepublishPublication_RefusesIneligibleRuns(t *testing.T) {
 			params.HeadSHA = strings.Repeat("b", 40)
 			return params
 		}, "absent from the gate"},
+		{"no-recorded-target", func() ipc.RepublishPublicationParams {
+			// R7: a run that never pinned a PR target cannot prove where it
+			// published, and re-resolving from live trusted config would let a
+			// later config change redirect an already-validated head.
+			run, err := d.InsertRun(repo.ID, "no-target-branch", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			sr, err := d.InsertStepResult(run.ID, types.StepPR)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.FailStep(sr.ID, "refusing non-compliant PR publication", 10); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunErrorStatus(run.ID, "step pr failed", types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			return mkParams(run)
+		}, "recorded no PR target branch"},
+		{"moved-remote-head", func() ipc.RepublishPublicationParams {
+			// R1: a newer run published a different head on the same branch, so
+			// this run's attestation must not overwrite the newer PR body. The
+			// repo's remote must be ls-remote reachable, so register a repo
+			// whose upstream is a real bare remote and publish a newer head on
+			// the branch than the run's recorded head.
+			bare := filepath.Join(t.TempDir(), "remote.git")
+			gitCmd(t, "", "init", "--bare", bare)
+			work := filepath.Join(t.TempDir(), "work")
+			gitCmd(t, "", "clone", repo.WorkingPath, work)
+			rmt, err := d.InsertRepoWithIDAndFork("republish-moved", work, bare, "", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, work, "push", rmt.UpstreamURL, "HEAD:refs/heads/moved-branch", "HEAD:refs/heads/main")
+			gitCmd(t, work, "commit", "--allow-empty", "-m", "newer head")
+			gitCmd(t, work, "push", "--force", rmt.UpstreamURL, "HEAD:refs/heads/moved-branch")
+			gitCmd(t, "", "init", "--bare", p.RepoDir(rmt.ID))
+			gitCmd(t, p.RepoDir(rmt.ID), "fetch", rmt.UpstreamURL, "refs/heads/moved-branch:refs/heads/moved-branch", "refs/heads/main:refs/heads/main")
+			run := terminalRunWithFailedPR(t, d, rmt.ID, "moved-branch", head)
+			return ipc.RepublishPublicationParams{RepoID: rmt.ID, RunID: run.ID, HeadSHA: head}
+		}, "newer publication owns this branch"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			mgr := NewRunManager(d, p, nil)
@@ -123,6 +167,20 @@ func firstWant(want string) string {
 		return want[:i]
 	}
 	return want
+}
+
+// gitAnyOutput runs git and returns its raw stdout (possibly empty) without
+// the trim-one-newline assumption of gitOutput, for commands that may legally
+// print nothing.
+func gitAnyOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %v failed: %v", args, err)
+	}
+	return string(out)
 }
 
 // learnedPlaceholderForDaemon mirrors the steps package's learned-placeholder
@@ -173,6 +231,46 @@ esac
 	return path
 }
 
+// republishReachableFixture registers a repo whose source branch is verifiable
+// over a real remote: R1's guard ls-remotes the live source branch, so the
+// fixture pushes the head to a real bare remote (recorded as the fork push
+// target) and gives the gate its own copy plus an origin pointing there. The
+// upstream URL keeps a github identity so provider resolution behaves as in
+// production.
+func republishReachableFixture(t *testing.T, p *paths.Paths, d *db.DB, id string, branches ...string) (*db.Repo, string) {
+	t.Helper()
+	base, head := setupTestGitRepo(t, p, d, id+"-base")
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	gitCmd(t, "", "init", "--bare", remote)
+	work := filepath.Join(t.TempDir(), "work")
+	gitCmd(t, "", "clone", base.WorkingPath, work)
+	specs := make([]string, 0, len(branches)+1)
+	specs = append(specs, "HEAD:refs/heads/main")
+	for _, b := range branches {
+		if b == "main" {
+			continue
+		}
+		specs = append(specs, "HEAD:refs/heads/"+b)
+	}
+	gitCmd(t, work, append([]string{"push", remote}, specs...)...)
+	repo, err := d.InsertRepoWithIDAndFork(id, work, base.UpstreamURL, remote, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, "", "init", "--bare", p.RepoDir(repo.ID))
+	fetchSpecs := make([]string, 0, len(branches)+1)
+	fetchSpecs = append(fetchSpecs, "refs/heads/main:refs/heads/main")
+	for _, b := range branches {
+		fetchSpecs = append(fetchSpecs, "refs/heads/"+b+":refs/heads/"+b)
+	}
+	gitCmd(t, p.RepoDir(repo.ID), append([]string{"fetch", remote}, fetchSpecs...)...)
+	// The gate's origin points at the real remote so a run worktree's
+	// trusted-config fetch (which resolves origin's URL) can reach the
+	// default branch.
+	gitCmd(t, p.RepoDir(repo.ID), "remote", "add", "origin", remote)
+	return repo, head
+}
+
 // TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry proves
 // the capability this task exists for: a TERMINAL run whose PR step failed on
 // a publication refusal is republished by the continuation, with the ordinary
@@ -218,11 +316,14 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 	}
 	t.Cleanup(func() { d.Close() })
 
-	repo, head := setupTestGitRepo(t, p, d, "republish-positive")
-	mgr := NewRunManager(d, p, nil)
-	run := terminalRunWithFailedPR(t, d, repo.ID, "feature", head)
+	repo, head := republishReachableFixture(t, p, d, "republish-positive", "feature")
+	rmt := repo
+	run := terminalRunWithFailedPR(t, d, rmt.ID, "feature", head)
 
-	result, err := mgr.HandleRepublishPublication(t.Context(), ipc.RepublishPublicationParams{RepoID: repo.ID, RunID: run.ID, HeadSHA: head})
+	mgr := NewRunManager(d, p, nil)
+	gateRefsBefore := gitOutput(t, p.RepoDir(rmt.ID), "for-each-ref", "--format=%(refname) %(objectname)")
+
+	result, err := mgr.HandleRepublishPublication(t.Context(), ipc.RepublishPublicationParams{RepoID: rmt.ID, RunID: run.ID, HeadSHA: head})
 	if err != nil {
 		t.Fatalf("HandleRepublishPublication = %v, want a sanitized retry to publish", err)
 	}
@@ -252,8 +353,18 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 		t.Fatalf("continuation mutated the terminal run status: %s", stored.Status)
 	}
 	// The throwaway worktree is gone.
-	if _, err := os.Stat(filepath.Join(p.WorktreeDir(repo.ID, run.ID), "republish")); !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(p.WorktreeDir(rmt.ID, run.ID), "republish")); !os.IsNotExist(err) {
 		t.Fatalf("republish worktree survived: %v", err)
+	}
+	// R3: the operation-private refs are gone and the gate's refs (including
+	// its origin/ tracking refs) are byte-identical to before the continuation.
+	for _, ref := range republishPrivateRefs(run.ID) {
+		if out := strings.TrimSpace(gitAnyOutput(t, p.RepoDir(rmt.ID), "for-each-ref", "--format=%(refname)", ref)); out != "" {
+			t.Fatalf("private ref %s survived: %s", ref, out)
+		}
+	}
+	if gateRefsAfter := gitOutput(t, p.RepoDir(rmt.ID), "for-each-ref", "--format=%(refname) %(objectname)"); gateRefsAfter != gateRefsBefore {
+		t.Fatalf("gate refs moved during continuation:\nbefore:\n%s\nafter:\n%s", gateRefsBefore, gateRefsAfter)
 	}
 
 	for _, tc := range []struct {
@@ -267,8 +378,11 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("FAKE_CLI_MODE", "ci-gh")
 			t.Setenv("FAKE_CLI_AUTH_ERR", "authentication expired")
-			run := terminalRunWithFailedPR(t, d, repo.ID, tc.branch, head)
-			result, err := mgr.HandleRepublishPublication(t.Context(), ipc.RepublishPublicationParams{RepoID: repo.ID, RunID: run.ID, HeadSHA: head})
+			// R1 verifies the live source branch before the PR step, so each
+			// case needs its own reachable remote carrying that branch.
+			rrepo, rhead := republishReachableFixture(t, p, d, "republish-skip-"+tc.branch, tc.branch)
+			run := terminalRunWithFailedPR(t, d, rrepo.ID, tc.branch, rhead)
+			result, err := mgr.HandleRepublishPublication(t.Context(), ipc.RepublishPublicationParams{RepoID: rrepo.ID, RunID: run.ID, HeadSHA: rhead})
 			if err == nil || !strings.Contains(err.Error(), tc.want) || result != nil {
 				t.Fatalf("result = %+v, error = %v; want refusal containing %q", result, err, tc.want)
 			}
@@ -279,7 +393,7 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 			if stored.PRURL != nil || stored.Status != types.RunFailed {
 				t.Fatalf("skipped publication changed run: %+v", stored)
 			}
-			if _, err := os.Stat(filepath.Join(p.WorktreeDir(repo.ID, run.ID), "republish")); !os.IsNotExist(err) {
+			if _, err := os.Stat(filepath.Join(p.WorktreeDir(rrepo.ID, run.ID), "republish")); !os.IsNotExist(err) {
 				t.Fatalf("skipped publication worktree survived: %v", err)
 			}
 		})
