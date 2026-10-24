@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/branchsync"
@@ -20,6 +21,26 @@ import (
 )
 
 const staleRisk = "The parser currently loses required records."
+
+func TestPublicationRecoveryTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		agentTimeout time.Duration
+		want         time.Duration
+	}{
+		{name: "default", want: 195 * time.Minute},
+		{name: "explicit default", agentTimeout: config.DefaultAgentTimeout, want: 195 * time.Minute},
+		{name: "negative", agentTimeout: -time.Second, want: 195 * time.Minute},
+		{name: "custom", agentTimeout: 7 * time.Minute, want: 57 * time.Minute},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := PublicationRecoveryTimeout(tc.agentTimeout)
+			if got != tc.want {
+				t.Fatalf("recovery timeout = %s, want %s for all three draft/validation attempts and non-agent work", got, tc.want)
+			}
+		})
+	}
+}
 
 func publicationRecoveryFixture(t *testing.T) (*pipeline.StepContext, string) {
 	t.Helper()

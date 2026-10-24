@@ -262,6 +262,13 @@ func ValidatePublicationRecoveryRecords(sctx *pipeline.StepContext) (*publicatio
 	return &pins, nil
 }
 
+func PublicationRecoveryTimeout(agentTimeout time.Duration) time.Duration {
+	if agentTimeout <= 0 {
+		agentTimeout = config.DefaultAgentTimeout
+	}
+	return time.Duration(maxPRPublicationRepairs+1) * (2*agentTimeout + 5*time.Minute)
+}
+
 // RecoverPublication calls the ordinary PR step, not Push or a new validation
 // pipeline. No validation record is edited. The caller serializes the branch;
 // the step repeats live head/target checks immediately before CreatePR.
