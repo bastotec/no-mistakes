@@ -1436,6 +1436,17 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return mgr.HandlePublishTestPreview(ctx, p)
 	})
 
+	srv.Handle(ipc.MethodRefreshPublication, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.RefreshPublicationParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		return mgr.HandleRefreshPublication(ctx, p)
+	})
+
 	srv.Handle(ipc.MethodRepublishPublication, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err

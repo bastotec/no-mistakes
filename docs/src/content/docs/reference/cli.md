@@ -292,6 +292,22 @@ Refused, with no fallback, for: a non-terminal run; an active run on the branch 
 
 Both CLI and daemon must support this distinct RPC. An older daemon rejects it; there is no publication fallback, automatic restart/update, or rerun substitution.
 
+## no-mistakes axi refresh-publication
+
+Append a separately attributed current-head repair disposition while the same run is still monitoring CI, without re-running validation or answering an approval gate:
+
+```sh
+no-mistakes axi refresh-publication --run <run-id> --pr <recorded-pr-url> --head <full-pushed-head-sha>
+```
+
+All three flags are required. The daemon dispatches the operation through that run's CI monitor between polls, never concurrently with its repairs. The exact repository, run, recorded PR URL, full recorded head, last-pushed head, remote source head and numbered live PR/source identity must agree before publication and again just before the write. A recorded target-branch pin must still agree, and the live target must not change during preparation. It requires raw PR content and exact source-identity support (currently canonical `https://github.com/owner/repo/pull/number` URLs only); unsupported adapters refuse. A single existing pipeline attestation must already name that same head; refresh never inserts or restamps one. Fixing, parked, terminal, mismatched and unreadable identity states refuse without a publication fallback.
+
+The refresh preserves historical PR content and the existing attestation byte-for-byte, including review risk and findings, step statuses, skips and timeouts. It adds or replaces only its own integrity-checked disposition block; an edited block or concurrently changed PR body refuses rather than discarding notes. Owned appendices retain their ownership guard and author text. No source/evidence push, media upload, agent invocation, config/policy fetch, validation replay, history edit, label change or merge authorization occurs. The only external mutation is a body-only update of the recorded PR.
+
+The disposition reports a timestamped live-forge check snapshot and recorded published CI repair rounds. Missing or unreadable checks are inconclusive; failures, pending/unknown checks and skips are not passing tests. Even all passing checks do **not** prove a historical finding fixed, lower review risk, or establish live product behavior. Finding-specific correctness remains unproven by this operation; historical review metadata is not rewritten into a new verdict. It does not set CI readiness. As with other provider body updates, the final identity/body recheck is not a forge-side atomic compare-and-swap.
+
+This is distinct from terminal failed-publication continuation above. Both CLI and the running daemon must support the new RPC; an older daemon refuses without automatic restart/update. The call is bounded to three minutes, including monitor dispatch; inspect status before retrying an interrupted call because a provider may have accepted its write.
+
 ## no-mistakes axi respond
 
 Answer the current approval gate and continue until the next gate, CI-ready decision point, or final outcome.

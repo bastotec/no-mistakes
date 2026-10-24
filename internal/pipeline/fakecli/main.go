@@ -63,6 +63,8 @@ func handleFakeCLI(mode string) {
 	}
 
 	switch mode {
+	case "publication-refresh-gh":
+		fakePublicationRefreshGH(args)
 	case "test-preview-gh":
 		fakeTestPreviewGH(args)
 	case "gh":
