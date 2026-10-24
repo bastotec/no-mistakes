@@ -70,6 +70,16 @@ func WorktreeAddWithoutCallbacks(ctx context.Context, repoDir, wtPath, sha strin
 	return err
 }
 
+func FetchRemoteBranchToRefWithoutCallbacks(ctx context.Context, dir, remote, branch, localRef string) error {
+	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, localRef)
+	args, err := CallbackFreeArgs(ctx, dir, "fetch", "--no-tags", remote, refspec)
+	if err != nil {
+		return err
+	}
+	_, err = Run(ctx, dir, args...)
+	return err
+}
+
 func DiffHeadWithoutCallbacks(ctx context.Context, dir string) (string, error) {
 	args, err := CallbackFreeArgs(ctx, dir, "diff", "--no-ext-diff", "--no-textconv", "--ignore-submodules=all", "HEAD")
 	if err != nil {

@@ -281,11 +281,21 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
 	}
+	callbacksDisabled, err := m.db.GitCallbacksDisabled(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read Git callback policy: %w", err)
+	}
+	fetch := fetchRecoveredRemoteBranch
+	if callbacksDisabled {
+		fetch = func(ctx context.Context, dir, remote, branch string) error {
+			return git.FetchRemoteBranchToRefWithoutCallbacks(ctx, dir, remote, branch, "refs/remotes/"+remote+"/"+branch)
+		}
+	}
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
-		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", repo.DefaultBranch); err != nil {
+		if err := fetch(fetchCtx, workDir, "origin", repo.DefaultBranch); err != nil {
 			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else if sha, err := git.ResolveRef(ctx, workDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
@@ -1393,12 +1403,17 @@ func stageCallerHeadForComparison(ctx context.Context, gateDir, workingPath, cal
 // rewrites clone or gate remote configuration. When the values agree after
 // redaction, origin remains authoritative so embedded credentials retained in
 // the gate can still authenticate without ever entering the database.
-func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) error {
+func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo, callbacksDisabled bool) error {
+	remote := repo.UpstreamURL
 	originURL, err := git.GetRemoteURL(ctx, workDir, "origin")
 	if !repo.URLsVerified || (err == nil && safeurl.Redact(originURL) == repo.UpstreamURL) {
-		return git.FetchRemoteBranch(ctx, workDir, "origin", repo.DefaultBranch)
+		remote = "origin"
 	}
-	return git.FetchRemoteBranchToRef(ctx, workDir, repo.UpstreamURL, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
+	fetch := git.FetchRemoteBranchToRef
+	if callbacksDisabled {
+		fetch = git.FetchRemoteBranchToRefWithoutCallbacks
+	}
+	return fetch(ctx, workDir, remote, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
@@ -1681,8 +1696,9 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("carry_survived_work")
 		return "", fmt.Errorf("carry interrupted repair work: %w", err)
 	}
+	callbacksDisabled := ctx.Value(confinedRunLaunchKey{}) == true || ctx.Value(isolatedTestLaunchKey{}) == true
 	worktreeAdd := git.WorktreeAdd
-	if ctx.Value(confinedRunLaunchKey{}) == true || ctx.Value(isolatedTestLaunchKey{}) == true {
+	if callbacksDisabled {
 		worktreeAdd = git.WorktreeAddWithoutCallbacks
 	}
 	if err := worktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
@@ -1726,7 +1742,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// branch has already removed - silently running stale shell.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
-		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo)
+		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo, callbacksDisabled)
 		if fetchErr != nil {
 			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
 		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
