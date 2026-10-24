@@ -309,7 +309,7 @@ func TestReviewBoundedApprovalLifecycleReachesPublicationGuard(t *testing.T) {
 						if !strings.Contains(pipelineMD, "original concern is not certified as repaired") || !strings.Contains(riskLine, "original concern is not certified as repaired") || strings.Contains(pipelineMD+riskLine, privateSentinel) || strings.Contains(pipelineMD+riskLine, "Accept diagnostic intermediate only") {
 							t.Fatalf("later=%v provider=%s owned=%v: inaccurate public scope:\n%s\nRisk: %s", laterRun, provider, owned, pipelineMD, riskLine)
 						}
-						if laterRun && (!strings.Contains(pipelineMD, "earlier run "+firstRunID) || !strings.Contains(riskLine, "earlier run "+firstRunID) || !strings.Contains(riskLine, "not certification of the current head") || !strings.Contains(riskLine, "current follow-up risk") || strings.Contains(riskLine, "independent residual risk") || strings.Contains(pipelineMD, "✅ No issues found.")) {
+						if laterRun && (!strings.Contains(pipelineMD, "earlier run (historical decision, not certification of the current head)") || !strings.Contains(riskLine, "earlier run (historical decision, not certification of the current head)") || strings.Contains(pipelineMD+riskLine, firstRunID) || !strings.Contains(riskLine, "current follow-up risk") || strings.Contains(riskLine, "independent residual risk") || strings.Contains(pipelineMD, "✅ No issues found.")) {
 							t.Fatalf("historical decision became current certification:\n%s\nRisk: %s", pipelineMD, riskLine)
 						}
 					}

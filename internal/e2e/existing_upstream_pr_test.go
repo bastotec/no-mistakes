@@ -268,12 +268,12 @@ func TestExistingUpstreamPRAssociationJourney(t *testing.T) {
 	// Every write reached the upstream pull request, by number.
 	var sawUpstreamEdit bool
 	for _, inv := range w.ghInvocations(t) {
-		if len(inv.Args) >= 3 && inv.Args[0] == "pr" && inv.Args[1] == "edit" && inv.Args[2] == existingPRNumber && inv.Repo == existingPRUpstreamRepo {
+		if len(inv.Args) >= 3 && inv.Args[0] == "pr" && inv.Args[1] == "edit" && inv.Args[2] == existingPRNumber && inv.Repo == "github.com/"+existingPRUpstreamRepo {
 			sawUpstreamEdit = true
 		}
 	}
 	if !sawUpstreamEdit {
-		t.Fatalf("no `gh pr edit %s --repo %s` in the stub log: %+v", existingPRNumber, existingPRUpstreamRepo, w.ghInvocations(t))
+		t.Fatalf("no `gh pr edit %s --repo github.com/%s` in the stub log: %+v", existingPRNumber, existingPRUpstreamRepo, w.ghInvocations(t))
 	}
 
 	// The author's title and narrative survive; the run only appends.

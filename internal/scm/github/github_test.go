@@ -1558,7 +1558,7 @@ func TestFindPRRejectsURLForDifferentRepository(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh pr list --head feature/refactor --base main --repo parent/repo --state open --json number,url,baseRefName": {
+		"gh pr list --head feature/refactor --base main --repo github.com/parent/repo --state open --json number,url,baseRefName": {
 			stdout: `[{"number":42,"url":"https://github.com/other/repo/pull/42","baseRefName":"main"}]` + "\n",
 		},
 	}), nil, "github.com", "parent/repo")

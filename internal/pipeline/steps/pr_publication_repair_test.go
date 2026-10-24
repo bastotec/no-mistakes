@@ -210,10 +210,9 @@ func TestPRPublicationRepairLearnsOnlyPrivacyLiterals(t *testing.T) {
 	}
 }
 
-// Regression for run 01M5MMEPDZ5K14XG3ENEJZ76R1: the Review history quoted a
-// repair-budget finding carrying the run's own id, and the validator refused
-// publication. The generated history must reach the validator and the forge
-// with the id already gone.
+// Representative generated repair-budget history must reach the validator and
+// the forge without its private run id. Arbitrary findings are literal evidence,
+// so use the generated finding's real identity and category here.
 func TestPRStep_RedactsRunIDFromGeneratedReviewHistory(t *testing.T) {
 	t.Parallel()
 	dir, baseSHA, headSHA := setupGitRepo(t)
@@ -230,7 +229,12 @@ func TestPRStep_RedactsRunIDFromGeneratedReviewHistory(t *testing.T) {
 			return nil, err
 		}
 		verdict := prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}}
-		if strings.Contains(opts.Prompt, runID) {
+		_, raw, found := strings.Cut(opts.Prompt, "Run-written PR content JSON:\n")
+		var final prContent
+		if !found || json.NewDecoder(strings.NewReader(raw)).Decode(&final) != nil {
+			t.Fatal("validator did not receive exact final content")
+		}
+		if strings.Contains(final.Title+final.Body, runID) {
 			verdict.Issues = []string{"The Pipeline section exposes the internal run identifier `" + runID + "`."}
 		}
 		payload, _ := json.Marshal(verdict)
@@ -243,7 +247,7 @@ func TestPRStep_RedactsRunIDFromGeneratedReviewHistory(t *testing.T) {
 	if err := sctx.DB.UpdateStepStatus(review.ID, types.StepStatusCompleted); err != nil {
 		t.Fatal(err)
 	}
-	findings := `{"findings":[{"id":"repair-authority","severity":"warning","description":"Automatic repair authority exhausted for review; approve or abort after reviewing the remaining findings (run ` + runID + `)."}],"summary":"budget exhausted"}`
+	findings := `{"findings":[{"id":"repair-budget-review","category":"repair-budget","severity":"warning","action":"ask-user","description":"Automatic repair budget exhausted for review: consumed 2 repairs, current authority limit 2, configured automatic maximum 2. No further repair is authorized by the configured ceiling; approve or abort after reviewing the remaining findings (run ` + runID + `)."}],"summary":"budget exhausted"}`
 	if err := sctx.DB.SetStepFindings(review.ID, findings); err != nil {
 		t.Fatal(err)
 	}
@@ -265,8 +269,24 @@ func TestPRStep_RedactsRunIDFromGeneratedReviewHistory(t *testing.T) {
 	if strings.Contains(ghLog, runID) {
 		t.Fatalf("published PR text still carries the run id:\n%s", ghLog)
 	}
-	if !strings.Contains(ghLog, "(run "+runIDPlaceholder+")") {
-		t.Fatalf("review history lost the redacted finding:\n%s", ghLog)
+	if !strings.Contains(ghLog, "consumed 2 repairs") || !strings.Contains(ghLog, "approve or abort after reviewing the remaining findings.") {
+		t.Fatalf("review history lost the budget or authority evidence:\n%s", ghLog)
+	}
+	rows, err := sctx.DB.GetStepsByRun(runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, row := range rows {
+		if row.ID == review.ID && (row.FindingsJSON == nil || *row.FindingsJSON != findings) {
+			t.Fatal("publication changed immutable findings")
+		}
+	}
+	rounds, err := sctx.DB.GetRoundsByStep(review.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rounds) != 1 || rounds[0].FindingsJSON == nil || *rounds[0].FindingsJSON != findings {
+		t.Fatal("publication changed immutable review history")
 	}
 }
 

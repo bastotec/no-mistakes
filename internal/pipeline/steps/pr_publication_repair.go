@@ -104,8 +104,9 @@ func insidePublishedURL(text string, i int) bool {
 // prPublicationRefusal is the validator's verdict that run-written PR text is
 // not publishable. No pull request was opened or edited when it is returned.
 type prPublicationRefusal struct {
-	issues []string
-	detail string
+	issues      []string
+	detail      string
+	recoverable bool
 }
 
 func (e *prPublicationRefusal) Error() string {

@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS runs (
     updated_at           INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS publication_intents (
+    run_id TEXT NOT NULL REFERENCES runs(id) ON DELETE CASCADE,
+    head_sha TEXT NOT NULL,
+    intent_json TEXT NOT NULL,
+    refusal TEXT,
+    PRIMARY KEY (run_id, head_sha)
+);
+
 CREATE TABLE IF NOT EXISTS run_test_previews (
     run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
     pr_url TEXT NOT NULL,
@@ -277,6 +285,8 @@ CREATE TABLE IF NOT EXISTS uncertified_pipeline_ranges (
 // were created before the referenced columns existed. Each statement must be
 // idempotent via its error being tolerated when the column already exists.
 var migrationStatements = []string{
+	// Existing runs are deliberately ineligible, even when objects survive.
+	`ALTER TABLE runs ADD COLUMN publication_recovery_eligible INTEGER NOT NULL DEFAULT 0`,
 	`ALTER TABLE run_test_previews ADD COLUMN validated_head TEXT`,
 	`ALTER TABLE repos ADD COLUMN fork_url TEXT`,
 	`ALTER TABLE step_rounds ADD COLUMN selected_finding_ids TEXT`,

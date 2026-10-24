@@ -88,7 +88,11 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		fields = append(fields, toon.Field{Key: "current_branch", Value: branch})
 	}
 	fields = append(fields, runObjectFieldWithKey(runKey, rv))
-	if syncField := cachedBranchSyncField(cmd, run.ID); syncField != nil {
+	cached := observeCachedBranchSync(cmd)
+	if runID != "" {
+		fields = append(fields, selectedRunCustodyField(env.d, run, cached))
+	}
+	if syncField := cached.fieldForRun(run.ID); syncField != nil {
 		fields = append(fields, *syncField)
 	}
 	if gate, ok := rv.awaitingStep(); ok {

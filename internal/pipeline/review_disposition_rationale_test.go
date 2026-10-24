@@ -18,7 +18,7 @@ func TestReviewDispositionRationaleNeverCallsCarriedFindingsClean(t *testing.T) 
 	if strings.Contains(f.RiskRationale, types.NoActionableFindingRationale) {
 		t.Fatalf("rationale still claims nothing actionable survived: %q", f.RiskRationale)
 	}
-	if !strings.HasPrefix(f.RiskRationale, "unresolved error R1: Knows is missing on the phone") || !strings.HasSuffix(f.RiskRationale, "the latest rereview raised no new actionable finding") || f.RiskLevel != "high" {
+	if !strings.HasPrefix(f.RiskRationale, `carried error R1 (current validity not reverified): "Knows is missing on the phone"`) || !strings.HasSuffix(f.RiskRationale, "the latest rereview raised no new actionable finding") || f.RiskLevel != "high" {
 		t.Fatalf("rationale = %q (risk %s), want the carried error first and the rereview scoped", f.RiskRationale, f.RiskLevel)
 	}
 
@@ -42,7 +42,7 @@ func TestReviewDispositionRationaleNeverCallsCarriedFindingsClean(t *testing.T) 
 func TestReviewDispositionRationaleBoundaries(t *testing.T) {
 	carried := []types.Finding{{ID: "R1", Severity: "error", Action: types.ActionAskUser, Description: "Missing phone action"}}
 	fixed := []types.Finding{{ID: "R2", Severity: "error", Action: types.ActionAutoFix, Description: "Repair committed"}}
-	const unresolved = "unresolved error R1: Missing phone action"
+	const unresolved = `carried error R1 (current validity not reverified): "Missing phone action"`
 	const uncertified = "fixes committed without rereview; their correctness is not certified"
 	const clean = "; the latest rereview raised no new actionable finding"
 	for _, tc := range []struct {

@@ -653,20 +653,32 @@ func branchSyncField(state branchsync.State) toON.Field {
 	return toON.Field{Key: "branch_sync", Value: toON.NewObject(fields...)}
 }
 
-func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
+type cachedBranchSyncObservation struct {
+	repoID string
+	state  branchsync.State
+}
+
+func observeCachedBranchSync(ctxCmd *cobra.Command) *cachedBranchSyncObservation {
 	service, closeFn, err := openSyncService()
 	if err != nil {
 		return nil
 	}
 	defer closeFn()
-	state := service.InspectCached(ctxCmd.Context())
-	if runID != "" && state.Pipeline.RunID != runID {
+	return &cachedBranchSyncObservation{repoID: service.Repo.ID, state: service.InspectCached(ctxCmd.Context())}
+}
+
+func cachedBranchSyncField(ctxCmd *cobra.Command, runID string) *toON.Field {
+	return observeCachedBranchSync(ctxCmd).fieldForRun(runID)
+}
+
+func (cached *cachedBranchSyncObservation) fieldForRun(runID string) *toON.Field {
+	if cached == nil || (runID != "" && cached.state.Pipeline.RunID != runID) {
 		return nil
 	}
-	if !relevantCachedSyncState(state) {
+	if !relevantCachedSyncState(cached.state) {
 		return nil
 	}
-	field := branchSyncField(state)
+	field := branchSyncField(cached.state)
 	return &field
 }
 
