@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.78.0](https://github.com/bastotec/no-mistakes/compare/v1.77.0...v1.78.0) (2026-10-24)
+
+
+### Features
+
+* **daemon:** continue failed terminal PR publication without rerunning validation ([#57](https://github.com/bastotec/no-mistakes/issues/57)) ([997828e](https://github.com/bastotec/no-mistakes/commit/997828eddcc759c70c2b49f1999c65eb9e360c24))
+* **pipeline:** add opt-in isolation for the whole Test process tree ([#41](https://github.com/bastotec/no-mistakes/issues/41)) ([c2f7656](https://github.com/bastotec/no-mistakes/commit/c2f76564f834c85759b7ec21751b071de1c7a35f))
+* **pipeline:** publish run-owned PR previews before Test ([#38](https://github.com/bastotec/no-mistakes/issues/38)) ([2632828](https://github.com/bastotec/no-mistakes/commit/263282826a7ba9951b115a6933bf20dcb39ff665))
+
+
+### Bug Fixes
+
+* allow one explicit repair beyond automatic limits ([#34](https://github.com/bastotec/no-mistakes/issues/34)) ([12739f4](https://github.com/bastotec/no-mistakes/commit/12739f405ca73dc757db518b245d1cededd48b4c))
+* **branchsync:** allow guarded sync of published fixes after PR closure ([#40](https://github.com/bastotec/no-mistakes/issues/40)) ([1c6d8b5](https://github.com/bastotec/no-mistakes/commit/1c6d8b585b833bfe98576057287a036f7339715a))
+* **branchsync:** skip superseded preflight failures during sync selection ([#56](https://github.com/bastotec/no-mistakes/issues/56)) ([393895a](https://github.com/bastotec/no-mistakes/commit/393895acd02511e37bf3f8d7e0405e76abf19412))
+* **daemon:** preserve managed Test preview ownership across replacement launches ([#39](https://github.com/bastotec/no-mistakes/issues/39)) ([66876ce](https://github.com/bastotec/no-mistakes/commit/66876ceb66fe1f41e91a02cf5a383fc353cae699))
+* **db:** handle SQLite write contention without stranding runs ([#36](https://github.com/bastotec/no-mistakes/issues/36)) ([4c5f06d](https://github.com/bastotec/no-mistakes/commit/4c5f06d79437f173aee3a035f5d2203caaa2d35d))
+* **pipeline:** align final review prose with repair disposition ([#42](https://github.com/bastotec/no-mistakes/issues/42)) ([ad93008](https://github.com/bastotec/no-mistakes/commit/ad930085ef2d7548f9d329dc09d240a7fefbf9e1))
+* **pipeline:** distinguish fixed findings from current PR claims ([87180da](https://github.com/bastotec/no-mistakes/commit/87180dacffedd82f0691a2018e48037293fa054d))
+* **pipeline:** give review errors one extra round at the cap ([4f7970c](https://github.com/bastotec/no-mistakes/commit/4f7970c0faa33e9a11b6dd6c88b34376d5458107))
+* **pipeline:** preserve bounded approval context in PR publication ([#43](https://github.com/bastotec/no-mistakes/issues/43)) ([9a35b69](https://github.com/bastotec/no-mistakes/commit/9a35b6906c44abb935b25737092b94a1c2c14cb9))
+* **pipeline:** preserve interrupted repair work across fix rounds ([#20](https://github.com/bastotec/no-mistakes/issues/20)) ([6751307](https://github.com/bastotec/no-mistakes/commit/67513079ad2f06cd282f9ffd53895dc46613e1c1))
+* **pipeline:** prevent unattended approval of red CI gates ([d6e1a2e](https://github.com/bastotec/no-mistakes/commit/d6e1a2ebf074d789ac1a478496da9c5ee2d2b9b3))
+* **pipeline:** prioritize carried findings in review risk rationale ([8d5ed10](https://github.com/bastotec/no-mistakes/commit/8d5ed10ce7517f4989cf2eb1344d9e5ad47cd646))
+* **pipeline:** resume CI watches after daemon restarts ([45ab5a3](https://github.com/bastotec/no-mistakes/commit/45ab5a3422f20846cee033d1ebc405929a7e49de))
+* **pipeline:** sanitizes and retries PR text the publication guard rejects ([e6624fb](https://github.com/bastotec/no-mistakes/commit/e6624fb072e9e029d727948640e441e9474ac418))
+* **pipeline:** tolerate non-correctness finder timeouts ([#32](https://github.com/bastotec/no-mistakes/issues/32)) ([7f036a0](https://github.com/bastotec/no-mistakes/commit/7f036a0158b0e3fefc80c61435f6a2ed50bdf521))
+
 ## [1.77.0](https://github.com/bastotec/no-mistakes/compare/v1.76.0...v1.77.0) (2026-10-14)
 
 
