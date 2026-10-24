@@ -643,7 +643,7 @@ The key is matched against the checkout path recorded at `init`. After moving a 
 
 Maximum automatic follow-up repair attempts per step. Set a step to `0` to disable automatic follow-up repairs, not explicitly authorized fixes; findings then pause for a decision. The [auto-fix loop](/no-mistakes/concepts/auto-fix/#how-it-works) owns durable repair counting, one-repair manual grants, and exhaustion behavior, including repository-declared custom gates.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
-For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings then pause for approval instead of starting another automatic fix loop.
+For agent-driven lint's initial repair and approval behavior, see [Document/Lint](/no-mistakes/reference/pipeline-steps/#document).
 
 |      |          |
 | ---- | -------- |
@@ -710,7 +710,7 @@ A route is passed as the agent's model for that one invocation, so it must be a 
 For route failures and verification outcomes, see [Review](/no-mistakes/reference/pipeline-steps/#review).
 A repository's trusted [`review.routes`](/no-mistakes/reference/repo-config/#reviewroutes) overrides these field by field. How much review a change gets is the repository's [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing).
 
-For [`axi run --isolate`](/no-mistakes/reference/cli/#offline-run-confinement), all review route overrides are cleared at the worker boundary: every reviewer, finder and verifier uses the single authorized [`NM_TEST_MODEL`](/no-mistakes/reference/environment/#opt-in-test-isolation). Review sizing, effort, turn limits and deadlines are preserved; the bridge's model allowlist is not expanded.
+For [`axi run --isolate`](/no-mistakes/reference/cli/#offline-run-confinement), all review route overrides are cleared at the worker boundary: the reviewer uses the single authorized [`NM_TEST_MODEL`](/no-mistakes/reference/environment/#opt-in-test-isolation). The confined sizing exception is documented under [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing); the bridge's model allowlist is not expanded.
 
 ### ci.rerun_transient
 

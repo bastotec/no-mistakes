@@ -276,24 +276,26 @@ func TestConfinedRunPublicationRefusesBeforeNativeOperations(t *testing.T) {
 	}
 }
 
-func TestConfinedReviewConfigKeepsSizingButDropsModelRoutes(t *testing.T) {
+func TestConfinedReviewConfigPinsMediumBoundsAndDropsModelRoutes(t *testing.T) {
 	src := &config.Config{Review: config.Review{MaxRounds: 2, Routes: config.ReviewRoutesRaw{Light: "other/light", Finders: []string{"other/finder"}, Verify: "other/verify"}}}
+	// The single-use model channel requires a sequential medium review, even
+	// when the ordinary run would select a lighter or multi-angle profile.
+	expected := planReview(config.ReviewSizing{Fixed: config.ReviewEffortMedium}, config.ReviewRoutesRaw{}, nil, nil)
 	for _, level := range []string{config.ReviewEffortLow, config.ReviewEffortHigh, config.ReviewEffortMax} {
 		src.Review.Sizing.Fixed = level
 		cfg := confinedRunConfig(src)
 		plan := planReview(cfg.Review.Sizing, cfg.Review.Routes, nil, nil)
-		ordinary := planReview(src.Review.Sizing, src.Review.Routes, nil, nil)
-		if plan.Effort != level || plan.VerifyCap != ordinary.VerifyCap || len(plan.Dimensions) != len(ordinary.Dimensions) || cfg.Review.MaxRounds != 2 {
-			t.Fatalf("review sizing changed: %+v", plan)
+		if plan.Effort != config.ReviewEffortMedium || plan.multiAngle() || plan.VerifyCap != 0 || cfg.Review.MaxRounds != 2 {
+			t.Fatalf("confined review lost sequential sizing or round bounds: %+v", plan)
 		}
-		if plan.Tuning != nil && (plan.Tuning.Model != "" || plan.Tuning.Effort != ordinary.Tuning.Effort || plan.Tuning.MaxTurns != ordinary.Tuning.MaxTurns || plan.Tuning.DeadlineSecs != ordinary.Tuning.DeadlineSecs) {
-			t.Fatalf("light tuning escaped the pinned model or changed bounds: %+v", plan.Tuning)
+		if plan.Tuning == nil || plan.Tuning.Model != "" || plan.Tuning.Effort != expected.Tuning.Effort || plan.Tuning.MaxTurns != expected.Tuning.MaxTurns || plan.Tuning.DeadlineSecs != expected.Tuning.DeadlineSecs {
+			t.Fatalf("sequential tuning escaped the pinned model or changed medium bounds: %+v", plan.Tuning)
 		}
-		if len(cfg.Review.Routes.Finders) != 0 || plan.FinderTuning.Model != "" || plan.VerifyTuning.Model != "" || plan.FinderTuning.MaxTurns != ordinary.FinderTuning.MaxTurns || plan.VerifyTuning.MaxTurns != ordinary.VerifyTuning.MaxTurns {
-			t.Fatalf("multi-angle tuning escaped the pinned model or changed bounds: %+v", plan)
+		if cfg.Review.Routes.Light != "" || len(cfg.Review.Routes.Finders) != 0 || cfg.Review.Routes.Verify != "" || plan.FinderTuning.Model != "" || plan.VerifyTuning.Model != "" {
+			t.Fatalf("confined review retained model routes: %+v", cfg.Review.Routes)
 		}
-	}
-	if src.Review.Routes.Light != "other/light" || len(src.Review.Routes.Finders) != 1 {
-		t.Fatal("ordinary review routes mutated")
+		if src.Review.Sizing.Fixed != level || src.Review.Routes.Light != "other/light" || len(src.Review.Routes.Finders) != 1 || src.Review.Routes.Verify != "other/verify" {
+			t.Fatal("ordinary review sizing or routes mutated")
+		}
 	}
 }
