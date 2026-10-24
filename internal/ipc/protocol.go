@@ -16,8 +16,9 @@ const (
 	// A distinct method prevents an older daemon from silently ignoring the
 	// history contract. This path imports locally; it never fires a gate hook.
 	MethodStartHistoryRun = "start_history_run"
+	// Distinct RPC: older daemons must refuse, not use their default timeout.
+	MethodStartDocumentRun = "start_document_run"
 	// Distinct RPC: older daemons must refuse, not launch an ordinary Test.
-	MethodStartDocumentRun     = "start_document_run"
 	MethodStartIsolatedTestRun = "start_isolated_test_run"
 	// Distinct RPC for whole-run confinement: an older daemon must refuse
 	// rather than launch an unconfined run (same reason as above).

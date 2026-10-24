@@ -688,8 +688,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return state
 	}
 	// A branch released by its terminal outcome is already the operator's:
-	// nothing pipeline-created exists to recover, so recovery is an idempotent
-	// no-op that mutates no file, ref, or database row.
+	// there is no unpublished committed head to recover, so this is an idempotent
+	// no-op that mutates no file, ref, or database row. Any retained dirty
+	// Document worktree still requires separate preservation; this does not adopt it.
 	if state.State == StateUserOwned {
 		state.Recovered = true
 		state.Changed = false
@@ -2646,6 +2647,10 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	if archiveProof.available {
 		return archiveProof
 	}
+	// Keep-local retains both histories instead of adopting the preserved head,
+	// so it does not need a containment proof. For a clean caller present in
+	// the mirror, require the exact terminal anchor, an unchanged mirror branch,
+	// and a single eligible run so unrelated gate work cannot authorize release.
 	anchoredTerminalMirror := false
 	if terminalRunStatus(run.Status) && run.TerminalHeadVerifiedAt != nil && gateAvailable && state.Local.Clean && !objectExists(ctx, s.workDir(), preserved) {
 		anchor, anchorExists, anchorErr := git.DirectRefTarget(ctx, gateDir, custody.RecoveryRef(run.ID))

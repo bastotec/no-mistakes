@@ -220,7 +220,7 @@ Updates matching documentation for code changes and reports only unresolved gaps
 - Includes user intent when available
 - Returns findings only for unresolved documentation gaps or human judgment calls
 - Requires approval whenever any unresolved documentation finding is returned, including `info` findings
-- Bounds the documentation (and combined housekeeping) agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely
+- Bounds the documentation (and combined housekeeping) agent with [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout), unless this run pins a [Document-only timeout](/no-mistakes/reference/cli/#run-scoped-document-timeout): an expired budget cancels the agent and fails the step with a timeout diagnostic rather than leaving the run active indefinitely. [Daemon retention rules](/no-mistakes/concepts/daemon/#what-it-does) govern partial work left by a failed pass.
 
 **Auto-fix:** documentation fixes happen during the initial document pass. Unresolved findings pause for approval instead of starting another automatic document/fix loop. If you manually trigger a fix from the TUI or AXI interface, the agent receives the selected previous findings plus any per-finding user notes, any selected user-authored findings, and the shared [finding decision history](#finding-decision-history).
 
