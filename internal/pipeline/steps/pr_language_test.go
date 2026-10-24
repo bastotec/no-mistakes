@@ -245,24 +245,21 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 			const commandBody = "./check --scope 'revisão'\nresult=aprovado"
 			evidenceRoot := t.TempDir()
 			path := writeTempEvidenceFile(t, evidenceRoot, "aprovação.log", []byte(fileBody))
+			captionTranslations := 0
 			ag := &mockAgent{name: "test", translationFn: func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
 				raw := strings.SplitN(opts.Prompt, prProseInputPrefix, 2)
 				var sources []string
 				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &sources) != nil {
 					t.Fatal("missing publication prose")
 				}
-				found := false
 				for i, source := range sources {
 					if strings.Contains(source, "RAW_FILE:") || source == logBody || source == commandBody {
 						t.Fatal("literal evidence reached translation")
 					}
 					if source == caption {
 						sources[i] = english
-						found = true
+						captionTranslations++
 					}
-				}
-				if !found {
-					t.Fatal("artifact caption omitted from translation")
 				}
 				payload, _ := json.Marshal(map[string]any{"translations": sources})
 				return &agent.Result{Output: payload}, nil
@@ -364,10 +361,16 @@ func TestPRWriterTranslatesArtifactCaptionsWithoutChangingLiteralEvidence(t *tes
 			if provider == scm.ProviderGitHub && !strings.Contains(content.Body, attestation) {
 				t.Fatal("publication changed machine attestation")
 			}
-			if err := translatePRRenderProse(sctx, beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}); err != nil {
+			artifacts, err := translatePRRenderProse(sctx, beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds})
+			if err != nil {
 				t.Fatal(err)
 			}
-			full := html.UnescapeString(BuildTestingSummaryForPR(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, sctx.Repo.UpstreamURL, head, dir, evidenceRoot, nil))
+			if captionTranslations != 2 {
+				t.Fatalf("artifact caption omitted from translation: %d", captionTranslations)
+			}
+			full := html.UnescapeString(buildTestingSummary(beforeSteps, map[string][]*db.StepRound{sr.ID: beforeRounds}, testingSummaryOptions{
+				includeTestedDetails: true, repoRoot: dir, evidenceRoot: evidenceRoot, artifacts: artifacts,
+			}))
 			if strings.Count(full, caption) != 9 || strings.Count(full, english) != 5 {
 				t.Fatalf("noncompact renderer mixed authored captions with literal output: %s", full)
 			}
@@ -406,7 +409,7 @@ func TestPRLiteralEvidenceTracksFinalRedactionAndOmission(t *testing.T) {
 	raw := string(payload)
 	steps := []*db.StepResult{{ID: "test", StepName: types.StepTest, Status: types.StepStatusCompleted, FindingsJSON: &raw}}
 	var evidence []prLiteralEvidence
-	testingMD := buildPRTestingSummary(steps, nil, "", "", "", "", nil, scm.ProviderGitHub, nil, &evidence)
+	testingMD := buildPRTestingSummary(steps, nil, "", "", "", "", nil, scm.ProviderGitHub, nil, nil, &evidence)
 	for _, includeTesting := range []bool{true, false} {
 		section := ""
 		if includeTesting {
@@ -448,10 +451,15 @@ func TestPRWriterDeduplicatesArtifactsBeforeCaptionProjection(t *testing.T) {
 		name                  string
 		firstSize, secondSize int
 		sanitizedDuplicate    bool
+		labels                [2]string
+		captionKeysConverge   bool
 	}{
 		{name: "16 KiB duplicate then 1 KiB caption", firstSize: 16 * 1024, secondSize: 1024},
 		{name: "12 KiB duplicate then 12 KiB caption", firstSize: 12 * 1024, secondSize: 12 * 1024},
 		{name: "sanitized duplicate then caption", firstSize: 16 * 1024, secondSize: 1024, sanitizedDuplicate: true},
+		{name: "translated 16 KiB duplicate then 1 KiB caption", firstSize: 16 * 1024, secondSize: 1024, labels: [2]string{"Log", "Registro"}},
+		{name: "translated 12 KiB duplicate then 12 KiB caption", firstSize: 12 * 1024, secondSize: 12 * 1024, labels: [2]string{"Log de teste", "Test log"}},
+		{name: "caption translation preserves budgeted sequence", firstSize: 16 * 1024, secondSize: 1024, captionKeysConverge: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			dir, base, head := setupGitRepo(t)
@@ -468,33 +476,40 @@ func TestPRWriterDeduplicatesArtifactsBeforeCaptionProjection(t *testing.T) {
 				if len(raw) != 2 || json.Unmarshal([]byte(raw[1]), &sources) != nil {
 					t.Fatal("missing publication prose")
 				}
-				found := false
 				for i, source := range sources {
 					if source == firstBody || source == secondBody {
 						t.Fatal("embedded file bytes reached translation")
 					}
-					if source == caption {
+					switch source {
+					case caption:
 						sources[i] = english
-						found = true
+					case "Registro":
+						sources[i] = "Log"
+					case "Log de teste":
+						sources[i] = "Test log"
 					}
-				}
-				if !found {
-					t.Fatal("duplicate artifacts exhausted caption projection budget")
 				}
 				payload, _ := json.Marshal(map[string]any{"translations": sources})
 				return &agent.Result{Output: payload}, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
 			sctx.EvidenceDir = evidenceRoot
-			duplicateLabel := "Shared log"
+			firstLabel, duplicateLabel := "Shared log", "Shared log"
 			if tc.sanitizedDuplicate {
 				duplicateLabel = " Shared log "
+			}
+			if tc.labels[0] != "" {
+				firstLabel, duplicateLabel = tc.labels[0], tc.labels[1]
+			}
+			firstCaption, duplicateCaption := "", ""
+			if tc.captionKeysConverge {
+				firstCaption, duplicateCaption = caption, english
 			}
 			payload, _ := json.Marshal(map[string]any{
 				"items": []any{}, "testing_summary": "Verified review-only scope.",
 				"artifacts": []any{
-					map[string]string{"kind": "log", "label": "Shared log", "path": firstPath},
-					map[string]string{"kind": "log", "label": duplicateLabel, "path": firstPath},
+					map[string]string{"kind": "log", "label": firstLabel, "path": firstPath, "content": firstCaption},
+					map[string]string{"kind": "log", "label": duplicateLabel, "path": firstPath, "content": duplicateCaption},
 					map[string]string{"kind": "log", "label": "Captioned log", "path": secondPath, "content": caption},
 					map[string]string{"kind": "command-output", "label": "Literal output", "path": "artifacts/captured.log", "content": caption},
 				},
@@ -518,12 +533,16 @@ func TestPRWriterDeduplicatesArtifactsBeforeCaptionProjection(t *testing.T) {
 				t.Fatal(err)
 			}
 			body := html.UnescapeString(content.Body)
-			if strings.Count(body, english) != 1 || strings.Count(body, caption) != 1 {
+			wantCaptionCount, wantFirstCount, wantSecondCount := 1, 1, 1
+			if tc.captionKeysConverge {
+				wantCaptionCount, wantFirstCount, wantSecondCount = 2, 2, 0
+			}
+			if strings.Count(body, english) != wantCaptionCount || strings.Count(body, caption) != wantCaptionCount {
 				t.Fatal("final body failed to translate the caption independently of identical literal output")
 			}
-			for _, literal := range []string{firstBody, secondBody} {
-				if strings.Count(body, literal) != 1 {
-					t.Fatal("final body did not embed each distinct file exactly once")
+			for literal, want := range map[string]int{firstBody: wantFirstCount, secondBody: wantSecondCount} {
+				if strings.Count(body, literal) != want {
+					t.Fatal("final body did not preserve the budgeted evidence sequence")
 				}
 			}
 			afterSteps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)

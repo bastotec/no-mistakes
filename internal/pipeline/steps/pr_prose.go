@@ -20,7 +20,7 @@ var prProseTranslationSchema = json.RawMessage(`{
  },"required":["translations"]
 }`)
 
-func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, rounds map[string][]*db.StepRound) error {
+func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, rounds map[string][]*db.StepRound) ([]types.TestArtifact, error) {
 	var fields []*string
 	add := func(field *string) {
 		if strings.TrimSpace(*field) != "" {
@@ -51,18 +51,8 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 		}
 		add(&findings.TestingSummary)
 		add(&findings.RiskRationale)
-		artifactOpts := testingSummaryOptions{repoRoot: sctx.WorkDir, evidenceRoot: testEvidenceDir(sctx)}
-		findings.Artifacts = appendTestingArtifacts(nil, map[string]bool{}, *target, artifactOpts)
-		artifactState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
 		for i := range findings.Artifacts {
-			artifact := &findings.Artifacts[i]
-			add(&artifact.Label)
-			rendered := *artifact
-			_, hasFile := embeddedArtifactText(rendered, artifactOpts, &artifactState)
-			if !hasFile && artifactInlineContentIsLiteral(rendered) {
-				continue
-			}
-			add(&artifact.Content)
+			add(&findings.Artifacts[i].Label)
 		}
 		for i := range findings.Scenarios {
 			add(&findings.Scenarios[i].Name)
@@ -86,6 +76,44 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 			addFindings(&round.FindingsJSON)
 		}
 	}
+	if err := translatePRProseFields(sctx, fields); err != nil {
+		return nil, err
+	}
+	for _, payload := range payloads {
+		encoded, err := json.Marshal(payload.value)
+		if err != nil {
+			return nil, fmt.Errorf("encode PR publication prose: %w", err)
+		}
+		text := string(encoded)
+		*payload.target = &text
+	}
+	artifactOpts := testingSummaryOptions{repoRoot: sctx.WorkDir, evidenceRoot: testEvidenceDir(sctx)}
+	artifacts := make([]types.TestArtifact, 0)
+	for _, step := range steps {
+		if step.StepName == types.StepTest {
+			artifacts = append(artifacts, collectTestingArtifacts(step, rounds[step.ID], artifactOpts)...)
+			break
+		}
+	}
+	fields = nil
+	artifactState := testingArtifactRenderState{remainingEmbeddedBytes: maxEmbeddedArtifactsTotalBytes}
+	for i := range artifacts {
+		artifact := &artifacts[i]
+		_, hasFile := embeddedArtifactText(*artifact, artifactOpts, &artifactState)
+		if hasFile || !artifactInlineContentIsLiteral(*artifact) {
+			add(&artifact.Content)
+		}
+	}
+	if err := translatePRProseFields(sctx, fields); err != nil {
+		return nil, err
+	}
+	for _, field := range fields {
+		*field = sanitizePromptMultilineText(*field)
+	}
+	return artifacts, nil
+}
+
+func translatePRProseFields(sctx *pipeline.StepContext, fields []*string) error {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -120,14 +148,6 @@ func translatePRRenderProse(sctx *pipeline.StepContext, steps []*db.StepResult, 
 	}
 	for _, field := range fields {
 		*field = output.Translations[indices[*field]]
-	}
-	for _, payload := range payloads {
-		encoded, err := json.Marshal(payload.value)
-		if err != nil {
-			return fmt.Errorf("encode PR publication prose: %w", err)
-		}
-		text := string(encoded)
-		*payload.target = &text
 	}
 	return nil
 }

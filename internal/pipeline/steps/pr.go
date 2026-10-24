@@ -814,8 +814,10 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 		}
 		rounds[sr.ID] = r
 	}
+	var artifacts []types.TestArtifact
 	if projectProse {
-		if err := translatePRRenderProse(sctx, steps, rounds); err != nil {
+		artifacts, err = translatePRRenderProse(sctx, steps, rounds)
+		if err != nil {
 			return "", "", "", err
 		}
 	}
@@ -832,7 +834,7 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
 	if includeTesting {
-		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), literalEvidence...)
+		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), artifacts, literalEvidence...)
 	}
 	return pipelineMD, riskLine, testingMD, nil
 }

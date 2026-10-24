@@ -119,6 +119,7 @@ type testingSummaryOptions struct {
 	// literalEvidence is render-only provenance for the final language judge.
 	// It never comes from agent-authored draft metadata or durable records.
 	literalEvidence *[]prLiteralEvidence
+	artifacts       []types.TestArtifact
 }
 
 func artifactInlineContentIsLiteral(artifact types.TestArtifact) bool {
@@ -397,10 +398,10 @@ func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.St
 }
 
 func BuildTestingSummaryForPRWithProvider(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider) string {
-	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil)
+	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil, nil)
 }
 
-func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string, literalEvidence ...*[]prLiteralEvidence) string {
+func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string, artifacts []types.TestArtifact, literalEvidence ...*[]prLiteralEvidence) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.flavor = prBodyFlavorFor(provider)
 	opts.compactArtifacts = true
@@ -410,6 +411,7 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	opts.evidenceRoot = evidenceRoot
 	opts.evidence = links
 	opts.attachments = attachments
+	opts.artifacts = artifacts
 	if len(literalEvidence) > 0 {
 		opts.literalEvidence = literalEvidence[0]
 	}
@@ -430,7 +432,10 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 
 		testingSummary := collectTestingSummary(sr, stepRounds)
 		tested := collectTestingDetails(sr, stepRounds)
-		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
+		artifacts := opts.artifacts
+		if artifacts == nil {
+			artifacts = collectTestingArtifacts(sr, stepRounds, opts)
+		}
 		scenarios := collectTestingScenarios(sr, stepRounds)
 		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds))
 		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" {
