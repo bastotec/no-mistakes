@@ -81,10 +81,10 @@ func TestForkRouting(t *testing.T) {
 			t.Fatalf("gh pr list used unsupported owner-qualified head: %+v", inv)
 		}
 		if len(inv.Args) >= 2 && inv.Args[0] == "pr" && inv.Args[1] == "create" {
-			if inv.Repo == "fork-owner/no-mistakes" {
+			if inv.Repo == "github.com/fork-owner/no-mistakes" {
 				t.Fatalf("created silent self-PR against fork: %+v", inv)
 			}
-			if inv.Repo == "parent-owner/no-mistakes" && inv.Head == "fork-owner:"+branch && inv.Base == "main" {
+			if inv.Repo == "github.com/parent-owner/no-mistakes" && inv.Head == "fork-owner:"+branch && inv.Base == "main" {
 				sawParentCreate = true
 			}
 		}

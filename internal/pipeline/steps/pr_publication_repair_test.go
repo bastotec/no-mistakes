@@ -224,13 +224,28 @@ func TestPRStep_RedactsRunIDFromGeneratedReviewHistory(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	sctx.Env = env
 	runID := sctx.Run.ID
+	validations := 0
 	ag.validationFn = func(_ context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		validations++
 		digest, err := validationDigestFromPrompt(opts.Prompt)
 		if err != nil {
 			return nil, err
 		}
+		// Judge the emitted publication candidate, not the authoritative
+		// dispositions supplied separately as private validation context.
+		_, candidate, ok := strings.Cut(opts.Prompt, "Run-written PR content JSON:\n")
+		if !ok {
+			t.Fatal("validation prompt omitted run-written PR content")
+		}
+		var content prContent
+		if err := json.NewDecoder(strings.NewReader(candidate)).Decode(&content); err != nil {
+			t.Fatalf("decode run-written PR content: %v", err)
+		}
+		if prContentDigest(content) != digest {
+			t.Fatal("validation digest does not bind the publication candidate")
+		}
 		verdict := prContentValidation{ContentSHA256: digest, English: true, FormatCompliant: true, Issues: []string{}}
-		if strings.Contains(opts.Prompt, runID) {
+		if strings.Contains(content.Title, runID) || strings.Contains(content.Body, runID) {
 			verdict.Issues = []string{"The Pipeline section exposes the internal run identifier `" + runID + "`."}
 		}
 		payload, _ := json.Marshal(verdict)
@@ -253,6 +268,9 @@ func TestPRStep_RedactsRunIDFromGeneratedReviewHistory(t *testing.T) {
 
 	if _, err := (&PRStep{}).Execute(sctx); err != nil {
 		t.Fatalf("Execute() = %v, want publication with the run id redacted", err)
+	}
+	if validations != 1 {
+		t.Fatalf("validator ran %d times, want history redacted before the first validation", validations)
 	}
 	logData, err := os.ReadFile(logFile)
 	if err != nil {

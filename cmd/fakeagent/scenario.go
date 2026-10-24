@@ -163,6 +163,9 @@ func (a Action) withPromptDefaults(prompt string) Action {
 		if _, ok := structured["format_compliant"]; !ok {
 			structured["format_compliant"] = true
 		}
+		if _, ok := structured["risk_disposition_mismatch"]; !ok {
+			structured["risk_disposition_mismatch"] = false
+		}
 		if _, ok := structured["issues"]; !ok {
 			structured["issues"] = []any{}
 		}

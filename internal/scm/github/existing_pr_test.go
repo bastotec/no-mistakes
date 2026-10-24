@@ -123,7 +123,7 @@ func TestPRDiscoveryForkOriginCausalBoundary(t *testing.T) {
 			if tc.fork != "" {
 				fields += ",headRefName,headRepositoryOwner"
 			}
-			command := "gh pr list --head fm/account-context --repo " + tc.repo + " --state open --json " + fields
+			command := "gh pr list --head fm/account-context --repo github.com/" + tc.repo + " --state open --json " + fields
 			h := NewWithFork(githubTestCmdFactory(map[string]githubTestResponse{command: {stdout: tc.response}}), nil, "github.com", tc.repo, tc.fork, false)
 			pr, err := h.FindPR(ctx, "fm/account-context", "")
 			if err != nil || (pr != nil) != tc.want {
