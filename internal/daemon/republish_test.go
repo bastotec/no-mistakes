@@ -48,6 +48,11 @@ func terminalRunWithFailedPR(t *testing.T, d *db.DB, repoID, branch, head string
 }
 
 func TestRepublishPublication_RefusesIneligibleRuns(t *testing.T) {
+	// Fixtures must supply their own commit identities, even on a developer
+	// machine whose global Git config would otherwise mask a missing one.
+	t.Setenv("GIT_CONFIG_GLOBAL", os.DevNull)
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
 	p, d := startTestDaemon(t)
 	repo, head := setupTestGitRepo(t, p, d, "republish-refusals")
 
@@ -162,7 +167,9 @@ func TestRepublishPublication_RefusesIneligibleRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			gitCmd(t, work, "push", rmt.UpstreamURL, "HEAD:refs/heads/moved-branch", "HEAD:refs/heads/main")
-			gitCmd(t, work, "commit", "--allow-empty", "-m", "newer head")
+			// A fresh clone has no git identity, and CI runners have no global
+			// one either; this commit only exists to move the remote head.
+			gitCmd(t, work, "-c", "user.email=moved@test.com", "-c", "user.name=Moved", "commit", "--allow-empty", "-m", "newer head")
 			gitCmd(t, work, "push", "--force", rmt.UpstreamURL, "HEAD:refs/heads/moved-branch")
 			gitCmd(t, "", "init", "--bare", p.RepoDir(rmt.ID))
 			gitCmd(t, p.RepoDir(rmt.ID), "fetch", rmt.UpstreamURL, "refs/heads/moved-branch:refs/heads/moved-branch", "refs/heads/main:refs/heads/main")
