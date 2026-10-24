@@ -49,9 +49,17 @@ func TestActionStructuredJSONUsesRawPayload(t *testing.T) {
 func TestScenarioMatchCompletesSuccessfulPRResponsesFromPrompt(t *testing.T) {
 	scenario := &Scenario{Actions: []Action{{Structured: map[string]any{"title": "fix: example"}}}}
 
-	draft := scenario.Match("Put prose-only rules in unsupported_rules.")
+	draft := scenario.Match("Return public_intent and unsupported_rules.\n-----BEGIN USER INTENT-----\nAdd export for review only.\n-----END USER INTENT-----\n")
+	if draft.Structured["public_intent"] != "Add export for review only." {
+		t.Fatalf("public_intent = %#v", draft.Structured["public_intent"])
+	}
 	if rules, ok := draft.Structured["unsupported_rules"].([]any); !ok || len(rules) != 0 {
 		t.Fatalf("unsupported_rules = %#v, want empty array", draft.Structured["unsupported_rules"])
+	}
+
+	prose := scenario.Match("PR publication prose JSON:\n[\"Review only.\",\"Ran `go test ./...`.\"]")
+	if translations, ok := prose.Structured["translations"].([]string); !ok || len(translations) != 2 || translations[0] != "Review only." || translations[1] != "Ran `go test ./...`." {
+		t.Fatalf("translations = %#v", prose.Structured["translations"])
 	}
 
 	const digest = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"

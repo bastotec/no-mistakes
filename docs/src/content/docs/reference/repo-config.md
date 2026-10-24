@@ -245,7 +245,7 @@ Use a repository Markdown template for the public narrative, followed by no-mist
 ```yaml
 pr:
   template: .github/pull_request_template.md
-  publish_intent: false # Optional; otherwise original Intent is still published.
+  publish_intent: false # Optional; see pr.publish_intent below.
 ```
 
 For example, commit this template and the configuration to the default branch:
@@ -295,6 +295,8 @@ Control publication of the **generated `Intent` section**, independently of inte
 | Type | `bool` |
 | Default | `true` (missing or `null` also preserves the default) |
 | Trust | Trusted default branch only, regardless of `allow_repo_commands`; no global setting |
+
+When enabled, the default writer supplies a faithful English public summary, including translations of quotations, rather than copying the source intent verbatim. Approval scope and remaining unapproved work must remain unchanged. The original intent and approval records stay immutable. Whether or not the generated section is enabled, the final publication validator receives the source intent as private reference data to check public wording for changed scope or leaked private guidance.
 
 `false` suppresses that section in ordinary default-format drafting. Templated bodies never add a generated Intent heading because their committed headings are authoritative; the full intent remains available to drafting and validation workers. This setting works without `pr.template` and does not otherwise enable template mode. It never removes intent from review context, changes evidence/attestation policy, or erases author-written sections named `Intent`. Unconfigured defaults remain unchanged.
 

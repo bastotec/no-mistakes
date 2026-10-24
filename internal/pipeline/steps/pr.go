@@ -31,9 +31,13 @@ type PRStep struct {
 }
 
 type prContent struct {
-	Title               string                       `json:"title"`
-	Body                string                       `json:"body"`
+	Title string `json:"title"`
+	Body  string `json:"body"`
+	// PublicIntent is a publication-only English projection, never a new
+	// source of run intent or approval authority.
+	PublicIntent        string                       `json:"public_intent,omitempty"`
 	HeadingTranslations []templateHeadingTranslation `json:"-"`
+	LiteralEvidence     []prLiteralEvidence          `json:"-"`
 }
 
 func (c prContent) scmContent() scm.PRContent {
@@ -67,9 +71,10 @@ var prContentSchema = json.RawMessage(`{
 	"properties": {
 		"title": {"type": "string", "description": "Concise English pull request title following repository configuration"},
 		"body": {"type": "string", "description": "English GitHub-flavored Markdown starting with ## What Changed. Plain text, NOT JSON."},
+		"public_intent": {"type": "string", "description": "Faithful English public summary of the user intent, including translated quotations and unchanged approval/residual scope. Empty when intent publication is disabled or no intent is supplied. Never include private repair instructions."},
 		"unsupported_rules": {"type": "array", "description": "Committed prose-only or ambiguous PR description rules that cannot be mechanically enforced", "items": {"type": "string"}}
 	},
-	"required": ["title", "body", "unsupported_rules"]
+	"required": ["title", "body", "public_intent", "unsupported_rules"]
 }`)
 
 var prTitleSchema = json.RawMessage(`{
@@ -609,15 +614,30 @@ func redactPublicationText(text string) string {
 }
 
 func (s *PRStep) draftPRContent(sctx *pipeline.StepContext, branch, baseBranch, baseSHA, policySHA string, provider scm.Provider, bodyLimit int) (prContent, error) {
-	pipelineMD, riskLine, testingMD := s.buildPipelineSection(sctx, provider)
+	var literalEvidence []prLiteralEvidence
+	pipelineMD, riskLine, testingMD, err := s.buildPipelineSections(sctx, provider, false, true, true, &literalEvidence)
+	if err != nil {
+		return prContent{}, err
+	}
 	content, err := s.draftPRNarrative(sctx, branch, baseBranch, baseSHA, policySHA, bodyLimit)
 	if err != nil {
 		return prContent{}, err
 	}
+	content.LiteralEvidence = literalEvidence
+	// Render only the publication projection. The original context and durable
+	// intent remain untouched and continue to drive every other pipeline step.
+	renderContext := *sctx
+	renderContext.UserIntent = content.PublicIntent
+	if publicPRIntent(sctx) == "" {
+		renderContext.UserIntent = ""
+		content.PublicIntent = ""
+	} else if strings.TrimSpace(content.PublicIntent) == "" {
+		return prContent{}, fmt.Errorf("agent omitted English public intent; refusing verbatim source fallback")
+	}
 	if bodyLimit > 0 {
-		content.Body = assemblePRBody(sctx, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
+		content.Body = assemblePRBody(&renderContext, content.Body, riskLine, testingMD, pipelineMD, bodyLimit)
 	} else {
-		content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, sctx)
+		content.Body = buildPRBody(content.Body, riskLine, testingMD, pipelineMD, &renderContext)
 	}
 	return s.repair.scrubContent(content), nil
 }
@@ -650,6 +670,7 @@ Rules:
 - Inspect the target repository's committed PR description instructions using git show at the PR-format policy commit above. Put every prose-only or ambiguous PR body-format rule that cannot be mechanically enforced in unsupported_rules. Do not claim to follow it in the body.
 - Use a "## What Changed" section with 1-3 concise bullets describing concrete changes. A committed Markdown PR template is supplied through the separate template path instead of this default writer.
 - Body must be plain GitHub-flavored Markdown, never nested JSON. Do not add Intent, Risk Assessment, Testing, or Pipeline sections; code owns recorded evidence.
+- Return public_intent separately: a faithful English public summary of the supplied user intent, including English translations of any quotations. Preserve required/forbidden behavior, approval scope, and what remains unapproved; approval for review is not approval to deploy or merge. Do not change the source intent or treat translation as new approval. Exclude private repair guidance. If pr.publish_intent is disabled or no intent is supplied, return an empty public_intent.
 - Derive every body claim from the final diff. Inspect it directly when the paths and statuses below do not provide enough detail.
 - Do not invent tests or behavior.
 
@@ -659,6 +680,7 @@ Diff stat:
 Final diff paths and statuses:
 %s%s%s`, branch, baseSHA, policySHA, sctx.Run.HeadSHA, baseBranch, titleRules, scopeRules, diffStat, finalDiff, userIntentPromptSection(sctx), executionContextPromptSection(sctx.WorkDir))
 
+	prompt += fmt.Sprintf("\n\nIntent publication enabled: %t.\n", publicPRIntent(sctx) != "")
 	prompt += prCreationSkill + prBodyBudgetPromptSection(bodyLimit) + publicationDecisionsPromptSection(sctx) + s.repair.promptSection()
 
 	result, err := sctx.RunAgentContext(ctx, agent.RunOpts{
@@ -769,19 +791,18 @@ func renderPRTitle(sctx *pipeline.StepContext, title string) (string, error) {
 	return sctx.Config.PR.RenderTitle(branch, title)
 }
 
-// buildPipelineSection queries step results and rounds from the DB and
-// produces the deterministic pipeline, risk, and testing sections. These are
-// scoped to this run's own steps and rounds, so they already describe only
-// the final terminal state each step reached in this run.
-func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.Provider) (pipelineMD, riskLine, testingMD string) {
-	return s.buildPipelineSections(sctx, provider, false, true)
+// buildPipelineSection reads this run's step results and round history and
+// projects their prose into English for publication without rewriting the DB.
+// Status, round disposition, and machine attestation remain record-derived.
+func (s *PRStep) buildPipelineSection(sctx *pipeline.StepContext, provider scm.Provider) (pipelineMD, riskLine, testingMD string, err error) {
+	return s.buildPipelineSections(sctx, provider, false, true, true)
 }
 
-func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting bool) (pipelineMD, riskLine, testingMD string) {
+func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.Provider, owned, includeTesting, projectProse bool, literalEvidence ...*[]prLiteralEvidence) (pipelineMD, riskLine, testingMD string, err error) {
 	steps, err := sctx.DB.GetStepsByRun(sctx.Run.ID)
 	if err != nil {
 		slog.Warn("failed to query step results for pipeline summary", "error", err)
-		return "", "", ""
+		return "", "", "", nil
 	}
 
 	rounds := make(map[string][]*db.StepRound, len(steps))
@@ -792,6 +813,13 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 			continue
 		}
 		rounds[sr.ID] = r
+	}
+	var artifacts []types.TestArtifact
+	if projectProse {
+		artifacts, err = translatePRRenderProse(sctx, steps, rounds)
+		if err != nil {
+			return "", "", "", err
+		}
 	}
 
 	policy := pipelineAttestationPolicy{}
@@ -806,9 +834,9 @@ func (s *PRStep) buildPipelineSections(sctx *pipeline.StepContext, provider scm.
 		pipelineMD += "\n\n```text\n" + buildPipelineAttestationWithPolicy(steps, rounds, sctx.Run.HeadSHA, policy) + "\n```"
 	}
 	if includeTesting {
-		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds))
+		testingMD = buildPRTestingSummary(steps, rounds, sctx.Repo.UpstreamURL, sctx.Run.HeadSHA, sctx.WorkDir, testEvidenceDir(sctx), publishRunEvidence(sctx), provider, s.attachRunEvidenceMedia(sctx, provider, steps, rounds), artifacts, literalEvidence...)
 	}
-	return pipelineMD, riskLine, testingMD
+	return pipelineMD, riskLine, testingMD, nil
 }
 
 // unwrapNestedPRBody detects when the agent returned the body as a
@@ -921,7 +949,7 @@ func buildPRBody(body, riskLine, testingMD, pipelineMD string, sctx *pipeline.St
 	sections := appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD)
 	// Neutralized for the same reason as in prependIntentSection: intent is
 	// agent-extracted text placed ahead of the pipeline section.
-	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	cleaned := neutralizePRAppendixMarkers(neutralizeAttestationMarkers(publicPRIntent(sctx)))
 	if cleaned == "" {
 		return sections
 	}
@@ -968,9 +996,12 @@ func appendGeneratedSectionsToCleanBody(body, riskLine, testingMD, pipelineMD st
 // defense either - verify.py reads raw text, so a marker inside a ```text block
 // counts exactly the same.
 func appendGeneratedSectionsToCleanBodyWithinLimit(body, riskLine, testingMD, pipelineMD string, maxBytes int) string {
-	body = neutralizeAttestationMarkers(body)
-	riskLine = neutralizeAttestationMarkers(riskLine)
-	testingMD = neutralizeAttestationMarkers(testingMD)
+	body = neutralizePRAppendixMarkers(neutralizeAttestationMarkers(body))
+	riskLine = neutralizePRAppendixMarkers(neutralizeAttestationMarkers(riskLine))
+	testingMD = neutralizePRAppendixMarkers(neutralizeAttestationMarkers(testingMD))
+	// Ordinary drafts have no outer ownership wrapper. No generated component,
+	// including quoted round history, may claim one; keep the real attestation.
+	pipelineMD = neutralizePRAppendixMarkers(pipelineMD)
 	generatedSections := generatedEssentialSections(riskLine, testingMD)
 	prefix := body + generatedSections
 	if pipelineMD == "" {
@@ -1670,16 +1701,14 @@ func isGeneratedSectionHeading(line string) bool {
 	}
 }
 
-// prependIntentSection prepends a "## Intent" section sourced from the
-// already-extracted user intent. The intent text is reused verbatim (after
-// the same secret/adversarial scrubbing the agent prompt path applies)
-// rather than being paraphrased by the agent. Returns body unchanged when
-// no intent is available or publication is disabled.
+// prependIntentSection prepends a sanitized publication projection. Production
+// drafting supplies the writer's English summary in a render-only context;
+// persisted intent and approval evidence are never rewritten for publication.
 func prependIntentSection(body string, sctx *pipeline.StepContext) string {
 	// Intent is agent-extracted text that lands ahead of the pipeline section,
 	// so it can shadow the real attestation the same way the Testing section
 	// can. See appendGeneratedSectionsToCleanBodyWithinLimit.
-	cleaned := neutralizeAttestationMarkers(publicPRIntent(sctx))
+	cleaned := neutralizePRAppendixMarkers(neutralizeAttestationMarkers(publicPRIntent(sctx)))
 	if cleaned == "" {
 		return body
 	}

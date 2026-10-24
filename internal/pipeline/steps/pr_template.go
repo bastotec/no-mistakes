@@ -365,7 +365,10 @@ func markdownOutsideHTMLComments(line string, inComment *bool) string {
 }
 
 func (s *PRStep) buildPRAppendix(sctx *pipeline.StepContext, provider scm.Provider) (string, error) {
-	pipelineMD, _, _ := s.buildPipelineSections(sctx, provider, true, false)
+	pipelineMD, _, _, err := s.buildPipelineSections(sctx, provider, true, false, false)
+	if err != nil {
+		return "", err
+	}
 	start := strings.Index(pipelineMD, pipelineAttestationCommentPrefix)
 	if start < 0 {
 		return "", fmt.Errorf("cannot publish template narrative without recorded pipeline attestation")
