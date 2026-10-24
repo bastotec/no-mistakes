@@ -283,8 +283,15 @@ func fetchRunUpstreamBranchInner(ctx context.Context, sctx *pipeline.StepContext
 	}
 	upstreamURL := resolveUpstreamURL(sctx)
 	originURL, err := git.GetRemoteURL(ctx, sctx.WorkDir, "origin")
-	if err == nil && upstreamURL == originURL {
+	if err == nil && upstreamURL == originURL && sctx.IntegrationRefPrefixNS() == "" {
 		return git.FetchRemoteBranch(ctx, sctx.WorkDir, "origin", branch)
+	}
+	if prefix := sctx.IntegrationRefPrefixNS(); prefix != "" {
+		// A continuation context routes its integration fetch through the
+		// operation-private namespace (see StepContext.IntegrationRefPrefix):
+		// refs/remotes/origin/ belongs to the gate's live runs and recovery,
+		// and this fetch must not move them.
+		return git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, upstreamURL, branch, runIntegrationRef(sctx, branch))
 	}
 	return git.FetchRemoteBranchToRef(ctx, sctx.WorkDir, upstreamURL, branch, "refs/remotes/origin/"+branch)
 }

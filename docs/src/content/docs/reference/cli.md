@@ -273,6 +273,25 @@ Replacement and inheritance checks read each bound preview's live forge lifecycl
 
 Both CLI and daemon must support this distinct RPC. An older daemon rejects it; there is no publication fallback or automatic restart/update. Installing a new binary does not change the behavior of a daemon already running. Activate a new daemon version only through an explicitly authorized lifecycle window, never by restarting a shared daemon to make this command work.
 
+## no-mistakes axi republish-publication
+
+Continue the PR publication of an **already-terminal** run whose PR step failed, without re-running any validation step:
+
+```sh
+no-mistakes axi status --run <run-id>
+no-mistakes axi republish-publication --run <run-id> --head <recorded-full-head-sha>
+```
+
+Both flags are required; there is no latest-run fallback. The run must be terminal (`failed`, `cancelled`, `completed`, or `ci_monitor_interrupted`), its PR step must have failed, and its recorded head must equal `--head` exactly. It must also carry its own recorded PR target branch (`pr_base_branch`); current configuration cannot substitute for a missing pin or redirect publication.
+
+The daemon waits for any remaining cleanup of the original run, verifies the live remote source branch still equals the recorded head, and creates a throwaway detached worktree at that head. It executes the ordinary PR step against the recorded step rows and pinned target: publication validation, identifier redaction, template/ownership handling and bounded sanitize-and-retry still apply. A skipped PR operation (for example, because forge authentication is unavailable), a missing outcome, or an empty PR URL is an error, not successful republication. A whole-pipeline `rerun` remains the path when the validation evidence itself must be produced again.
+
+Recorded step statuses are rendered exactly as recorded. No validation step is re-run, skipped, invented or waived; a missing or non-passing step stays missing or non-passing in the published evidence, and `require-no-mistakes` still refuses it. Nothing is pushed (the run's head is already on the remote). Fresh evidence publication and media attachment are disabled, so only already-persisted evidence is reused. Run status, custody and shared gate refs are unchanged; config and policy reads use operation-private refs that are deleted afterwards. Apart from the PR publication and its local log, the only persisted update is the run's PR URL when publication succeeds and none was recorded.
+
+Refused, with no fallback, for: a non-terminal run; an active run on the branch (its executor owns publication); a head mismatch with the run's record; a remote source branch that no longer equals the recorded head (a newer publication owns the branch - recover custody with `no-mistakes axi sync --check` instead); a run with no recorded PR target branch; a run whose PR step did not fail (nothing to continue); a preserve-history run; or a recorded head absent from the gate repository (recover custody with `no-mistakes axi sync --check` first). This operation never establishes CI readiness, merge authority, or a green validation claim; ordinary CI monitoring and review still apply to the PR.
+
+Both CLI and daemon must support this distinct RPC. An older daemon rejects it; there is no publication fallback, automatic restart/update, or rerun substitution.
+
 ## no-mistakes axi respond
 
 Answer the current approval gate and continue until the next gate, CI-ready decision point, or final outcome.
