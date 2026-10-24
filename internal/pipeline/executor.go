@@ -1143,6 +1143,21 @@ func (e *Executor) autoFixPolicyConfigured(step types.StepName) bool {
 // and any execution error.
 func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult, run *db.Run, repo *db.Repo, workDir, logDir string, state stepExecutionState) (bool, types.StepName, error) {
 	stepName := step.Name()
+	stepConfig := e.config
+	if stepName == types.StepDocument {
+		timeout, err := e.db.DocumentTimeout(run.ID)
+		if err != nil {
+			return false, "", fmt.Errorf("read Document timeout: %w", err)
+		}
+		if timeout > 0 {
+			copy := config.Config{}
+			if e.config != nil {
+				copy = *e.config
+			}
+			copy.AgentTimeout = timeout
+			stepConfig = &copy
+		}
+	}
 	logPath := filepath.Join(logDir, string(stepName)+".log")
 	finalExitCode := 0
 	autoFixLimit := e.autoFixLimit(stepName)
@@ -1277,7 +1292,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		}
 		// Innermost: default-by-construction invocation deadline so a step
 		// that calls Agent.Run directly cannot hang the run.
-		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(e.config)}
+		stepAgent = &timeoutAgent{inner: stepAgent, timeout: AgentTimeout(stepConfig)}
 		stepAgent = &gateStepBoundaryAgent{inner: stepAgent, phase: stepName}
 		stepAgent = &lifecycleAgent{inner: stepAgent, onLifecycle: onAgentLifecycle}
 		stepAgent = &perfRecordingAgent{
@@ -1322,7 +1337,7 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		WorkDir:          workDir,
 		GateDir:          e.paths.RepoDir(repo.ID),
 		Agent:            stepAgent,
-		Config:           e.config,
+		Config:           stepConfig,
 		ForgeContext:     e.forge,
 		DB:               e.db,
 		StepResultID:     sr.ID,

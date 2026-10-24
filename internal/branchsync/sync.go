@@ -688,8 +688,9 @@ func (s *Service) Recover(ctx context.Context, keepLocal bool) State {
 		return state
 	}
 	// A branch released by its terminal outcome is already the operator's:
-	// nothing pipeline-created exists to recover, so recovery is an idempotent
-	// no-op that mutates no file, ref, or database row.
+	// there is no unpublished committed head to recover, so this is an idempotent
+	// no-op that mutates no file, ref, or database row. Any retained dirty
+	// Document worktree still requires separate preservation; this does not adopt it.
 	if state.State == StateUserOwned {
 		state.Recovered = true
 		state.Changed = false
@@ -2469,23 +2470,19 @@ func (s *Service) recoverySourceAvailable(ctx context.Context, state *State, run
 	if archiveProof.available {
 		return archiveProof
 	}
-	// Mirror consultation (defect 3, 2026-09-17): the ordinary path refuses
-	// when the invoking worktree cannot participate in the safety proof - its
-	// head is not even present as an object in the gate, or the worktree is
-	// dirty - but the daemon's own mirror still holds the recorded pipeline
-	// head intact. Those commits are NOT unrecoverable: keep-local custody
-	// return works entirely from the mirror (it anchors the preserved head and
-	// moves the gate branch to the operator's head without touching the
-	// worktree). Report that sanctioned action instead of declaring the
-	// evidence unusable. It applies only to a run whose terminal head was
-	// verified - the same eligibility Recover enforces - and only while the
-	// preserved head is absent from the invoking worktree, where the operator
-	// cannot see those commits at all without the mirror. A worktree that
-	// already holds the preserved object can inspect both divergent heads
-	// itself, so choosing between them stays manual reconciliation (or the
-	// explicit archive binding).
+	// Keep-local retains both histories instead of adopting the preserved head,
+	// so it does not need a containment proof. For a clean caller present in
+	// the mirror, require the exact terminal anchor, an unchanged mirror branch,
+	// and a single eligible run so unrelated gate work cannot authorize release.
+	anchoredTerminalMirror := false
+	if terminalRunStatus(run.Status) && run.TerminalHeadVerifiedAt != nil && gateAvailable && state.Local.Clean && !objectExists(ctx, s.workDir(), preserved) {
+		anchor, anchorExists, anchorErr := git.DirectRefTarget(ctx, gateDir, custody.RecoveryRef(run.ID))
+		gateHead, branchExists, branchErr := git.DirectRefTarget(ctx, gateDir, "refs/heads/"+state.Local.Branch)
+		runIDs, _, _, allEligible := s.missingHeadKeepLocalRuns(ctx, state, run)
+		anchoredTerminalMirror = anchorErr == nil && anchorExists && anchor == preserved && branchErr == nil && branchExists && gateHead == local && allEligible && len(runIDs) == 1 && runIDs[0] == run.ID
+	}
 	if run.TerminalHeadVerifiedAt != nil && gateAvailable && objectExists(ctx, gateDir, preserved) && !objectExists(ctx, s.workDir(), preserved) &&
-		(!objectExists(ctx, gateDir, local) || !state.Local.Clean) {
+		(!objectExists(ctx, gateDir, local) || !state.Local.Clean || anchoredTerminalMirror) {
 		return recoverySourceProof{
 			available: true,
 			action:    NextAction{Code: "recover_custody", Command: "no-mistakes axi sync --recover --keep-local"},

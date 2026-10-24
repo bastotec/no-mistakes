@@ -131,6 +131,7 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `--base-branch` | `string` | (none)  | Integration branch for this run only; overrides [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) |
 | `--preserve-history` | `string` | (none) | Full integration-base commit SHA; requires `--base-branch`, preserves the submitted head and forbids automatic integration and forced publication |
 | `--existing-pr` | `string` | (none) | Explicit existing github.com PR URL; validates repository, source ref and head; remembered for the branch; never falls back to another PR |
+| `--document-timeout` | `duration` | (none) | Positive per-invocation Document budget for this run only; requires matching CLI and daemon support and returned branch custody |
 | `--isolate-test` | `bool` | `false` | Explicit [run-scoped Test isolation](#run-scoped-test-isolation); refuses unsupported setups |
 | `--retire-existing-pr` | `bool` | `false` | Drop the branch's remembered PR association and start no run |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
@@ -170,6 +171,41 @@ Successful outcomes (`checks-passed`, `passed`, `passed-with-override`, and `pas
 `passed-with-override` is a completed run whose CI approval gate was approved by a human while a live check was still failing; it stays a success but reads distinctly from a genuinely green `passed`, and its `help` names the failure the operator approved past.
 `passed-with-skips` is a completed run where PR publication or CI verification automatically skipped because its provider was unavailable, or CI had no PR URL. It retains exit code 0: missing verification is not a failing code verdict. `run.automatic_skips` names each affected step and cause, and `run.head_sha` gives the full recorded head in both drive output and `axi status`. Report that missing evidence; this outcome does not establish CI readiness or a merge. Explicit per-run skips retain their existing behavior. If the run also has a CI approval override, `passed-with-override` takes precedence and the automatic skip causes remain visible. Legacy rows without a recorded skip cause keep their prior classification; their logs remain inspectable.
 When the pipeline applied fixes, they include a `fixes` table and a `help` instruction to acknowledge the misses and list those fixes for the user's review.
+
+### Run-scoped Document timeout
+
+`axi run --document-timeout 90m --intent "the original goal"` pins a positive,
+finite wall-clock budget for each Document agent invocation in that run. It also
+covers the lint half when Document performs the combined housekeeping pass.
+Recent output does not extend the deadline: a busy turn can legitimately time
+out. Choose a budget adequate for the observed workload; `90m` is an example,
+not a completion guarantee. `--wait` bounds only the caller's wait, not this budget.
+
+The pin is immutable and survives daemon recovery. It affects neither other
+steps nor other runs, and `rerun` does not inherit it. Ordinary runs still use
+[`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout).
+The option cannot combine with skips, history pins, PR association, Test isolation,
+or explicit launch-receipt flags. A matching active invocation can be reattached
+with the same head, intent, base and timeout; different values never supersede it.
+
+The launch accepts positively verified `user_owned` release as well as returned
+custody; an unchanged terminal head needs no new custody stamp. Unknown, ambiguous
+or legacy-unbound evidence refuses launch. After custody is established, the
+existing [private-mirror reconciliation](/no-mistakes/concepts/gate-model/#private-mirror-reconciliation)
+proofs and archive-before-removal rules still apply, including for an adopted
+rebased head whose original submitted head remains in the mirror.
+
+Both CLI and daemon must implement the distinct `start_document_run` RPC.
+Check the installed CLI's `axi run --help` and the daemon build's capability
+before continuation. An older daemon refuses without a gate push, ordinary-run
+fallback, global config change or automatic restart. Building a new CLI alone
+does not add this capability to a running daemon.
+
+A timeout does not authorize recovery or publication of partial edits. Follow
+[terminal custody preservation](#terminal-custody-preservation) first; only after
+supported custody return may a separately authorized new run use this option
+with the original intent. Historical Test results remain receipts for their exact
+validated head, not a waiver of validation on a new head.
 
 ### History-preserving validation
 
@@ -381,7 +417,7 @@ When someone rewrites or deletes the remote branch after a terminal run pushed i
 
 A run that goes terminal (cancelled, failed, or completed without a push stage) after moving the pipeline head leaves the branch `pipeline_owned`. Status offers `next_action.code: recover_custody` only when recovery can establish the same eligibility it will enforce: an equal or ahead local head proves the source locally and can create the local anchor when the gate is unavailable, but any existing gate recovery ref must still match the recorded head; importing a missing preserved head requires an exact run-specific gate anchor (or legacy commit evidence that can be anchored), a clean worktree, and either local ancestry or the content-preservation proof described below. The archive-backed keep-local exception has its own stricter proof below. An eligible state reports `safety: blocked_pipeline_owned_recoverable`, the run's terminal `pipeline.status`, and the exact `submitted_head`/`current_head`/`relation` ownership facts.
 A run whose terminalization verifies that the managed worktree head never changed from the submitted head releases the branch instead: the terminal outcome, including cancellation, ends ownership; status reports `state: user_owned` with the same exact ownership facts and no `next_action`; the branch and head are immediately usable for any separately authorized delivery; and nothing blocks a direct push or PR.
-Without positive evidence that the submitted head stayed unchanged, custody is not guessed away. Conflicting evidence, import cases with a dirty worktree, and genuinely divergent history retain manual-reconciliation guidance instead of being labeled as a missing preserved head, unless the daemon's private mirror still holds the verified head as described below. When a verified recorded head is absent from both the invoking worktree and an accessible local gate, with compatible recovery refs, status reports `safety: blocked_recover_preserved_head_missing` with `next_action.code: recover_custody` and `no-mistakes axi sync --recover --keep-local`: that flag is the operator's explicit choice to keep the current local head and discard the missing preserved commits. When such a verified recorded head is intact in the daemon's private gate mirror while the invoking worktree has never received it - including a dirty worktree, which can never adopt it - status keeps `safety: blocked_pipeline_owned_recoverable` but attaches recovery evidence with `source: gate_mirror` and `keep_local: true`, offering the same `--recover --keep-local` command: those commits are not unrecoverable, custody returns at the current local head, and the preserved head stays anchored. A worktree that already holds the preserved object keeps manual reconciliation, because it can inspect both divergent heads itself. An unavailable gate remains blocked because absence cannot be established there. The archive-backed keep-local exception has its own stricter proof below.
+Without positive evidence that the submitted head stayed unchanged, custody is not guessed away. Conflicting evidence, import cases with a dirty worktree, and genuinely divergent history retain manual-reconciliation guidance instead of being labeled as a missing preserved head, unless the daemon's private mirror still holds the verified head as described below. When a verified recorded head is absent from both the invoking worktree and an accessible local gate, with compatible recovery refs, status reports `safety: blocked_recover_preserved_head_missing` with `next_action.code: recover_custody` and `no-mistakes axi sync --recover --keep-local`: that flag is the operator's explicit choice to keep the current local head and discard the missing preserved commits. When such a verified recorded head is intact in the daemon's private gate mirror while the invoking worktree has never received it, the mirror can instead support `--recover --keep-local` when the caller is dirty or its head is absent from the mirror. It also supports a clean caller whose head is present there when the exact non-symbolic run recovery ref pins the terminal verified head, the mirror branch still equals the caller's head, and no competing stranded run or conflicting recovery anchor exists. This includes a removed managed worktree and a divergent final head that ordinary adoption cannot prove safe. These plans report `safety: blocked_recover_mirror_preserved` with recovery evidence `source: gate_mirror` and `keep_local: true`: custody returns at the current local head while the available committed history stays anchored, without touching caller bytes or firing a receive hook. They do not establish that partial uncommitted Document bytes survived. A worktree that already holds the preserved object keeps manual reconciliation, because it can inspect both divergent heads itself. An unavailable gate remains blocked because absence cannot be established there. The archive-backed keep-local exception has its own stricter proof below.
 While a run is still active, it reports `state: pipeline_owned`, the exact submitted/current heads and their relation, and `next_action.code: continue_active_run` with `no-mistakes axi status`, even when its head has not moved yet.
 `--recover` verifies the run is terminal, anchors the preserved head under `refs/no-mistakes/recover/<run>` in the invoking repository, and stamps custody returned so a fresh run can start.
 For equal or ahead worktrees where the preserved head is already locally reachable, recovery writes that anchor locally without requiring gate access. If the gate is available, an existing symbolic, non-commit, or mismatched recovery ref is conflicting evidence and recovery refuses without overwriting it.
@@ -415,7 +451,55 @@ This is custody return, not content adoption: both histories and all pipeline re
 
 For the alternative validation path and its refusal conditions, see [`no-mistakes rerun`](#no-mistakes-rerun); it is not offered for the archive-backed keep-local plan.
 A recovered never-pushed run reports `state: custody_returned`; a recovered pushed run ordinarily reports its classification against the last push binding, typically `local_ahead`. The failed published-divergence archive exception above instead reports `custody_returned` at the exact kept submitted head.
-On a `user_owned` branch, `--recover` is an idempotent no-op success: nothing pipeline-created exists to recover, and no file, ref, or database row changes.
+On a `user_owned` branch, `--recover` is an idempotent no-op success: no unpublished committed head needs custody recovery, and no file, ref, or database row changes. This does not certify or adopt any partial bytes retained under the [daemon's worktree retention rules](/no-mistakes/concepts/daemon/#what-it-does).
+
+### Terminal custody preservation
+
+A failed or cancelled step may leave valuable uncommitted and untracked work in
+its managed worktree. A commit archive alone does **not** preserve those bytes.
+Before any consumer mutation, the repository owner must preserve and verify:
+
+- The entire current managed worktree, including dotfiles, ignored and untracked
+  files, symlinks, index state, and staged/unstaged deletions. Preserve absent paths
+  as absences, not by filling them from an earlier archive. Record a binary diff
+  and NUL-delimited status/path inventory as additional evidence, not substitutes
+  for the complete byte snapshot.
+- All submitted, reviewed, validated and final work commits, their exact full SHAs
+  and reachable objects, existing archive refs/archives, run recovery refs, and
+  the caller's branch/head and cleanliness. Verify object completeness in a
+  separate disposable repository, never by extracting over the managed worktree.
+- The run/step/round records, logs, effective timeout and last-activity evidence,
+  plus Test results and evidence receipts bound to the exact head they validated.
+  Keep private artifacts private. Do not publish raw logs or private intent.
+
+Record SHA-256 checksums and a path/type/mode/content manifest for the snapshot;
+verify them after copying, and bracket capture with read-only inventories to
+reject a snapshot that changed during capture. Confirm the step and its cwd
+processes have stopped. An earlier immutable archive and a later dirty snapshot
+are distinct evidence and must both remain intact. Investigate missing paths by
+comparing against the base, work commits and scratch inventories in a disposable
+copy; do not presume deletions are intended or restore them in place.
+
+Then obtain fresh `axi status` and `axi sync --check`. Select only the exact
+`branch_sync.next_action.command` supported by that fresh evidence:
+
+- `sync` uses the guarded synchronization path.
+- `recover_custody` uses the offered `--recover` command, including `--keep-local`
+  when present. Archive-backed keep-local requires the exact pre-existing commit
+  archive ref and binding described [above](#custody-recovery); a filesystem tar archive is not that
+  proof, and binding never preserves uncommitted bytes.
+- `release_binding` is only for the reported stale terminal push binding.
+- `continue_active_run` means ownership remains; continue that run, not a new one.
+- `inspect_and_reconcile_manually` authorizes no mutation. Identify the exact
+  conflicting or missing proof and recheck after supported reconciliation; never
+  substitute reset, restore, stash, archive extraction, force, a fabricated
+  terminal verification stamp, or a fresh run to make the refusal disappear.
+
+A historical failure is not automatically eligible just because newer source
+supports recovery. Revalidate its actual run evidence and installed capability.
+A supported custody return preserves history but does not adopt or certify a
+partial worktree. Keep all preservation artifacts and receipts through any
+separately authorized continuation, and retain the original intent.
 
 ## no-mistakes axi logs
 

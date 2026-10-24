@@ -307,3 +307,94 @@ func TestCleanRefBackedInPlaceWorkBecomesCaptured(t *testing.T) {
 		t.Fatalf("handoff after cleanup = %+v %v", work, err)
 	}
 }
+
+func TestFailedInitialDocumentRetainsPartialWorkAcrossCleanup(t *testing.T) {
+	for _, kind := range []string{"staged-unstaged", "untracked", "ignored", "commit", "clean"} {
+		t.Run(kind, func(t *testing.T) {
+			p := paths.WithRoot(t.TempDir())
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, head := setupTestGitRepo(t, p, database, "initial-document-cleanup")
+			run, err := database.InsertRun(repo.ID, "main", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			dir := p.WorktreeDir(repo.ID, run.ID)
+			if err := git.WorktreeAdd(context.Background(), p.RepoDir(repo.ID), dir, head); err != nil {
+				t.Fatal(err)
+			}
+			step, err := database.InsertStepResult(run.ID, types.StepDocument)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.FailStep(step.ID, "agent timed out after 10m; recent output observed", 600000); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(run.ID, types.RunFailed); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(dir, "partial.bin")
+			partial := []byte{'d', 'o', 'c', 0, 255, '\n'}
+			if kind != "clean" {
+				if err := os.WriteFile(file, partial, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			switch kind {
+			case "staged-unstaged":
+				gitCmd(t, dir, "add", "partial.bin")
+				partial = append(partial, 'x')
+				if err := os.WriteFile(file, partial, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "ignored":
+				exclude := gitOutput(t, dir, "rev-parse", "--git-path", "info/exclude")
+				if err := os.WriteFile(exclude, []byte("partial.bin\n"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			case "commit":
+				gitCmd(t, dir, "add", "partial.bin")
+				gitCmd(t, dir, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "partial Document work")
+			}
+			beforeStatus, err := git.Run(context.Background(), dir, "status", "--porcelain", "--ignored=matching")
+			if err != nil {
+				t.Fatal(err)
+			}
+			beforeIndex := gitOutput(t, dir, "write-tree")
+			beforeHead := gitOutput(t, dir, "rev-parse", "HEAD")
+			m := NewRunManager(database, p, nil)
+			m.removeRunWorktree(repo.ID, run.ID, p.RepoDir(repo.ID), dir, "run_finished")
+			cleanupOrphanWorktrees(database, p, nil)
+			if kind == "clean" {
+				if _, err := os.Stat(dir); !os.IsNotExist(err) {
+					t.Fatalf("clean failed Document worktree not reclaimed: %v", err)
+				}
+				return
+			}
+			if got, err := os.ReadFile(file); err != nil || string(got) != string(partial) {
+				t.Fatalf("cleanup lost partial bytes: %q %v", got, err)
+			}
+			if got, err := git.Run(context.Background(), dir, "status", "--porcelain", "--ignored=matching"); err != nil || got != beforeStatus {
+				t.Fatalf("cleanup changed status: %q -> %q (%v)", beforeStatus, got, err)
+			}
+			if got := gitOutput(t, dir, "write-tree"); got != beforeIndex {
+				t.Fatal("cleanup changed index")
+			}
+			if got := gitOutput(t, dir, "rev-parse", "HEAD"); got != beforeHead {
+				t.Fatal("cleanup changed work commit")
+			}
+			if reason := survivedWorkCleanupReason(database, run, filepath.Join(dir, "missing")); reason == "" {
+				t.Fatal("unreadable failed Document released custody")
+			}
+			if work, err := database.GetRunSurvivedWork(run.ID); err != nil || work != nil {
+				t.Fatalf("retention invented repair custody: %+v %v", work, err)
+			}
+		})
+	}
+}
