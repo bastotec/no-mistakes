@@ -9,6 +9,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/cimonitor"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -468,6 +469,11 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		if waitForNextPoll == nil {
 			waitForNextPoll = func(ctx context.Context, interval time.Duration) error {
 				select {
+				case request := <-sctx.PublicationRefresh:
+					request.Serve(sctx, func(copy *pipeline.StepContext, p ipc.RefreshPublicationParams) (*ipc.RefreshPublicationResult, error) {
+						return refreshRepairPublication(copy, host, p)
+					})
+					return nil
 				case <-time.After(interval):
 					return nil
 				case <-ctx.Done():

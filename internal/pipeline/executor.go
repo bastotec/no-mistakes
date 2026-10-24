@@ -63,6 +63,7 @@ type Executor struct {
 	workDir  string
 
 	mu                          sync.Mutex
+	publicationRefreshCh        chan *PublicationRefreshRequest
 	approvalCh                  chan approvalResponse // buffered channel for approval responses
 	waiting                     bool                  // true when blocked on approval
 	waitingContext              *StepContext          // valid only while waiting; guarded by mu
@@ -121,6 +122,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		steps:                 steps,
 		onEvent:               onEvent,
 		approvalCh:            make(chan approvalResponse, 1),
+		publicationRefreshCh:  make(chan *PublicationRefreshRequest),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
 	}
@@ -524,18 +526,19 @@ func (e *Executor) resumeWatch(ctx context.Context, run *db.Run, repo *db.Repo, 
 	run.CIReadyAt = nil
 	run.CIReadyNoCI = false
 	sctx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
-		ForgeContext: e.forge,
-		DB:           e.db,
-		StepResultID: sr.ID,
-		Agent:        e.agent,
-		Sessions:     e.sessions,
-		Shared:       e.shared,
+		Ctx:                ctx,
+		Run:                run,
+		Repo:               repo,
+		WorkDir:            workDir,
+		GateDir:            e.paths.RepoDir(repo.ID),
+		Config:             e.config,
+		ForgeContext:       e.forge,
+		DB:                 e.db,
+		StepResultID:       sr.ID,
+		Agent:              e.agent,
+		Sessions:           e.sessions,
+		Shared:             e.shared,
+		PublicationRefresh: e.publicationRefreshCh,
 		Log: func(message string) {
 			slog.Info("resumed ci watch reconciliation", "run_id", run.ID, "message", message)
 		},
@@ -726,18 +729,19 @@ func (e *Executor) Resume(ctx context.Context, run *db.Run, repo *db.Repo, workD
 		return e.executeRecoveredRemainder(ctx, run, repo, workDir, logDir, gate.index+1, false)
 	}
 	reconcileCtx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
-		ForgeContext: e.forge,
-		DB:           e.db,
-		StepResultID: gate.stepResult.ID,
-		Agent:        e.agent,
-		Sessions:     e.sessions,
-		Shared:       e.shared,
+		Ctx:                ctx,
+		Run:                run,
+		Repo:               repo,
+		WorkDir:            workDir,
+		GateDir:            e.paths.RepoDir(repo.ID),
+		Config:             e.config,
+		ForgeContext:       e.forge,
+		DB:                 e.db,
+		StepResultID:       gate.stepResult.ID,
+		Agent:              e.agent,
+		Sessions:           e.sessions,
+		Shared:             e.shared,
+		PublicationRefresh: e.publicationRefreshCh,
 		Log: func(message string) {
 			slog.Info("recovered approval gate reconciliation", "run_id", run.ID, "step", gate.step.Name(), "message", message)
 		},
@@ -1316,26 +1320,27 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:              ctx,
-		Run:              run,
-		Repo:             repo,
-		WorkDir:          workDir,
-		GateDir:          e.paths.RepoDir(repo.ID),
-		Agent:            stepAgent,
-		Config:           e.config,
-		ForgeContext:     e.forge,
-		DB:               e.db,
-		StepResultID:     sr.ID,
-		UserIntent:       userIntent,
-		IntentSource:     userIntentSource,
-		Sessions:         e.sessions,
-		Shared:           e.shared,
-		EvidenceDir:      e.runEvidenceDir(run.ID),
-		Fixing:           state.fixing,
-		PreviousFindings: state.previousFindings,
-		DeferredFindings: state.deferredFindings,
-		Log:              writeLog,
-		LogChunk:         writeLogChunk,
+		Ctx:                ctx,
+		Run:                run,
+		Repo:               repo,
+		WorkDir:            workDir,
+		GateDir:            e.paths.RepoDir(repo.ID),
+		Agent:              stepAgent,
+		Config:             e.config,
+		ForgeContext:       e.forge,
+		DB:                 e.db,
+		StepResultID:       sr.ID,
+		UserIntent:         userIntent,
+		IntentSource:       userIntentSource,
+		Sessions:           e.sessions,
+		Shared:             e.shared,
+		PublicationRefresh: e.publicationRefreshCh,
+		EvidenceDir:        e.runEvidenceDir(run.ID),
+		Fixing:             state.fixing,
+		PreviousFindings:   state.previousFindings,
+		DeferredFindings:   state.deferredFindings,
+		Log:                writeLog,
+		LogChunk:           writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)

@@ -31,6 +31,7 @@ const (
 	// Distinct RPC: an older daemon must refuse a terminal continuation
 	// instead of silently ignoring it or misreading it as a rerun.
 	MethodRepublishPublication = "republish_publication"
+	MethodRefreshPublication   = "refresh_publication"
 	MethodCancelRun            = "cancel_run"
 	MethodGateContext          = "gate_context"
 	MethodAdmitPush            = "admit_push"
