@@ -27,7 +27,7 @@ import (
 func TestConfinedRunDispatchCarriesGateToWorker(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, dir, base, head, config.Commands{})
-	step := &CustomGateStep{Gate: config.Gate{Name: "license-check", After: types.StepReview, Command: "echo checked > gate-ran"}}
+	step := &CustomGateStep{Gate: config.Gate{Name: "license-check", After: types.StepRebase, Command: "echo checked > gate-ran"}}
 	proxy := confinedRunStep{step: step}
 	if proxy.Name() != step.Name() {
 		t.Fatal("proxy lost gate identity")
@@ -251,5 +251,27 @@ func TestConfinedRunPublicationRefusesBeforeNativeOperations(t *testing.T) {
 	}
 	if _, err := PublishTestPreview(sctx); err == nil || !strings.Contains(err.Error(), "offline runs cannot publish") {
 		t.Fatalf("preview did not refuse before forge lookup: %v", err)
+	}
+}
+
+func TestConfinedReviewConfigKeepsSizingButDropsModelRoutes(t *testing.T) {
+	src := &config.Config{Review: config.Review{MaxRounds: 2, Routes: config.ReviewRoutesRaw{Light: "other/light", Finders: []string{"other/finder"}, Verify: "other/verify"}}}
+	for _, level := range []string{config.ReviewEffortLow, config.ReviewEffortHigh, config.ReviewEffortMax} {
+		src.Review.Sizing.Fixed = level
+		cfg := confinedRunConfig(src)
+		plan := planReview(cfg.Review.Sizing, cfg.Review.Routes, nil, nil)
+		ordinary := planReview(src.Review.Sizing, src.Review.Routes, nil, nil)
+		if plan.Effort != level || plan.VerifyCap != ordinary.VerifyCap || len(plan.Dimensions) != len(ordinary.Dimensions) || cfg.Review.MaxRounds != 2 {
+			t.Fatalf("review sizing changed: %+v", plan)
+		}
+		if plan.Tuning != nil && (plan.Tuning.Model != "" || plan.Tuning.Effort != ordinary.Tuning.Effort || plan.Tuning.MaxTurns != ordinary.Tuning.MaxTurns || plan.Tuning.DeadlineSecs != ordinary.Tuning.DeadlineSecs) {
+			t.Fatalf("light tuning escaped the pinned model or changed bounds: %+v", plan.Tuning)
+		}
+		if len(cfg.Review.Routes.Finders) != 0 || plan.FinderTuning.Model != "" || plan.VerifyTuning.Model != "" || plan.FinderTuning.MaxTurns != ordinary.FinderTuning.MaxTurns || plan.VerifyTuning.MaxTurns != ordinary.VerifyTuning.MaxTurns {
+			t.Fatalf("multi-angle tuning escaped the pinned model or changed bounds: %+v", plan)
+		}
+	}
+	if src.Review.Routes.Light != "other/light" || len(src.Review.Routes.Finders) != 1 {
+		t.Fatal("ordinary review routes mutated")
 	}
 }

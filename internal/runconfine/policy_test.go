@@ -1,6 +1,7 @@
 package runconfine
 
 import (
+	"github.com/kunchenguid/no-mistakes/internal/types"
 	"strings"
 	"testing"
 )
@@ -62,6 +63,19 @@ func TestConfinableStepsAreClosed(t *testing.T) {
 	for i, step := range got {
 		if string(step) != want[i] {
 			t.Fatalf("confinable steps changed: %v", got)
+		}
+	}
+}
+
+func TestCustomGatesAreConfinableIndependentlyOfAnchor(t *testing.T) {
+	for _, anchor := range []types.StepName{types.StepRebase, types.StepReview, types.StepTest, types.StepDocument, types.StepLint} {
+		if !IsConfinableStep(types.CustomGateStepName(anchor, "policy")) {
+			t.Fatalf("gate after %s was excluded", anchor)
+		}
+	}
+	for _, name := range []types.StepName{types.StepRebase, "gate.push.policy", "gate.rebase...", "gate.rebase."} {
+		if IsConfinableStep(name) {
+			t.Fatalf("invalid or excluded step %s accepted", name)
 		}
 	}
 }

@@ -264,12 +264,7 @@ func runIsolatedRunRequest(request isolatedRunInput, decoder *json.Decoder, outp
 	if err != nil {
 		return err
 	}
-	outcome, stepErr := step.Execute(sctx)
-	index, indexErr := testisolation.ExportGitIndex(context.Background(), request.WorkDir, request.Run.HeadSHA)
-	if err := errors.Join(stepErr, indexErr); err != nil {
-		return emit(isolatedStepEvent{Kind: "error", Error: pipeline.EncodeIsolatedTestError(err), Index: index})
-	}
-	return emit(isolatedStepEvent{Kind: "result", Outcome: outcome, Index: index})
+	return executeIsolatedWorkerStep(step, sctx, emit)
 }
 
 // The worker recreates each step's ordinary gate boundary without
@@ -294,6 +289,7 @@ func confinedRunConfig(src *config.Config) config.Config {
 		IgnorePatterns: src.IgnorePatterns, ProtectedPaths: src.ProtectedPaths, AgentTimeout: src.AgentTimeout,
 		TestAgentTimeout: src.TestAgentTimeout, ReviewAgentTimeout: src.ReviewAgentTimeout, AgentConfig: src.AgentConfig, DisableProjectSettings: src.DisableProjectSettings,
 		Review: src.Review, Document: src.Document, AutoFix: src.AutoFix}
+	cfg.Review.Routes = config.ReviewRoutesRaw{}
 	return cfg
 }
 
@@ -302,33 +298,15 @@ func confinedRepo(src *db.Repo) *db.Repo {
 }
 
 func (request isolatedRunInput) stepContext(database *db.DB, workerAgent agent.Agent, decoder *json.Decoder, emit func(isolatedStepEvent) error) *pipeline.StepContext {
-	return &pipeline.StepContext{Ctx: context.Background(), Run: request.Run, Repo: request.Repo, Config: &request.Config, WorkDir: request.WorkDir, GateDir: request.GateDir,
+	sctx := &pipeline.StepContext{Ctx: context.Background(), Run: request.Run, Repo: request.Repo, Config: &request.Config, WorkDir: request.WorkDir, GateDir: request.GateDir,
 		EvidenceDir: request.EvidenceDir, StepResultID: request.StepResultID, Fixing: request.Fixing, PreviousFindings: request.PreviousFindings,
 		DeferredFindings: request.DeferredFindings, UserIntent: request.UserIntent, IntentSource: request.IntentSource, DB: database, Agent: workerAgent,
 		FixWithoutRereview: request.FixWithoutRereview, ReviewStartingHeadSHA: request.ReviewStartingHeadSHA,
 		UncertifiedFromSHA: request.UncertifiedFromSHA, UncertifiedToSHA: request.UncertifiedToSHA, UncertifiedSourceRunID: request.UncertifiedSourceRunID, UncertifiedPriorRounds: request.UncertifiedPriorRounds,
 		Shared: &pipeline.RunShared{}, IsolatedTestWorker: true, PriorBranchDecisions: request.PriorBranchDecisions, PriorBranchDecisionsTruncated: request.PriorBranchDecisionsTruncated,
-		Log:      func(text string) { emit(isolatedStepEvent{Kind: "log", Text: text}) },
-		LogChunk: func(text string) { emit(isolatedStepEvent{Kind: "chunk", Text: text}) },
-		LogFile:  func(text string) { emit(isolatedStepEvent{Kind: "file", Text: text}) },
-		RecordIsolatedHead: func(head string) error {
-			pack, err := testisolation.ExportGitHead(context.Background(), request.WorkDir, request.Run.HeadSHA, head)
-			if err != nil {
-				return err
-			}
-			if err := emit(isolatedStepEvent{Kind: "head", Text: head, Pack: pack}); err != nil {
-				return err
-			}
-			var acknowledgement string
-			if err := decoder.Decode(&acknowledgement); err != nil {
-				return err
-			}
-			if acknowledgement != "" {
-				return fmt.Errorf("%s", acknowledgement)
-			}
-			return nil
-		},
 	}
+	configureIsolatedWorkerContext(sctx, decoder, emit)
+	return sctx
 }
 
 func (request isolatedRunInput) step() (pipeline.Step, error) {

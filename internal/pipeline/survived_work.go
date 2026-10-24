@@ -42,33 +42,7 @@ func (g survivedWorkGit) args(ctx context.Context, dir string, args []string) ([
 	if !g.noCallbacks {
 		return args, nil
 	}
-	overrides := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"}
-	// Never enter another repository to inspect its private configuration.
-	args = append([]string(nil), args...)
-	for i, arg := range args {
-		if strings.HasPrefix(arg, "--ignore-submodules=") {
-			args[i] = "--ignore-submodules=all"
-		}
-	}
-	keys, err := git.RunRaw(ctx, dir, append(overrides, "config", "--null", "--name-only", "--list")...)
-	if err != nil {
-		return nil, err
-	}
-	for _, key := range strings.Split(string(keys), "\x00") {
-		field := key[strings.LastIndexByte(key, '.')+1:]
-		if strings.HasPrefix(key, "filter.") && (field == "clean" || field == "smudge" || field == "process" || field == "required") ||
-			strings.HasPrefix(key, "diff.") && field == "textconv" {
-			if strings.ContainsAny(key, "=\n\r") {
-				return nil, fmt.Errorf("cannot disable unsafe Git callback key")
-			}
-			value := ""
-			if field == "required" {
-				value = "false"
-			}
-			overrides = append(overrides, "-c", key+"="+value)
-		}
-	}
-	return append(overrides, args...), nil
+	return git.CallbackFreeArgs(ctx, dir, args...)
 }
 
 func (g survivedWorkGit) Run(ctx context.Context, dir string, args ...string) (string, error) {

@@ -1681,7 +1681,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("carry_survived_work")
 		return "", fmt.Errorf("carry interrupted repair work: %w", err)
 	}
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
+	worktreeAdd := git.WorktreeAdd
+	if ctx.Value(confinedRunLaunchKey{}) == true || ctx.Value(isolatedTestLaunchKey{}) == true {
+		worktreeAdd = git.WorktreeAddWithoutCallbacks
+	}
+	if err := worktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)

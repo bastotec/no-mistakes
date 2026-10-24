@@ -84,9 +84,7 @@ func (p Policy) Validate() error {
 }
 
 // ConfinableSteps lists every step whose whole execution - initial round, fix
-// rounds and preparation - runs inside the boundary. Custom gates are confined
-// with their anchor: a repository gate runs a command and an agent, the same
-// as a core confinable step.
+// rounds and preparation - runs inside the boundary.
 //
 // Deliberately absent, each for its own reason:
 //   - push, pr, ci: their daemon-side forge adapters are exactly what the
@@ -105,11 +103,10 @@ func ConfinableSteps() []types.StepName {
 }
 
 // IsConfinableStep reports whether step's whole execution belongs inside the
-// boundary. Custom gates are confined with their anchor: a repository gate
-// runs a command and an agent, the same as a core confinable step.
+// boundary.
 func IsConfinableStep(step types.StepName) bool {
-	if anchor, ok := step.CustomGateAnchor(); ok {
-		return sliceContains(ConfinableSteps(), anchor)
+	if step.IsCustomGate() {
+		return true
 	}
 	return sliceContains(ConfinableSteps(), step)
 }

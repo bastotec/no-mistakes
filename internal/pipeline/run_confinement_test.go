@@ -72,7 +72,7 @@ func (a *fakeConfinedAgent) Run(context.Context, agent.RunOpts) (*agent.Result, 
 }
 func (a *fakeConfinedAgent) Close() error { return nil }
 func TestConfinedDispatchSendsConfinableStepsToTheWorker(t *testing.T) {
-	for _, name := range runconfine.ConfinableSteps() {
+	for _, name := range append(runconfine.ConfinableSteps(), types.CustomGateStepName(types.StepRebase, "policy")) {
 		t.Run(string(name), func(t *testing.T) {
 			sctx := newConfinedRunContext(t, t.TempDir())
 			e := &Executor{db: sctx.DB}

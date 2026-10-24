@@ -308,34 +308,9 @@ func RunIsolatedTestWorker(input io.Reader, output io.Writer) error {
 		EvidenceDir: request.EvidenceDir, StepResultID: request.StepResultID, Fixing: request.Fixing, PreviousFindings: request.PreviousFindings,
 		DeferredFindings: request.DeferredFindings, UserIntent: request.UserIntent, IntentSource: request.IntentSource, DB: database, Agent: workerAgent,
 		Shared: &pipeline.RunShared{}, IsolatedTestWorker: true, PriorBranchDecisions: request.PriorBranchDecisions, PriorBranchDecisionsTruncated: request.PriorBranchDecisionsTruncated,
-		Log:      func(text string) { emit(isolatedStepEvent{Kind: "log", Text: text}) },
-		LogChunk: func(text string) { emit(isolatedStepEvent{Kind: "chunk", Text: text}) },
-		LogFile:  func(text string) { emit(isolatedStepEvent{Kind: "file", Text: text}) },
-		RecordIsolatedHead: func(head string) error {
-			pack, err := testisolation.ExportGitHead(context.Background(), request.WorkDir, request.Run.HeadSHA, head)
-			if err != nil {
-				return err
-			}
-			if err := emit(isolatedStepEvent{Kind: "head", Text: head, Pack: pack}); err != nil {
-				return err
-			}
-			var acknowledgement string
-			if err := decoder.Decode(&acknowledgement); err != nil {
-				return err
-			}
-			if acknowledgement != "" {
-				return fmt.Errorf("%s", acknowledgement)
-			}
-			return nil
-		},
 	}
-	outcome, err := (&TestStep{}).Execute(sctx)
-	index, indexErr := testisolation.ExportGitIndex(context.Background(), request.WorkDir, request.Run.HeadSHA)
-	err = errors.Join(err, indexErr)
-	if err != nil {
-		return emit(isolatedStepEvent{Kind: "error", Error: pipeline.EncodeIsolatedTestError(err), Index: index})
-	}
-	return emit(isolatedStepEvent{Kind: "result", Outcome: outcome, Index: index})
+	configureIsolatedWorkerContext(sctx, decoder, emit)
+	return executeIsolatedWorkerStep(&TestStep{}, sctx, emit)
 }
 
 // The worker recreates the ordinary Test gate's prompt boundary, without
