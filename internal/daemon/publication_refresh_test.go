@@ -266,17 +266,17 @@ func TestRefreshPublication_RPCMonitorJourney(t *testing.T) {
 			body, readErr := os.ReadFile(bodyPath)
 			must(readErr)
 			reason, refused := map[string]string{
-				"run": "active CI executor",
-				"repo": "exact repository, PR and current head",
-				"pr": "exact repository, PR and current head",
+				"run":        "active CI executor",
+				"repo":       "exact repository, PR and current head",
+				"pr":         "exact repository, PR and current head",
 				"short-head": "exact repository, PR and current head",
-				"recorded": "exact repository, PR and current head",
-				"pushed": "recorded/pushed head binding changed",
-				"remote": "remote source head does not match",
-				"forge": "forge PR identity/head mismatch",
-				"source": "source repository/ref does not match",
-				"parked": "not a repair or approval gate",
-				"repairing": "not a repair or approval gate",
+				"recorded":   "exact repository, PR and current head",
+				"pushed":     "recorded/pushed head binding changed",
+				"remote":     "remote source head does not match",
+				"forge":      "forge PR identity/head mismatch",
+				"source":     "source repository/ref does not match",
+				"parked":     "not a repair or approval gate",
+				"repairing":  "not a repair or approval gate",
 			}[scenario]
 			if refused {
 				if err == nil || !strings.Contains(err.Error(), reason) || string(body) != original {
