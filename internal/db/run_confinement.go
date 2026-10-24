@@ -37,3 +37,9 @@ func (d *DB) RunConfinementEnabled(runID string) (bool, error) {
 	err := d.sql.QueryRow(`SELECT COUNT(*) FROM run_confinement WHERE run_id=?`, runID).Scan(&n)
 	return n == 1, err
 }
+
+func (d *DB) GitCallbacksDisabled(runID string) (bool, error) {
+	var disabled bool
+	err := d.sql.QueryRow(`SELECT EXISTS(SELECT 1 FROM run_test_isolation WHERE run_id=?) OR EXISTS(SELECT 1 FROM run_confinement WHERE run_id=?)`, runID, runID).Scan(&disabled)
+	return disabled, err
+}

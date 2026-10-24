@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
@@ -33,6 +34,10 @@ func (e *Executor) PublishTestPreview(ctx context.Context, p ipc.PublishTestPrev
 	if run == nil || run.Status != types.RunRunning || run.RepoID != p.RepoID || run.HeadSHA != p.HeadSHA || p.HeadSHA == "" {
 		e.mu.Unlock()
 		return nil, fmt.Errorf("preview requires an active run and matching repository and exact current head")
+	}
+	if err := RefuseConfinedPublication(e.db, p.RunID); err != nil {
+		e.mu.Unlock()
+		return nil, err
 	}
 	rows, err := e.db.GetStepsByRun(p.RunID)
 	if err != nil {
@@ -86,6 +91,9 @@ func (e *Executor) publishTestPreviewAt(s *StepContext, ctx context.Context, p i
 	if s.Run.ID != p.RunID || s.Repo.ID != p.RepoID || s.Run.HeadSHA != p.HeadSHA {
 		return nil, fmt.Errorf("preview run, repository or exact current head changed before publication")
 	}
+	if err := RefuseConfinedPublication(e.db, s.Run.ID); err != nil {
+		return nil, err
+	}
 	opCtx, cancel := context.WithTimeout(s.Ctx, 2*time.Minute)
 	defer cancel()
 	stop := context.AfterFunc(ctx, cancel)
@@ -99,4 +107,15 @@ func (e *Executor) publishTestPreviewAt(s *StepContext, ctx context.Context, p i
 	copy := *s
 	copy.Ctx = opCtx
 	return publish(&copy)
+}
+
+func RefuseConfinedPublication(database *db.DB, runID string) error {
+	confined, err := database.RunConfinementEnabled(runID)
+	if err != nil {
+		return fmt.Errorf("run-confinement-policy: read publication policy: %w", err)
+	}
+	if confined {
+		return fmt.Errorf("run-confinement-policy: offline runs cannot publish")
+	}
+	return nil
 }

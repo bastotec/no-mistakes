@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -323,6 +324,43 @@ func TestPublishTestPreview_ApprovalReexecutesUntilValidated(t *testing.T) {
 			}
 			if !ready.Load() {
 				t.Fatal("successful Test did not permit normal PR transition")
+			}
+		})
+	}
+}
+
+func TestPublishTestPreview_ConfinedRunRefusesPendingAndParkedRequests(t *testing.T) {
+	for _, parked := range []bool{false, true} {
+		t.Run(fmt.Sprintf("parked=%v", parked), func(t *testing.T) {
+			database, p, run, repo := setupTest(t)
+			if err := database.UpdateRunStatus(run.ID, types.RunRunning); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.EnableRunConfinement(run.ID, run.HeadSHA, "fixture-digest"); err != nil {
+				t.Fatal(err)
+			}
+			sr, err := database.InsertStepResult(run.ID, types.StepTest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e := NewExecutor(database, p, nil, nil, nil, nil)
+			if parked {
+				findings := `{"findings":[{"severity":"warning","description":"need preview","action":"ask-user"}]}`
+				if err := database.ParkStepForApproval(run.ID, sr.ID, types.StepStatusAwaitingApproval, 1, 1, &findings); err != nil {
+					t.Fatal(err)
+				}
+				e.waiting, e.waitingStep, e.waitingStepResultID = true, types.StepTest, sr.ID
+				e.waitingContext = &StepContext{Ctx: context.Background(), Run: run, Repo: repo, DB: database, StepResultID: sr.ID}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			params := ipc.PublishTestPreviewParams{RepoID: repo.ID, RunID: run.ID, HeadSHA: run.HeadSHA}
+			_, err = e.PublishTestPreview(ctx, params, func(*StepContext) (*ipc.PublishTestPreviewResult, error) {
+				t.Fatal("offline run invoked native publisher")
+				return nil, nil
+			})
+			if err == nil || !strings.Contains(err.Error(), "offline runs cannot publish") || e.pendingTestPreview != nil {
+				t.Fatalf("offline preview was not refused before scheduling: %v", err)
 			}
 		})
 	}

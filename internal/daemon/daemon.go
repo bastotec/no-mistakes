@@ -952,9 +952,9 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if run == nil {
 		return ""
 	}
-	isolated, err := d.TestIsolationEnabled(run.ID)
+	isolated, err := d.GitCallbacksDisabled(run.ID)
 	if err != nil {
-		return "cannot read Test isolation policy"
+		return "cannot read Git isolation policy"
 	}
 	if pipeline.SurvivedWorkMarked(workDir, isolated) {
 		return "interrupted repair left unrecorded uncommitted work; preserving worktree"

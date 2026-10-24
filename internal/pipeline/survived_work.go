@@ -104,7 +104,7 @@ func (g survivedWorkGit) RunWithInput(ctx context.Context, dir, input string, ar
 }
 
 func (e *Executor) survivedWorkGit(runID string) (survivedWorkGit, error) {
-	isolated, err := e.db.TestIsolationEnabled(runID)
+	isolated, err := e.db.GitCallbacksDisabled(runID)
 	return survivedWorkGit{noCallbacks: isolated}, err
 }
 
@@ -121,7 +121,7 @@ func SurvivedWorkRecorder(database *db.DB, runID, workDir string) func(*types.Su
 }
 
 func ClearSurvivedWork(database *db.DB, runID, workDir string) error {
-	isolated, err := database.TestIsolationEnabled(runID)
+	isolated, err := database.GitCallbacksDisabled(runID)
 	if err != nil {
 		return err
 	}

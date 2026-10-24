@@ -1,12 +1,15 @@
 package steps
 
 import (
+	"context"
+	"encoding/json"
+	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/agentcfg"
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/db"
@@ -21,52 +24,60 @@ import (
 // policy does not cover. The full namespace canaries (host secrets, sockets,
 // egress) are owned by internal/testisolation and the e2e suite.
 
-func TestConfinedRunProxyCarriesIdentityAndGateDefinition(t *testing.T) {
-	proxy := confinedRunStep{step: &CustomGateStep{Gate: config.Gate{Name: "license-check", After: types.StepReview}}}
-	if name := proxy.Name(); !name.IsCustomGate() || !strings.Contains(string(name), "license-check") {
-		t.Fatalf("proxy lost the gate step's identity: %s", name)
+func TestConfinedRunDispatchCarriesGateToWorker(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, dir, base, head, config.Commands{})
+	step := &CustomGateStep{Gate: config.Gate{Name: "license-check", After: types.StepReview, Command: "echo checked > gate-ran"}}
+	proxy := confinedRunStep{step: step}
+	if proxy.Name() != step.Name() {
+		t.Fatal("proxy lost gate identity")
 	}
-	gate := proxy.GateDefinition()
-	if gate.Name != "license-check" || gate.After != types.StepReview {
-		t.Fatalf("proxy lost the gate definition: %+v", gate)
+	request := roundTripIsolatedRunInput(t, newIsolatedRunInput(sctx, step, "fixture", runconfine.DefaultPolicy(), "digest"))
+	if err := validateIsolatedRunRequest(request); err != nil {
+		t.Fatal(err)
 	}
-	core := confinedRunStep{step: &LintStep{}}
-	if core.Name() != types.StepLint {
-		t.Fatalf("proxy lost the core step's identity: %s", core.Name())
+	workerStep, err := request.step()
+	if err != nil {
+		t.Fatal(err)
 	}
-	if gate := core.GateDefinition(); gate.Name != "" {
-		t.Fatalf("core step produced a gate definition: %+v", gate)
+	request.GateDir = sctx.GateDir
+	workerCtx := request.stepContext(sctx.DB, sctx.Agent, nil, func(isolatedStepEvent) error { return nil })
+	outcome, err := workerStep.Execute(workerCtx)
+	if err != nil || outcome == nil || outcome.NeedsApproval {
+		t.Fatalf("gate did not execute: %+v %v", outcome, err)
+	}
+	if data, err := os.ReadFile(filepath.Join(dir, "gate-ran")); err != nil || strings.TrimSpace(string(data)) != "checked" {
+		t.Fatalf("gate command did not run: %q %v", data, err)
 	}
 }
 
-func TestIsolatedRunDispatchRefusesUnpinnedRun(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux isolation only")
+func roundTripIsolatedRunInput(t *testing.T, input isolatedRunInput) isolatedRunInput {
+	t.Helper()
+	data, err := json.Marshal(input)
+	if err != nil {
+		t.Fatal(err)
 	}
-	source, base, head := setupGitRepo(t)
-	work := filepath.Join(t.TempDir(), "work")
-	gitCmd(t, source, "worktree", "add", "--detach", work, head)
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, work, base, head, config.Commands{})
-	if _, err := executeIsolatedRunStep(sctx, &LintStep{}); err == nil || !strings.Contains(err.Error(), "run is not confined") {
+	var request isolatedRunInput
+	if err := json.Unmarshal(data, &request); err != nil {
+		t.Fatal(err)
+	}
+	return request
+}
+
+func TestIsolatedRunDispatchRefusesUnpinnedRun(t *testing.T) {
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, t.TempDir(), "base", "head", config.Commands{})
+	if _, _, err := runconfinePolicyForDispatch(sctx); err == nil || !strings.Contains(err.Error(), "run is not confined") {
 		t.Fatalf("unpinned run dispatched a confined invocation: %v", err)
 	}
 }
 
 func TestIsolatedRunDispatchRefusesMismatchedPolicyDigest(t *testing.T) {
-	if runtime.GOOS != "linux" {
-		t.Skip("Linux isolation only")
-	}
-	source, base, head := setupGitRepo(t)
-	work := filepath.Join(t.TempDir(), "work")
-	gitCmd(t, source, "worktree", "add", "--detach", work, head)
-	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, work, base, head, config.Commands{})
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, t.TempDir(), "base", "head", config.Commands{})
 	policy := runconfine.DefaultPolicy()
-	// Pin against a different head than the run currently carries: the digest
-	// must refuse rather than reinterpret the boundary for the new head.
-	if err := sctx.DB.EnableRunConfinement(sctx.Run.ID, "0000000000000000000000000000000000000000", runconfine.PolicyDigest(policy, sctx.Run.ID, "0000000000000000000000000000000000000000")); err != nil {
+	if err := sctx.DB.EnableRunConfinement(sctx.Run.ID, "head", runconfine.PolicyDigest(policy, sctx.Run.ID, "other-head")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := executeIsolatedRunStep(sctx, &LintStep{}); err == nil || !strings.Contains(err.Error(), "does not match the policy digest") {
+	if _, _, err := runconfinePolicyForDispatch(sctx); err == nil || !strings.Contains(err.Error(), "does not match the policy digest") {
 		t.Fatalf("mismatched policy digest dispatched: %v", err)
 	}
 }
@@ -101,7 +112,7 @@ func TestConfinedRunConfigDropsCredentialsAndOverrides(t *testing.T) {
 		Commit:         config.Commit{BranchPattern: "feature/*"},
 		PR:             config.PR{BaseBranch: "develop"},
 		IgnorePatterns: []string{"vendor/"}, ProtectedPaths: []string{"secrets/"},
-		AgentTimeout: time.Minute, TestAgentTimeout: 2 * time.Minute,
+		AgentTimeout: time.Minute, TestAgentTimeout: 2 * time.Minute, ReviewAgentTimeout: 3 * time.Minute,
 		AgentConfig:            map[string]agentcfg.Profile{"deck": {Model: "fixture"}},
 		DisableProjectSettings: true, Review: config.Review{MaxRounds: 2},
 		Document: config.Document{Instructions: "policy"}, AutoFix: config.AutoFix{Lint: 3},
@@ -115,7 +126,7 @@ func TestConfinedRunConfigDropsCredentialsAndOverrides(t *testing.T) {
 	if len(got.ForgeProfiles) != 0 || len(got.AgentPathOverride) != 0 {
 		t.Fatal("worker config carried forge profiles or agent path overrides across the boundary")
 	}
-	if got.Commands.Test != "t" || !got.Test.Skip || got.PR.BaseBranch != "develop" || !got.DisableProjectSettings {
+	if got.Commands.Test != "t" || !got.Test.Skip || got.PR.BaseBranch != "develop" || !got.DisableProjectSettings || got.ReviewAgentTimeout != 3*time.Minute {
 		t.Fatalf("worker config dropped a confinable field: %+v", got)
 	}
 }
@@ -127,8 +138,8 @@ func TestIsolatedRunEventNamesItsStep(t *testing.T) {
 		t.Fatal(err)
 	}
 	sctx.StepResultID = stepResult.ID
-	event := isolatedRunEvent{Kind: "invocation", Invocation: &db.AgentInvocation{Agent: "deck", Model: "fixture"}, Text: string(types.StepLint)}
-	if err := applyIsolatedRunObservation(sctx, event); err != nil {
+	event := isolatedStepEvent{Kind: "invocation", Invocation: &db.AgentInvocation{Agent: "deck", Model: "fixture"}, Text: string(types.StepLint)}
+	if err := applyIsolatedStepObservation(sctx, types.StepLint, event); err != nil {
 		t.Fatal(err)
 	}
 	invocations, err := sctx.DB.GetAgentInvocationsByRun(sctx.Run.ID)
@@ -137,5 +148,108 @@ func TestIsolatedRunEventNamesItsStep(t *testing.T) {
 	}
 	if len(invocations) != 1 || invocations[0].StepName != string(types.StepLint) {
 		t.Fatalf("invocation not recorded under the confined step's name: %+v", invocations)
+	}
+}
+
+func TestIsolatedRunDispatchKeepsLaunchPolicyAfterHeadAdvances(t *testing.T) {
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, t.TempDir(), "base", "submitted", config.Commands{})
+	digest := runconfine.PolicyDigest(runconfine.DefaultPolicy(), sctx.Run.ID, "submitted")
+	if err := sctx.DB.EnableRunConfinement(sctx.Run.ID, "submitted", digest); err != nil {
+		t.Fatal(err)
+	}
+	for _, head := range []string{"submitted", "review-fix", "test-fix", "documentation"} {
+		if err := sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, head); err != nil {
+			t.Fatal(err)
+		}
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		sctx.Run = run
+		if _, got, err := runconfinePolicyForDispatch(sctx); err != nil || got != digest {
+			t.Fatalf("policy changed after %s: %q %v", head, got, err)
+		}
+	}
+}
+
+func TestIsolatedRunReviewFixHonorsRoundCapAndBudget(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	gitCmd(t, dir, "checkout", "--detach", head)
+	ag := &mockAgent{name: "deck", runFn: func(ctx context.Context, opts agent.RunOpts) (*agent.Result, error) {
+		if opts.Purpose != "review-fix" {
+			t.Fatalf("unauthorized rereview: %s", opts.Purpose)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok || time.Until(deadline) > 2*time.Minute || time.Until(deadline) < time.Minute {
+			t.Fatalf("configured review budget lost: %v %v", deadline, ok)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "review-fix.txt"), []byte("fixed"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		return &agent.Result{Output: json.RawMessage(`{"summary":"fix the real bug"}`)}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.Fixing, sctx.FixWithoutRereview = true, true
+	sctx.ReviewStartingHeadSHA = head
+	sctx.Config.ReviewAgentTimeout = 2 * time.Minute
+	sctx.PreviousFindings = `{"findings":[{"severity":"error","description":"real bug","action":"auto-fix"}]}`
+	request := roundTripIsolatedRunInput(t, newIsolatedRunInput(sctx, &ReviewStep{}, "fixture", runconfine.DefaultPolicy(), "digest"))
+	request.GateDir = sctx.GateDir
+	workerCtx := request.stepContext(sctx.DB, ag, json.NewDecoder(strings.NewReader("\"\"\n")), func(isolatedStepEvent) error { return nil })
+	step, err := request.step()
+	if err != nil {
+		t.Fatal(err)
+	}
+	outcome, err := step.Execute(workerCtx)
+	if err != nil || outcome == nil || len(ag.calls) != 1 || workerCtx.Run.HeadSHA == head || outcome.ReviewApprovedHeadSHA != "" {
+		t.Fatalf("capped fix failed: %+v %v calls=%d", outcome, err, len(ag.calls))
+	}
+}
+
+func TestIsolatedRunReviewReceivesUncertifiedProvenance(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	output, _ := json.Marshal(cleanReviewFindings())
+	ag := &mockAgent{name: "deck", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: output}, nil
+	}}
+	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{})
+	sctx.UncertifiedFromSHA, sctx.UncertifiedToSHA, sctx.UncertifiedSourceRunID = base, head, "previous-run"
+	priorFindings := `{"findings":[{"severity":"error","description":"previous reachable defect","action":"auto-fix"}]}`
+	sctx.UncertifiedPriorRounds = []*db.StepRound{{Round: 1, FindingsJSON: &priorFindings, GlobalConfigYAML: []byte("operator-secret"), RepoConfigYAML: []byte("repository-secret")}}
+	request := roundTripIsolatedRunInput(t, newIsolatedRunInput(sctx, &ReviewStep{}, "fixture", runconfine.DefaultPolicy(), "digest"))
+	request.GateDir = sctx.GateDir
+	if len(request.UncertifiedPriorRounds) != 1 || len(request.UncertifiedPriorRounds[0].GlobalConfigYAML) != 0 || len(request.UncertifiedPriorRounds[0].RepoConfigYAML) != 0 {
+		t.Fatal("uncertified provenance carried private config into worker")
+	}
+	if string(sctx.UncertifiedPriorRounds[0].GlobalConfigYAML) != "operator-secret" {
+		t.Fatal("request construction mutated host history")
+	}
+	workerCtx := request.stepContext(sctx.DB, ag, nil, func(isolatedStepEvent) error { return nil })
+	if _, err := (&ReviewStep{}).Execute(workerCtx); err != nil {
+		t.Fatal(err)
+	}
+	if len(ag.calls) != 1 {
+		t.Fatalf("unexpected turns: %d", len(ag.calls))
+	}
+	for _, want := range []string{"Fix-round provenance:", base, head, "previous reachable defect"} {
+		if !strings.Contains(ag.calls[0].Prompt, want) {
+			t.Fatalf("emitted review prompt lost provenance %q: %s", want, ag.calls[0].Prompt)
+		}
+	}
+	if workerCtx.UncertifiedSourceRunID != "previous-run" {
+		t.Fatal("source run identity lost")
+	}
+}
+
+func TestConfinedRunPublicationRefusesBeforeNativeOperations(t *testing.T) {
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, t.TempDir(), "base", "head", config.Commands{})
+	if err := sctx.DB.EnableRunConfinement(sctx.Run.ID, "head", "digest"); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishRunHead(sctx, "head", "", nil); err == nil || !strings.Contains(err.Error(), "offline runs cannot publish") {
+		t.Fatalf("head publication did not refuse before Git: %v", err)
+	}
+	if _, err := PublishTestPreview(sctx); err == nil || !strings.Contains(err.Error(), "offline runs cannot publish") {
+		t.Fatalf("preview did not refuse before forge lookup: %v", err)
 	}
 }

@@ -66,6 +66,9 @@ func TestPreviewReplacementOwner(sctx *pipeline.StepContext, runs []db.TestPrevi
 }
 
 func PublishTestPreview(sctx *pipeline.StepContext) (*ipc.PublishTestPreviewResult, error) {
+	if err := pipeline.RefuseConfinedPublication(sctx.DB, sctx.Run.ID); err != nil {
+		return nil, err
+	}
 	if resolvedProvider(sctx) != scm.ProviderGitHub || resolvedHost(sctx, sctx.Repo.UpstreamURL) != "github.com" || existingPRURL(sctx) != "" {
 		return nil, fmt.Errorf("Test previews currently require a run-owned github.com PR, not an explicit existing PR")
 	}
