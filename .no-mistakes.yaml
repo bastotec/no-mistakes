@@ -9,6 +9,12 @@
 
 agent: deck
 
+# Temporary publication guard for this ready-only branch. Attach and verify
+# do-not-merge before marking the initial draft ready; never enable auto-merge.
+providers:
+  github:
+    draft_pull_requests: true
+
 commands:
   lint: "make lint"
   format: "gofmt -w ."
