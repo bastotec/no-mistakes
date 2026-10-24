@@ -214,6 +214,109 @@ func TestDocumentLaunchAcceptsVerifiedUnmovedHeadWithPreservedDirtyDocument(t *t
 	}
 }
 
+func TestDocumentLaunchReconcilesRecoveredRebase(t *testing.T) {
+	for _, retained := range []bool{true, false} {
+		t.Run(map[bool]string{true: "retained", false: "lost-content"}[retained], func(t *testing.T) {
+			p, d := startTestDaemonWithSteps(t, func() []pipeline.Step { return []pipeline.Step{&mockPassStep{name: types.StepDocument}} })
+			repo, base := setupTestGitRepo(t, p, d, "rebased-document")
+			ctx := context.Background()
+			gateDir := p.RepoDir(repo.ID)
+			gitCmd(t, repo.WorkingPath, "checkout", "-b", "feature")
+			if err := os.WriteFile(filepath.Join(repo.WorkingPath, "feature.txt"), []byte("operator work\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "add", "feature.txt")
+			gitCmd(t, repo.WorkingPath, "commit", "-m", "operator work")
+			submitted := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			gitCmd(t, gateDir, "fetch", repo.WorkingPath, submitted+":refs/heads/feature")
+			gitCmd(t, repo.WorkingPath, "checkout", "-b", "advanced", base)
+			if err := os.WriteFile(filepath.Join(repo.WorkingPath, "upstream.txt"), []byte("upstream advance\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "add", "upstream.txt")
+			gitCmd(t, repo.WorkingPath, "commit", "-m", "upstream advance")
+			if retained {
+				gitCmd(t, repo.WorkingPath, "cherry-pick", submitted)
+			}
+			head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			previous, err := d.InsertRun(repo.ID, "feature", submitted, base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunHeadSHA(previous.ID, head); err != nil {
+				t.Fatal(err)
+			}
+			if err := d.UpdateRunStatusWithVerifiedHead(previous.ID, types.RunFailed, head); err != nil {
+				t.Fatal(err)
+			}
+			anchor := "refs/no-mistakes/recover/" + previous.ID
+			gitCmd(t, gateDir, "fetch", repo.WorkingPath, head+":"+anchor)
+			gitCmd(t, repo.WorkingPath, "checkout", "feature")
+			if retained {
+				svc := branchsync.Service{DB: d, Repo: repo, WorkDir: repo.WorkingPath, GateDir: gateDir, Paths: p}
+				if state := svc.Recover(ctx, false); !state.Recovered || !state.Changed {
+					t.Fatalf("adoption = %+v", state)
+				}
+			} else {
+				gitCmd(t, repo.WorkingPath, "checkout", "-B", "feature", head)
+				if err := d.SetRunCustodyReturned(previous.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if got := gitOutput(t, gateDir, "rev-parse", "refs/heads/feature"); got != submitted {
+				t.Fatal("recovery unexpectedly moved gate mirror")
+			}
+			if _, err := git.Run(ctx, gateDir, "merge-base", "--is-ancestor", submitted, head); err == nil {
+				t.Fatal("fixture is not a rewritten history")
+			}
+			before, err := d.GetRunsByRepo(repo.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			client, err := ipc.Dial(p.Socket())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer client.Close()
+			request := ipc.StartDocumentRunParams{StartHistoryRunParams: ipc.StartHistoryRunParams{StartFreshRunParams: ipc.StartFreshRunParams{RepoID: repo.ID, Branch: "feature", HeadSHA: head, Intent: "same task", LaunchNonce: "rebased-document", ValidationGeneration: "v1"}, WorkDir: repo.WorkingPath}, DocumentTimeout: "90m"}
+			var result ipc.StartFreshRunResult
+			launchErr := client.Call(ipc.MethodStartDocumentRun, &request, &result)
+			if !retained {
+				if launchErr == nil || !strings.Contains(launchErr.Error(), "retention") {
+					t.Fatalf("lost content accepted: %v", launchErr)
+				}
+				after, err := d.GetRunsByRepo(repo.ID)
+				if err != nil || len(after) != len(before) {
+					t.Fatalf("refusal created run: %v, %v", after, err)
+				}
+				if got := gitOutput(t, gateDir, "rev-parse", "refs/heads/feature"); got != submitted {
+					t.Fatal("refusal moved mirror")
+				}
+			} else {
+				if launchErr != nil {
+					t.Fatal(launchErr)
+				}
+				run := waitForRunTerminalState(t, d, result.Receipt.RunID)
+				if run.Status != types.RunCompleted || run.HeadSHA != head {
+					t.Fatalf("continuation = %+v", run)
+				}
+				if timeout, err := d.DocumentTimeout(run.ID); err != nil || timeout != 90*time.Minute {
+					t.Fatalf("timeout = %s, %v", timeout, err)
+				}
+				if archived := gitOutput(t, gateDir, "rev-parse", "refs/tags/no-mistakes-abandoned/feature/"+submitted); archived != submitted {
+					t.Fatalf("submitted head not archived: %s", archived)
+				}
+			}
+			if got := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD"); got != head {
+				t.Fatal("caller head moved")
+			}
+			if got := gitOutput(t, gateDir, "rev-parse", anchor); got != head {
+				t.Fatal("terminal recovery anchor moved")
+			}
+		})
+	}
+}
+
 func TestDocumentLaunchRefusesUnresolvedCustodyBeforeImport(t *testing.T) {
 	for _, evidence := range []string{"no-runs", "other-branch", "legacy", "legacy-returned", "unverified"} {
 		t.Run(evidence, func(t *testing.T) {
