@@ -2240,6 +2240,9 @@ func (s *Service) provenNeverStartedPreflightAttempt(ctx context.Context, older 
 	if invocations, err := s.DB.GetAgentInvocationsByRun(older.ID); err != nil || len(invocations) != 0 {
 		return false
 	}
+	if gates, err := s.DB.GetRunGates(older.ID); err != nil || gates != "" {
+		return false
+	}
 	return true
 }
 

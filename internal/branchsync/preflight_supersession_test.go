@@ -461,6 +461,11 @@ func TestPreflightSupersessionRefutesUnprovenOlderAttempts(t *testing.T) {
 			f.t.Fatal(err)
 		}
 	})
+	refuted("older has a pinned launch gate record", func(f *preflightSupersessionFixture) {
+		if err := f.database.SetRunGates(f.olderID, "[]"); err != nil {
+			f.t.Fatal(err)
+		}
+	})
 	// A non-preflight error is an uncertain launch route.
 	refuted("older error is not the preflight route", func(f *preflightSupersessionFixture) {
 		if err := f.database.UpdateRunError(f.olderID, "review failed for other reasons"); err != nil {
