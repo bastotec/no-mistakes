@@ -135,6 +135,10 @@ func (m *RunManager) recoverableParkedRuns(ctx context.Context) []recoveredRunPl
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", "conflicting active run for branch")
 			continue
 		}
+		frozen, freezeErr := m.db.MonitorFrozen(run.ID)
+		if freezeErr != nil || frozen {
+			continue
+		}
 		plan, err := m.prepareRecoveredRun(ctx, run)
 		if err != nil {
 			slog.Warn("active run cannot be safely resumed", "run_id", run.ID, "error", err)
@@ -661,6 +665,9 @@ func (m *RunManager) sweepRunWorktreeProcesses(repoID, runID, wtDir string) {
 // a cleanup pass costs disk, while failing a finished run over it would cost
 // the user their result.
 func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
+	if frozen, err := m.db.MonitorFrozen(runID); err != nil || frozen {
+		return
+	}
 	configured := ""
 	policy := evidenceReapPolicy{
 		Retention: config.DefaultEvidenceRetention,
@@ -689,6 +696,9 @@ func (m *RunManager) cleanupRunEvidence(cfg *config.Config, runID string) {
 // execution returned, or which was resumed after a crash all reach this point by
 // different routes. reason distinguishes the routes in the log.
 func (m *RunManager) removeRunWorktree(repoID, runID, gateDir, wtDir, reason string) {
+	if frozen, err := m.db.MonitorFrozen(runID); err != nil || frozen {
+		return
+	}
 	activeRepair, err := m.db.HasStartedRepairDispatch(runID)
 	if err != nil || activeRepair {
 		slog.Warn("preserving run worktree: repair process may still mutate it", "run_id", runID, "error", err)
@@ -1509,6 +1519,15 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("active_run_lookup")
 		return "", fmt.Errorf("check active run: %w", err)
 	}
+	if active != nil {
+		frozen, err := m.db.MonitorFrozen(active.ID)
+		if err != nil {
+			return "", err
+		}
+		if frozen {
+			return "", fmt.Errorf("run %s has a frozen monitor disposition; no superseding run started", active.ID)
+		}
+	}
 	if active != nil && active.PreserveHistoryBaseSHA != nil {
 		trackStartFailure("preserve_history_protected")
 		recorded := active.HeadSHA
@@ -2275,6 +2294,23 @@ func (m *RunManager) parkShutdownInterruptedRun(runID string) error {
 
 // HandleCancel stops an active run and propagates cancellation to the executor.
 func (m *RunManager) HandleCancel(runID string) error {
+	run, err := m.db.GetRun(runID)
+	if err != nil {
+		return err
+	}
+	if run == nil {
+		return fmt.Errorf("no active run %s", runID)
+	}
+	branchMu := m.branchLock(run.RepoID, run.Branch)
+	branchMu.Lock()
+	defer branchMu.Unlock()
+	frozen, err := m.db.MonitorFrozen(runID)
+	if err != nil {
+		return err
+	}
+	if frozen {
+		return fmt.Errorf("run %s has a frozen monitor disposition; cancellation would discard unfinished validation", runID)
+	}
 	m.mu.Lock()
 	cancel, ok := m.cancels[runID]
 	m.mu.Unlock()

@@ -46,6 +46,13 @@ func (m *Model) applyEvent(event ipc.Event) bool {
 	switch event.Type {
 	case ipc.EventRunUpdated, ipc.EventRunCreated:
 		m.err = nil
+		if event.MonitorStopped != nil {
+			m.run.MonitorStopped = *event.MonitorStopped
+			if m.run.MonitorStopped {
+				m.run.CIReady = false
+				m.run.CIReadyNoCI = false
+			}
+		}
 		if event.Status != nil {
 			m.run.Status = types.RunStatus(*event.Status)
 		}

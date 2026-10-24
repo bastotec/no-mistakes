@@ -62,6 +62,8 @@ type Executor struct {
 	shared   *RunShared
 	workDir  string
 
+	monitorFrozen               bool
+	monitorStopCh               chan monitorStopRequest
 	mu                          sync.Mutex
 	approvalCh                  chan approvalResponse // buffered channel for approval responses
 	waiting                     bool                  // true when blocked on approval
@@ -120,6 +122,7 @@ func NewExecutor(database *db.DB, p *paths.Paths, cfg *config.Config, ag agent.A
 		agent:                 ag,
 		steps:                 steps,
 		onEvent:               onEvent,
+		monitorStopCh:         make(chan monitorStopRequest),
 		approvalCh:            make(chan approvalResponse, 1),
 		gateReconcileInterval: defaultGateReconcileInterval,
 		gateReconcileTimeout:  defaultGateReconcileTimeout,
@@ -173,6 +176,10 @@ func (e *Executor) Respond(step types.StepName, action types.ApprovalAction, fin
 // findings on a fix action before the fix agent runs.
 func (e *Executor) RespondWithOverrides(step types.StepName, action types.ApprovalAction, findingIDs []string, instructions map[string]string, addedFindings []types.Finding) error {
 	e.mu.Lock()
+	if e.monitorFrozen {
+		e.mu.Unlock()
+		return fmt.Errorf("monitor disposition freezes unfinished validation; no response accepted")
+	}
 	if !e.waiting {
 		e.mu.Unlock()
 		return fmt.Errorf("no step awaiting approval")
@@ -524,18 +531,19 @@ func (e *Executor) resumeWatch(ctx context.Context, run *db.Run, repo *db.Repo, 
 	run.CIReadyAt = nil
 	run.CIReadyNoCI = false
 	sctx := &StepContext{
-		Ctx:          ctx,
-		Run:          run,
-		Repo:         repo,
-		WorkDir:      workDir,
-		GateDir:      e.paths.RepoDir(repo.ID),
-		Config:       e.config,
-		ForgeContext: e.forge,
-		DB:           e.db,
-		StepResultID: sr.ID,
-		Agent:        e.agent,
-		Sessions:     e.sessions,
-		Shared:       e.shared,
+		MonitorCheckpoint: e.monitorCheckpoint,
+		Ctx:               ctx,
+		Run:               run,
+		Repo:              repo,
+		WorkDir:           workDir,
+		GateDir:           e.paths.RepoDir(repo.ID),
+		Config:            e.config,
+		ForgeContext:      e.forge,
+		DB:                e.db,
+		StepResultID:      sr.ID,
+		Agent:             e.agent,
+		Sessions:          e.sessions,
+		Shared:            e.shared,
 		Log: func(message string) {
 			slog.Info("resumed ci watch reconciliation", "run_id", run.ID, "message", message)
 		},
@@ -1316,26 +1324,27 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 		return nil
 	}
 	sctx := &StepContext{
-		Ctx:              ctx,
-		Run:              run,
-		Repo:             repo,
-		WorkDir:          workDir,
-		GateDir:          e.paths.RepoDir(repo.ID),
-		Agent:            stepAgent,
-		Config:           e.config,
-		ForgeContext:     e.forge,
-		DB:               e.db,
-		StepResultID:     sr.ID,
-		UserIntent:       userIntent,
-		IntentSource:     userIntentSource,
-		Sessions:         e.sessions,
-		Shared:           e.shared,
-		EvidenceDir:      e.runEvidenceDir(run.ID),
-		Fixing:           state.fixing,
-		PreviousFindings: state.previousFindings,
-		DeferredFindings: state.deferredFindings,
-		Log:              writeLog,
-		LogChunk:         writeLogChunk,
+		MonitorCheckpoint: e.monitorCheckpoint,
+		Ctx:               ctx,
+		Run:               run,
+		Repo:              repo,
+		WorkDir:           workDir,
+		GateDir:           e.paths.RepoDir(repo.ID),
+		Agent:             stepAgent,
+		Config:            e.config,
+		ForgeContext:      e.forge,
+		DB:                e.db,
+		StepResultID:      sr.ID,
+		UserIntent:        userIntent,
+		IntentSource:      userIntentSource,
+		Sessions:          e.sessions,
+		Shared:            e.shared,
+		EvidenceDir:       e.runEvidenceDir(run.ID),
+		Fixing:            state.fixing,
+		PreviousFindings:  state.previousFindings,
+		DeferredFindings:  state.deferredFindings,
+		Log:               writeLog,
+		LogChunk:          writeLogChunk,
 		LogFile: func(text string) {
 			fmt.Fprintln(logFile, text)
 			touchLogActivity(text, true)

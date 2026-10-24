@@ -487,6 +487,9 @@ func preserveStaleRunHeads(d *db.DB, p *paths.Paths, excluded map[string]struct{
 		return
 	}
 	for _, wt := range active {
+		if frozen, err := d.MonitorFrozen(wt.RunID); err != nil || frozen {
+			continue
+		}
 		if _, skip := excluded[wt.RunID]; skip {
 			continue
 		}
@@ -1450,6 +1453,30 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 		return &ipc.RespondResult{OK: true}, nil
 	})
 
+	srv.Handle(ipc.MethodStopMonitor, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		cwd := procreap.ProcessCWD(ipc.PeerPID(ctx))
+		if cwd == "" {
+			return nil, fmt.Errorf("monitor-stop requires verifiable authenticated caller topology")
+		}
+		result, err := classify(ctx, cwd, false, false)
+		if err != nil {
+			return nil, err
+		}
+		if result.Nested {
+			return nil, fmt.Errorf("%s", gatecontext.RefusalMessage(result))
+		}
+		var p db.MonitorDisposition
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		requestCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		if err := mgr.HandleStopMonitor(requestCtx, p); err != nil {
+			return nil, err
+		}
+		return &ipc.StopMonitorResult{MonitorStopped: true}, nil
+	})
+
 	srv.Handle(ipc.MethodCancelRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
 		if err := refuseNested(ctx, false); err != nil {
 			return nil, err
@@ -1540,6 +1567,7 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		RepoID:                 r.RepoID,
 		Branch:                 r.Branch,
 		HeadSHA:                r.HeadSHA,
+		LastPushedSHA:          r.LastPushedSHA,
 		SubmittedHeadSHA:       r.SubmittedHeadSHA,
 		BaseSHA:                r.BaseSHA,
 		Status:                 r.Status,
@@ -1554,6 +1582,14 @@ func runToInfo(d *db.DB, r *db.Run, steps []*db.StepResult) *ipc.RunInfo {
 		AwaitingAgentSince:     r.AwaitingAgentSince,
 		CreatedAt:              r.CreatedAt,
 		UpdatedAt:              r.UpdatedAt,
+	}
+	// A frozen run keeps its old readiness evidence in storage, but it is no
+	// longer a live readiness claim. Failure to read disposition fails closed.
+	frozen, freezeErr := d.MonitorFrozen(r.ID)
+	info.MonitorStopped = frozen
+	if frozen || freezeErr != nil {
+		info.CIReady = false
+		info.CIReadyNoCI = false
 	}
 	if work, err := d.GetRunSurvivedWork(r.ID); err == nil {
 		info.SurvivedWork = work
