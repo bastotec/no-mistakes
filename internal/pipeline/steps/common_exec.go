@@ -200,6 +200,13 @@ func stepGitRunRaw(sctx *pipeline.StepContext, args ...string) (string, error) {
 // stepGitRunRawContext is stepGitRunRaw bounded by a deadline the caller owns
 // rather than the step's own, for work that carries its own timeout.
 func stepGitRunRawContext(ctx context.Context, sctx *pipeline.StepContext, args ...string) (string, error) {
+	if git.CallbacksDisabled(ctx) {
+		var err error
+		args, err = git.CallbackFreeArgs(ctx, sctx.WorkDir, args...)
+		if err != nil {
+			return "", err
+		}
+	}
 	cmd := stepCmdContext(sctx, ctx, "git", args...)
 	cmd.Env = git.NonInteractiveEnvFrom(cmd.Env, sctx.WorkDir)
 	out, err := cmd.Output()

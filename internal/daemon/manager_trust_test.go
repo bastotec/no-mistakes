@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -16,7 +17,98 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/types"
 )
+
+func TestConfinedLaunchRememberedPRDisablesIntegrationCallbacks(t *testing.T) {
+	t.Setenv("NM_DEMO", "")
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX callback fixture")
+	}
+	bin := t.TempDir()
+	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, "gh"), "../pipeline/fakecli")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("build fake gh: %v %s", err, out)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("FAKE_CLI_MODE", "gh")
+	for _, mode := range []string{"ordinary", "confined", "isolated-test"} {
+		t.Run(mode, func(t *testing.T) {
+			root := t.TempDir()
+			p := paths.WithRoot(filepath.Join(root, "state"))
+			t.Setenv("NM_HOME", filepath.Join(root, "state"))
+			if err := p.EnsureDirs(); err != nil {
+				t.Fatal(err)
+			}
+			database, err := db.Open(p.DB())
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer database.Close()
+			repo, _ := setupTestGitRepo(t, p, database, "callback-pr")
+			repo, err = database.UpdateRepoForkURL(repo.ID, "https://github.com/contributor/widgets.git")
+			if err != nil {
+				t.Fatal(err)
+			}
+			marker := filepath.Join(root, "host-callback")
+			hooks := filepath.Join(repo.WorkingPath, ".githooks")
+			if err := os.Mkdir(hooks, 0755); err != nil {
+				t.Fatal(err)
+			}
+			hook := "#!/bin/sh\nwhile read old new ref; do\ncase \"$ref\" in refs/remotes/no-mistakes-upstream/*) printf '%s\\n' \"$ref\" >> '" + marker + "';; esac\ndone\n"
+			if err := os.WriteFile(filepath.Join(hooks, "reference-transaction"), []byte(hook), 0755); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, repo.WorkingPath, "add", ".")
+			gitCmd(t, repo.WorkingPath, "commit", "-m", "submitted integration hook")
+			head := gitOutput(t, repo.WorkingPath, "rev-parse", "HEAD")
+			gitCmd(t, repo.WorkingPath, "push", "gate", "HEAD:refs/heads/main")
+			gitCmd(t, p.RepoDir(repo.ID), "config", "core.hooksPath", ".githooks")
+			stubExplicitUpstream(t, p, repo, "release")
+			const target = "https://github.com/upstream/widgets/pull/168"
+			prior, err := database.InsertRun(repo.ID, "feature", head, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.AssociateRunWithExistingPR(prior.ID, repo.ID, "feature", target, "release"); err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunStatus(prior.ID, types.RunCompleted); err != nil {
+				t.Fatal(err)
+			}
+			payload := fmt.Sprintf(`{"number":168,"html_url":%q,"state":"open","base":{"ref":"release","repo":{"full_name":"upstream/widgets","html_url":"https://github.com/upstream/widgets"}},"head":{"ref":"feature","sha":%q,"repo":{"full_name":"contributor/widgets","html_url":"https://github.com/contributor/widgets"}}}`, target, head)
+			t.Setenv("FAKE_CLI_EXISTING_PR_JSON", payload)
+			cfg := fmt.Sprintf("agent: deck\nagent_path_override:\n  deck: %q\n", filepath.Join(root, "missing-deck"))
+			if err := os.WriteFile(p.ConfigFile(), []byte(cfg), 0600); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			switch mode {
+			case "confined":
+				ctx = context.WithValue(ctx, confinedRunLaunchKey{}, true)
+			case "isolated-test":
+				ctx = context.WithValue(ctx, isolatedTestLaunchKey{}, true)
+			}
+			mgr := NewRunManager(database, p, nil)
+			_, err = mgr.startRunWithIntentSource(ctx, repo, "feature", head, head, "fixture", nil, "fixture", db.RunIntentSourceAgent, "", "", "")
+			if err == nil || !strings.Contains(err.Error(), "no runnable agent found for configured agent deck") {
+				t.Fatalf("setup must stop after the integration fetch and before execution: %v", err)
+			}
+			ref := "refs/remotes/no-mistakes-upstream/upstream/widgets/release"
+			if got := gitOutput(t, p.RepoDir(repo.ID), "rev-parse", ref); got != head {
+				t.Fatalf("integration fetch = %s, want %s", got, head)
+			}
+			data, err := os.ReadFile(marker)
+			if mode == "ordinary" {
+				if err != nil || !strings.Contains(string(data), ref) {
+					t.Fatalf("ordinary integration hook did not run: %q %v", data, err)
+				}
+			} else if !os.IsNotExist(err) {
+				t.Fatalf("%s integration hook ran on host: %q %v", mode, data, err)
+			}
+		})
+	}
+}
 
 func TestRunConfigFetchCallbackPolicy(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -123,7 +215,11 @@ func TestRunConfigFetchCallbackPolicy(t *testing.T) {
 						}
 					}
 					fresh := advance()
-					if err := fetchRunDefaultBranch(ctx, wt, repo, mode != "ordinary"); err != nil {
+					fetchCtx := ctx
+					if mode != "ordinary" {
+						fetchCtx = git.WithoutCallbacks(ctx)
+					}
+					if err := fetchRunDefaultBranch(fetchCtx, wt, repo); err != nil {
 						t.Fatal(err)
 					}
 					assertFetch("launch", fresh)

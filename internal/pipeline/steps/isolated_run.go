@@ -289,6 +289,9 @@ func confinedRunConfig(src *config.Config) config.Config {
 		IgnorePatterns: src.IgnorePatterns, ProtectedPaths: src.ProtectedPaths, AgentTimeout: src.AgentTimeout,
 		TestAgentTimeout: src.TestAgentTimeout, ReviewAgentTimeout: src.ReviewAgentTimeout, AgentConfig: src.AgentConfig, DisableProjectSettings: src.DisableProjectSettings,
 		Review: src.Review, Document: src.Document, AutoFix: src.AutoFix}
+	// The single-use model channel cannot safely serve parallel reviewers.
+	cfg.Review.Sizing = reviewSizingOf(src)
+	cfg.Review.Sizing.Fixed = config.ReviewEffortMedium
 	cfg.Review.Routes = config.ReviewRoutesRaw{}
 	return cfg
 }

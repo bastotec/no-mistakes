@@ -54,6 +54,13 @@ func RunRawLimited(ctx context.Context, dir string, maxBytes int, args ...string
 	if maxBytes < 0 {
 		return nil, false, fmt.Errorf("git stdout limit must not be negative")
 	}
+	if CallbacksDisabled(ctx) {
+		var err error
+		args, err = CallbackFreeArgs(ctx, dir, args...)
+		if err != nil {
+			return nil, false, err
+		}
+	}
 	if isBareGitDir(dir) {
 		args = append([]string{"--git-dir=" + dir}, args...)
 	}
@@ -150,6 +157,13 @@ func runInDirWithEnvRaw(ctx context.Context, dir string, extraEnv []string, args
 }
 
 func runInDirWithEnvAndInputRaw(ctx context.Context, dir string, extraEnv []string, input string, args ...string) ([]byte, error) {
+	if CallbacksDisabled(ctx) {
+		var err error
+		args, err = CallbackFreeArgs(ctx, dir, args...)
+		if err != nil {
+			return nil, err
+		}
+	}
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = dir
 	cmd.Env = append(nonInteractiveEnvForContext(ctx, dir), extraEnv...)

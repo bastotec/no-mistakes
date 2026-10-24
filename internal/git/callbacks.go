@@ -9,7 +9,18 @@ import (
 	"strings"
 )
 
+type callbacksDisabledKey struct{}
+
+func WithoutCallbacks(ctx context.Context) context.Context {
+	return context.WithValue(ctx, callbacksDisabledKey{}, true)
+}
+
+func CallbacksDisabled(ctx context.Context) bool {
+	return ctx.Value(callbacksDisabledKey{}) == true
+}
+
 func CallbackFreeArgs(ctx context.Context, dir string, args ...string) ([]string, error) {
+	ctx = context.WithValue(ctx, callbacksDisabledKey{}, false)
 	overrides := []string{"-c", "core.hooksPath=" + os.DevNull, "-c", "core.fsmonitor=false", "-c", "submodule.recurse=false"}
 	args = append([]string(nil), args...)
 	for i, arg := range args {

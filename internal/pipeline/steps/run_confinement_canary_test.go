@@ -64,6 +64,28 @@ func roundTripIsolatedRunInput(t *testing.T, input isolatedRunInput) isolatedRun
 	return request
 }
 
+func TestConfinedRunReviewPlansSingleReviewer(t *testing.T) {
+	for _, effort := range []string{config.ReviewEffortHigh, config.ReviewEffortXHigh, config.ReviewEffortMax} {
+		t.Run(effort, func(t *testing.T) {
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, t.TempDir(), "base", "head", config.Commands{})
+			sctx.Config.Review.Sizing = config.ResolveReviewSizing(config.ReviewSizingRaw{MinEffort: effort})
+			sctx.Config.Review.Routes = config.ReviewRoutesRaw{Finders: []string{"finder"}, Verify: "verifier"}
+			request := roundTripIsolatedRunInput(t, newIsolatedRunInput(sctx, &ReviewStep{}, "fixture", runconfine.DefaultPolicy(), "digest"))
+			worker := request.stepContext(sctx.DB, sctx.Agent, nil, func(isolatedStepEvent) error { return nil })
+			workload := &agent.InvocationWorkload{Files: 50, Lines: 2000}
+			changed := []string{"internal/auth/permissions.go"}
+			confined := planReview(reviewSizingOf(worker.Config), worker.Config.Review.Routes, workload, changed)
+			if confined.multiAngle() || confined.Effort != config.ReviewEffortMedium || confined.Tuning == nil || confined.VerifyCap != 0 || confined.Tuning.Model != "" {
+				t.Fatalf("confined review did not plan one reviewer: %+v", confined)
+			}
+			ordinary := planReview(reviewSizingOf(sctx.Config), sctx.Config.Review.Routes, workload, changed)
+			if !ordinary.multiAngle() || ordinary.Effort != effort || ordinary.VerifyCap == 0 || ordinary.VerifyTuning.Model != "verifier" {
+				t.Fatalf("ordinary review lost its sizing or routes: %+v", ordinary)
+			}
+		})
+	}
+}
+
 func TestIsolatedRunDispatchRefusesUnpinnedRun(t *testing.T) {
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, t.TempDir(), "base", "head", config.Commands{})
 	if _, _, err := runconfinePolicyForDispatch(sctx); err == nil || !strings.Contains(err.Error(), "run is not confined") {

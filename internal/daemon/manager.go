@@ -1403,17 +1403,13 @@ func stageCallerHeadForComparison(ctx context.Context, gateDir, workingPath, cal
 // rewrites clone or gate remote configuration. When the values agree after
 // redaction, origin remains authoritative so embedded credentials retained in
 // the gate can still authenticate without ever entering the database.
-func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo, callbacksDisabled bool) error {
+func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) error {
 	remote := repo.UpstreamURL
 	originURL, err := git.GetRemoteURL(ctx, workDir, "origin")
 	if !repo.URLsVerified || (err == nil && safeurl.Redact(originURL) == repo.UpstreamURL) {
 		remote = "origin"
 	}
-	fetch := git.FetchRemoteBranchToRef
-	if callbacksDisabled {
-		fetch = git.FetchRemoteBranchToRefWithoutCallbacks
-	}
-	return fetch(ctx, workDir, remote, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
+	return git.FetchRemoteBranchToRef(ctx, workDir, remote, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
@@ -1491,6 +1487,10 @@ func (m *RunManager) endQuietWindow(ctx context.Context, repoID, branch, runID s
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL, existingPR, preserveHistoryBase string) (string, error) {
+	callbacksDisabled := ctx.Value(confinedRunLaunchKey{}) == true || ctx.Value(isolatedTestLaunchKey{}) == true
+	if callbacksDisabled {
+		ctx = git.WithoutCallbacks(ctx)
+	}
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1696,7 +1696,6 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("carry_survived_work")
 		return "", fmt.Errorf("carry interrupted repair work: %w", err)
 	}
-	callbacksDisabled := ctx.Value(confinedRunLaunchKey{}) == true || ctx.Value(isolatedTestLaunchKey{}) == true
 	worktreeAdd := git.WorktreeAdd
 	if callbacksDisabled {
 		worktreeAdd = git.WorktreeAddWithoutCallbacks
@@ -1742,7 +1741,7 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 	// branch has already removed - silently running stale shell.
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
-		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo, callbacksDisabled)
+		fetchErr := fetchRunDefaultBranch(ctx, wtDir, repo)
 		if fetchErr != nil {
 			slog.Warn("failed to fetch default branch into worktree; trusted config disabled (commands/agent from pushed branch will be dropped)", "run_id", run.ID, "branch", repo.DefaultBranch, "error", fetchErr)
 		} else if sha, err := git.ResolveRef(ctx, wtDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {

@@ -123,7 +123,7 @@ func (m *RunManager) startConfinedLaunch(ctx context.Context, p *ipc.StartHistor
 		if state.State == branchsync.StatePipelineOwned || state.State == branchsync.StatePushInProgress {
 			return "", fmt.Errorf("%s: branch custody unavailable: %s", refusalPrefix, state.Safety)
 		}
-		fetchCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		fetchCtx, cancel := context.WithTimeout(git.WithoutCallbacks(ctx), 2*time.Minute)
 		defer cancel()
 		if _, err := git.Run(fetchCtx, gateDir, "fetch", "--no-tags", "--no-write-fetch-head", p.WorkDir, p.HeadSHA); err != nil {
 			return "", fmt.Errorf("%s: import exact head: %w", refusalPrefix, err)
