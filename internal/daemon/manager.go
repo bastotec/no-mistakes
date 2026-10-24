@@ -27,6 +27,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/runconfine"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -1608,6 +1609,23 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		if err := m.db.EnableTestIsolation(run.ID); err != nil {
 			m.db.UpdateRunError(run.ID, "pin Test isolation failed")
 			return "", fmt.Errorf("pin Test isolation: %w", err)
+		}
+	}
+	if ctx.Value(confinedRunLaunchKey{}) == true {
+		// The whole-run confinement pin is minted against the submitted head
+		// before any pipeline side effect; every dispatch re-derives the
+		// digest and refuses on mismatch (runconfine.PolicyDigest). Head
+		// equality is not the contract - repairs legitimately advance the
+		// head - digest equality is.
+		policy := runconfine.DefaultPolicy()
+		if err := policy.Validate(); err != nil {
+			m.db.UpdateRunError(run.ID, "pin run confinement failed")
+			return "", fmt.Errorf("pin run confinement: %w", err)
+		}
+		digest := runconfine.PolicyDigest(policy, run.ID, headSHA)
+		if err := m.db.EnableRunConfinement(run.ID, headSHA, digest); err != nil {
+			m.db.UpdateRunError(run.ID, "pin run confinement failed")
+			return "", fmt.Errorf("pin run confinement: %w", err)
 		}
 	}
 	// The target constrains this run from here on, but it is not durable until
