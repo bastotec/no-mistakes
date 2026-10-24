@@ -391,3 +391,40 @@ func footerContains(plain string, needles ...string) bool {
 	}
 	return false
 }
+
+func TestModel_Yolo_RedCIGateIsFixedButNeverApproved(t *testing.T) {
+	findings := `{"findings":[{"id":"ci-1","severity":"error","description":"CI check failing: Behavior portable serial 8","action":"ask-user","category":"ci-check","check":"Behavior portable serial 8"}]}`
+	for _, tc := range []struct {
+		status      types.StepStatus
+		wantActions []types.ApprovalAction
+	}{
+		{types.StepStatusAwaitingApproval, []types.ApprovalAction{types.ActionFix}},
+		{types.StepStatusFixReview, nil},
+	} {
+		t.Run(string(tc.status), func(t *testing.T) {
+			sock, client, snapshot := captureRespond(t)
+			run := testRun()
+			run.Steps = []ipc.StepResultInfo{{StepName: types.StepCI, Status: tc.status, FindingsJSON: &findings}}
+			m := NewModel(sock, client, run)
+			m.yoloMode = true
+			m.stepDiffLoaded[types.StepCI] = true
+			for range 3 {
+				if cmd := m.maybeAutoApproveCmd(); cmd != nil {
+					if msg := cmd(); msg != nil {
+						t.Fatalf("automatic response failed: %v", msg)
+					}
+				}
+			}
+			var got []types.ApprovalAction
+			for _, call := range snapshot() {
+				got = append(got, call.Action)
+			}
+			if !slices.Equal(got, tc.wantActions) {
+				t.Fatalf("yolo responses to a red CI gate = %v, want %v", got, tc.wantActions)
+			}
+			if m.yoloApproved[types.StepCI] {
+				t.Fatal("yolo marked a red CI gate approved")
+			}
+		})
+	}
+}

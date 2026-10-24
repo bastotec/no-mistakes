@@ -134,7 +134,7 @@ func newAxiRunCmd() *cobra.Command {
 			"prints it. With --yes it auto-resolves eligible gates (fixing actionable\n" +
 			"findings - including ask-user findings, with no escalation - then\n" +
 			"accepting the result) until a decision point or outcome.\n" +
-			"Protected-path refusals and repair-budget exhaustion require an explicit response, even with --yes.\n\n" +
+			"Protected-path refusals, repair-budget exhaustion, and approving or skipping a red CI gate require an explicit response, even with --yes.\n\n" +
 			"--intent is required when starting a new run: pass what the user set out\n" +
 			"to accomplish (the goal behind the change, not a description of the diff)\n" +
 			"so no-mistakes uses it directly instead of inferring it from transcripts.\n\n" +
@@ -203,7 +203,7 @@ func newAxiRunCmd() *cobra.Command {
 			})
 		},
 	}
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome; protected-path refusals and repair-budget exhaustion require an explicit response")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve eligible gates (fix findings, then accept) until a decision point or outcome; protected-path refusals, repair-budget exhaustion, and approving or skipping a red CI gate require an explicit response")
 	cmd.Flags().StringVar(&skipValue, "skip", "", "comma-separated pipeline steps to skip")
 	cmd.Flags().StringVar(&intent, "intent", "", "what the user set out to accomplish (not a description of the diff); used instead of inferring from transcripts (required to start a run)")
 	cmd.Flags().StringVar(&launchNonce, "launch-nonce", "", "opaque nonce for a daemon-bound pre-drive launch receipt")
@@ -963,7 +963,9 @@ func emitLaunchReceipt(cmd *cobra.Command, receipt ipc.LaunchReceipt) {
 // accepted; gates with only non-actionable findings are approved. Each step is
 // fixed at most once so a finding the fix cannot clear converges to an approval
 // instead of looping forever. Protected-path refusals always return their gate
-// for an explicit response, including under --yes.
+// for an explicit response, including under --yes. A CI gate may be fixed but
+// is never approved or skipped: once a fix is spent (or none is possible) the
+// red CI gate is returned for an explicit response.
 //
 // The CI step monitors an open PR until a human merges or closes it (a live
 // status the TUI shows), so it never reaches a terminal state on its own. An
@@ -1018,6 +1020,10 @@ func driveRunWithReconciler(ctx context.Context, progress io.Writer, client *ipc
 				continue
 			}
 			action, findingIDs := gateResolution(gate, fixedSteps[gate.Name])
+			if action != types.ActionFix && !pipeline.UnattendedMayApprove(types.StepName(gate.Name)) {
+				fmt.Fprintf(progress, "%s: CI is not green; --yes never approves or skips a red CI gate, so it awaits an explicit response\n", gate.Name)
+				return run, false, nil
+			}
 			if action == types.ActionFix {
 				fixedSteps[gate.Name] = true
 			}
@@ -1285,7 +1291,7 @@ func newAxiRespondCmd() *cobra.Command {
 	cmd.Flags().StringArrayVar(&finding, "finding", nil, "exact finding ID to fix; repeat for multiple findings (with --action fix)")
 	cmd.Flags().StringVar(&instructions, "instructions", "", "guidance applied to the selected findings (with --action fix)")
 	cmd.Flags().StringVar(&addFinding, "add-finding", "", "JSON finding object to add and fix (with --action fix)")
-	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path refusals and repair-budget exhaustion require an explicit response")
+	cmd.Flags().BoolVarP(&autoYes, "yes", "y", false, "auto-resolve subsequent eligible gates until a decision point or outcome; protected-path refusals, repair-budget exhaustion, and approving or skipping a red CI gate require an explicit response")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }
@@ -1379,6 +1385,11 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	}
 	if err := validateGateResponseAction(act, gateFindings); err != nil {
 		return emitError(cmd, 2, err.Error())
+	}
+	if ra.autoYes && (act == types.ActionApprove || act == types.ActionSkip) && !pipeline.UnattendedMayApprove(stepName) {
+		return emitError(cmd, 2, fmt.Sprintf("--yes cannot %s the %s gate: CI is not green", act, stepName),
+			fmt.Sprintf("Run `no-mistakes axi respond --action %s` without --yes to decide explicitly; approving past a red CI check is recorded as passed-with-override", act),
+			"Run `no-mistakes axi respond --action fix --finding <exact-id> --yes` to have the pipeline repair it")
 	}
 
 	findingIDs := append([]string(nil), ra.finding...)

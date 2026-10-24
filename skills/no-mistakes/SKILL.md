@@ -336,6 +336,15 @@ reported edit, then send `--action fix` to retry the unfinished step.
 The [protected-path reference](https://kunchenguid.github.io/no-mistakes/reference/repo-config/#protected_paths)
 owns the staging guard's scope and limitations.
 
+A CI gate is never approved or skipped under `--yes`. A CI gate only parks when
+the PR is not green - a failing check, a cancelled check no rerun replaces, a
+merge conflict, a review-bot failure, or checks awaiting approval - so
+`--yes` may answer it with `--action fix` but otherwise leaves it parked, and
+`axi respond --action approve --yes` or `--action skip --yes` is rejected there.
+Relay the failing checks to the user. Approving past a red check takes an
+explicit `axi respond --action approve` without `--yes`; only that ends the run
+`passed-with-override`.
+
 A repair-budget exhaustion gate also requires a new explicit authority-bearing
 response, even under `--yes`. Relay the failed findings, consumed limit,
 and requested additional round; do not automatically fix, approve, or skip it.
