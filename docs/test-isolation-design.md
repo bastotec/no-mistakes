@@ -1,4 +1,4 @@
-# Run-scoped Test isolation
+# Run-scoped isolation
 
 Status: implemented as an explicit per-run opt-in. The invariants below were
 recorded before implementation; the selected implementation and activation
@@ -12,12 +12,51 @@ OS-enforced boundary before launching its first child. This includes preparation
 configured commands, evidence and correction agents, repair agents, their tools,
 and grandchildren that detach from a process group. A wrapper around only
 `commands.test`, environment filtering alone, and process reaping are insufficient.
-Other steps and runs without the opt-in retain their existing execution path.
+Other steps retain their existing execution path under `--isolate-test`; the
+separate [whole-run confinement](#whole-run-confinement) opt-in extends this
+boundary to additional steps. Runs without either opt-in remain unchanged.
 
 A separate Test worker process is preferable to changing the shared daemon's
 network namespace or environment: isolation state must never be process-global in
 the daemon. Any parent-side operations needed to persist results must be narrow,
 explicit operations, not an unrestricted subprocess or network execution service.
+
+## Whole-run confinement
+
+`--isolate` extends the same substrate through the daemon executor's dispatch
+boundary, not a second sandbox implementation. The [CLI reference](src/content/docs/reference/cli.md#offline-run-confinement)
+owns its step scope, skipped operations, launch restrictions and user-visible
+limits. The Test-only opt-in remains separate.
+
+`internal/runconfine/policy.go` owns the closed policy contract. Version 1 has
+scope `all-confinable-steps` and an offline posture. Its canonical serialization
+is hashed with the run ID and immutable submitted head, then persisted in
+`run_confinement` before pipeline execution. Before each worker dispatch the
+parent re-derives the digest against that submitted head, not the current head:
+additive repairs may advance HEAD without changing authority. Missing or
+mismatched pins, unreadable state, unsupported policy versions and unavailable
+workers fail closed. Scope changes require a policy-version change; recovery
+must not reinterpret an existing pin. There is no global/repository switch and
+new reruns do not inherit this pin.
+
+The worker reconstructs the selected core step or trusted custom gate using
+narrowed configuration and an advisory database snapshot, never daemon sockets,
+forge profiles or host agent overrides. Review's model selection is constrained
+as documented under [`review.routes`](src/content/docs/reference/global-config.md#reviewroutes).
+Document and Lint remain separate invocations, rather than sharing an in-memory
+housekeeping result across namespaces. Each invocation uses the same host event
+transport and worker head-export/acknowledgement and terminal-index protocol as
+Test isolation. Head acknowledgement precedes the worker's recorded-head advance;
+terminal completion still requires validated handoffs and worker exit. The
+existing interrupted-repair custody and replay rules apply, not an unconfined
+agent replay.
+
+Offline contract canaries live in `internal/runconfine/policy_test.go`,
+`internal/pipeline/run_confinement_test.go`, and
+`internal/pipeline/steps/run_confinement_canary_test.go`; shared worker protocol
+regressions live in `internal/pipeline/steps/isolated_worker_test.go` and
+`test_isolation_contract_test.go`. These do not substitute for a running-daemon
+launch/restart journey.
 
 ## Environment allow/deny sets
 
@@ -170,6 +209,10 @@ author/committer identity. To preserve checkout and staging normalization, it al
 copies the effective scalar checkout settings selected by `PrepareGit`
 (`internal/testisolation/git.go`) and the external/default and `info/attributes`
 bytes into private files; repository `.gitattributes` keeps its normal precedence.
+An attributes path rooted in the run worktree must remain beneath that root even
+through file or parent-directory symlinks, on every handoff. Escaping paths
+refuse import rather than copying host bytes into the next worker. Explicit
+operator-selected absolute paths outside the worktree remain supported.
 Executable Git configuration is not copied. It transfers the run head's reachable
 history, the first usable integration ref and its reachable history (or the
 recorded base when no integration ref is usable), and objects referenced by the
@@ -190,14 +233,21 @@ or accepted as a completed handoff. Inspection is limited to 100,000 entries and
 128 directory levels; exceeding either bound refuses admission. Ordinary runs
 retain their existing repository and custody behavior.
 
-Host-side Git handoffs disable hooks and filesystem-monitor callbacks. For
-opted-in runs, interrupted-work capture/restore, cleanup inspection and terminal
-recovery anchoring also suppress clean, smudge, process and textconv callbacks:
-Test-writable scripts must not execute on the host during custody operations.
-These overrides are invocation-local; ordinary runs keep their existing callback
-behavior. `internal/pipeline/survived_work.go` owns the custody policy, with
-regressions in `internal/pipeline/isolated_test_repair_test.go` and running-daemon
-boundary journeys in `internal/e2e/test_isolation_boundaries_test.go`.
+For both isolation opt-ins, host-side worktree creation first registers a
+no-checkout worktree, then suppresses callbacks using the destination's effective
+configuration before materializing files: worktree-specific conditional includes
+must not introduce an executable filter after suppression. Setup and recovery
+fetches, fix-review diffs, Git handoffs, interrupted-work capture/restore, cleanup
+inspection and terminal recovery anchoring also suppress executable callbacks
+(hooks, filesystem monitors, clean/smudge/process filters and textconv where
+applicable). Worker-writable scripts must not execute on the host at these
+boundaries. Overrides are invocation-local; ordinary runs retain their existing
+callback behavior. `internal/git/callbacks.go` owns suppression and
+`internal/pipeline/survived_work.go` owns custody policy. Regressions include
+`internal/git/callbacks_test.go`, `internal/daemon/manager_trust_test.go`,
+`internal/daemon/stepdiff_test.go`, `internal/testisolation/git_test.go` and
+`internal/pipeline/isolated_test_repair_test.go`; Test-only running-daemon boundary
+journeys live in `internal/e2e/test_isolation_boundaries_test.go`.
 
 Worker errors retain Test timeout and protected-path classifications, including
 terminal repair replay, so interrupted edits keep their existing custody and

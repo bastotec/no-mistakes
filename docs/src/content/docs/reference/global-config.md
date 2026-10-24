@@ -710,6 +710,8 @@ A route is passed as the agent's model for that one invocation, so it must be a 
 For route failures and verification outcomes, see [Review](/no-mistakes/reference/pipeline-steps/#review).
 A repository's trusted [`review.routes`](/no-mistakes/reference/repo-config/#reviewroutes) overrides these field by field. How much review a change gets is the repository's [`review.sizing`](/no-mistakes/reference/repo-config/#reviewsizing).
 
+For [`axi run --isolate`](/no-mistakes/reference/cli/#offline-run-confinement), all review route overrides are cleared at the worker boundary: every reviewer, finder and verifier uses the single authorized [`NM_TEST_MODEL`](/no-mistakes/reference/environment/#opt-in-test-isolation). Review sizing, effort, turn limits and deadlines are preserved; the bridge's model allowlist is not expanded.
+
 ### ci.rerun_transient
 
 How many times the CI step may re-run a single provider-attributed check before that check reaches an approval gate.

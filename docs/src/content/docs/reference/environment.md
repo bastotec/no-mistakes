@@ -314,7 +314,9 @@ If your env vars aren't set in your login shell's rc files (`.zprofile`, `.zshrc
 
 ## Opt-in Test isolation
 
-These operator-owned variables configure prerequisites for `axi run --isolate-test`;
+These operator-owned variables configure prerequisites for both
+[`axi run --isolate-test`](/no-mistakes/reference/cli/#run-scoped-test-isolation)
+and [`axi run --isolate`](/no-mistakes/reference/cli/#offline-run-confinement);
 they do not enable isolation on their own or affect ordinary runs. Set them in the
 **isolated daemon's** startup environment. Do not restart or reconfigure a shared
 running daemon merely to try this capability.
@@ -326,12 +328,12 @@ running daemon merely to try this capability.
 | `NM_TEST_MODEL_KEY_FILE` | Absolute host-only key-file reference, outside every sandbox mount. The daemon reads it; the worker and its descendants never receive it. |
 | `NM_TEST_MODEL` | Exact model route allowed by the bridge. Requests for another model are refused. |
 
-All are required; an unsupported setup refuses rather than executing ordinary
-Test. The worker requires Linux amd64/arm64, bubblewrap, Landlock network ABI 4+
+All are required; an unsupported setup refuses rather than executing an opted-in
+step on the host. The worker requires Linux amd64/arm64, bubblewrap, Landlock network ABI 4+
 and a `CGO_ENABLED=0` no-mistakes build. The release builds already disable cgo.
 The daemon must run as an unprivileged UID for PostgreSQL. Only the Deck adapter
 is supported; the worker uses the selected Deck binary but not its host override
-arguments or hooks. Opted-in Test supports only a single repository: submodules,
+arguments or hooks. Workers under either opt-in support only a single repository: submodules,
 gitlinks and nested repositories are refused, with unsupported work retained
 rather than cleaned or published. See the [repository admission boundary](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md#durable-state-and-recovery)
 for inspection limits and custody behavior.

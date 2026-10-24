@@ -132,6 +132,7 @@ no-mistakes axi run --intent "the user's goal" --base-branch epic/foo
 | `--preserve-history` | `string` | (none) | Full integration-base commit SHA; requires `--base-branch`, preserves the submitted head and forbids automatic integration and forced publication |
 | `--existing-pr` | `string` | (none) | Explicit existing github.com PR URL; validates repository, source ref and head; remembered for the branch; never falls back to another PR |
 | `--isolate-test` | `bool` | `false` | Explicit [run-scoped Test isolation](#run-scoped-test-isolation); refuses unsupported setups |
+| `--isolate` | `bool` | `false` | Explicit [offline run confinement](#offline-run-confinement) for Review, Test, Document, Lint and repository gates, including repairs; no integration or delivery |
 | `--retire-existing-pr` | `bool` | `false` | Drop the branch's remembered PR association and start no run |
 | `--wait`        | `duration` | `8m`    | Maximum time for active-run lookup and run driving before the caller must reattach |
 | `--launch-nonce` | `string` | (none) | Non-secret correlation identifier for a durable pre-drive receipt; requires `--validation-generation` |
@@ -753,6 +754,50 @@ no-mistakes daemon status
 ```
 
 Shows the PID if the daemon is running.
+
+## Offline run confinement
+
+```sh
+no-mistakes axi run --isolate --intent "Review and validate the submitted head without integration or publication"
+```
+
+This opts one new run into the versioned offline confinement policy. The executor
+dispatches **Review, Test, Document, Lint and every repository gate**, including
+preparation and repair rounds, through the isolation worker. Each invocation has
+a fresh namespace, native PostgreSQL cluster and constrained Deck model channel;
+workers do not share a persistent namespace or disposable database. This is
+broader than [`--isolate-test`](#run-scoped-test-isolation), which confines only Test.
+
+The offline policy skips Rebase, Jev, Push, PR and CI with explicit reasons, rather
+than integrating the base or using daemon credentials for those steps. Intent
+execution is also skipped because the launch requires an explicit intent. The
+submitted head is validated as-is. A completed confined run is **not** a published
+PR or a CI validation; Test-preview publication is refused too. Daemon-owned launch
+and recovery reads still fetch trusted configuration; the offline boundary is not
+a promise that the daemon performs no network operations.
+
+Launch uses a distinct RPC to import the verified local commit without a gate
+push. Both CLI and daemon must support it; there is no ordinary-run fallback.
+It requires a clean, checked-out feature worktree and explicit intent. An active
+run is never superseded: reattachment requires its confinement pin and matching
+submitted head, intent and base. `--base-branch` remains available, but `--isolate`
+cannot combine with `--isolate-test`, skip, history, PR-association (including
+retirement), or launch-receipt flags.
+
+The run's policy pin survives repairs and daemon recovery; a mismatch refuses
+worker dispatch instead of silently changing policy. Existing runs and new
+ordinary runs or reruns do not acquire it. Request another confined run explicitly
+with `--isolate`. Use normal status, gate-response and cancellation APIs for the
+selected run; do not remove its pin to resume it unconfined.
+
+The [environment prerequisites](/no-mistakes/reference/environment/#opt-in-test-isolation)
+are shared with Test isolation, including the Linux-only substrate and Deck-only
+adapter. Unsupported setups refuse rather than running steps on the host. General
+network dependency downloads and external services are unavailable to workers;
+required dependencies must already be accessible in permitted mounts. For policy
+binding, handoff and recovery invariants, see the
+[confinement contract](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md#whole-run-confinement).
+This command does not authorize shared-daemon activation or reconfiguration.
 
 ## Run-scoped Test isolation
 
