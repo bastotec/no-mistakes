@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
@@ -177,11 +180,11 @@ esac
 // write, and with the recorded validation evidence rendered as recorded (no
 // step re-run). It also proves no live executor is required.
 func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("mock Claude requires a POSIX shell")
+	}
 	bin := t.TempDir()
 	name := "gh"
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
 	cmd := exec.Command("go", "build", "-o", filepath.Join(bin, name), "../pipeline/fakecli")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("build fake gh: %v %s", err, out)
@@ -251,5 +254,62 @@ func TestRepublishPublication_ContinuesTerminalRunThroughSanitizedRetry(t *testi
 	// The throwaway worktree is gone.
 	if _, err := os.Stat(filepath.Join(p.WorktreeDir(repo.ID, run.ID), "republish")); !os.IsNotExist(err) {
 		t.Fatalf("republish worktree survived: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{"expired-auth", "unauthenticated", "authentication expired"},
+		{"base-branch", "main", "PR step was skipped"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FAKE_CLI_MODE", "ci-gh")
+			t.Setenv("FAKE_CLI_AUTH_ERR", "authentication expired")
+			run := terminalRunWithFailedPR(t, d, repo.ID, tc.branch, head)
+			result, err := mgr.HandleRepublishPublication(t.Context(), ipc.RepublishPublicationParams{RepoID: repo.ID, RunID: run.ID, HeadSHA: head})
+			if err == nil || !strings.Contains(err.Error(), tc.want) || result != nil {
+				t.Fatalf("result = %+v, error = %v; want refusal containing %q", result, err, tc.want)
+			}
+			stored, err := d.GetRun(run.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stored.PRURL != nil || stored.Status != types.RunFailed {
+				t.Fatalf("skipped publication changed run: %+v", stored)
+			}
+			if _, err := os.Stat(filepath.Join(p.WorktreeDir(repo.ID, run.ID), "republish")); !os.IsNotExist(err) {
+				t.Fatalf("skipped publication worktree survived: %v", err)
+			}
+		})
+	}
+}
+
+func TestRepublishPublication_WaitsForTerminalCleanup(t *testing.T) {
+	p := paths.WithRoot(t.TempDir())
+	if err := p.EnsureDirs(); err != nil {
+		t.Fatal(err)
+	}
+	d, err := db.Open(p.DB())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { d.Close() })
+	repo, head := setupTestGitRepo(t, p, d, "republish-cleanup")
+	run := terminalRunWithFailedPR(t, d, repo.ID, "feature", head)
+	mgr := NewRunManager(d, p, nil)
+	done := make(chan struct{})
+	mgr.dones[run.ID] = done
+	defer close(done)
+
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	result, err := mgr.HandleRepublishPublication(ctx, ipc.RepublishPublicationParams{RepoID: repo.ID, RunID: run.ID, HeadSHA: head})
+	if result != nil || !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "cleanup") {
+		t.Fatalf("result = %+v, error = %v; want deadline waiting for cleanup", result, err)
+	}
+	if _, err := os.Stat(p.WorktreeDir(repo.ID, run.ID)); !os.IsNotExist(err) {
+		t.Fatalf("continuation created worktree before cleanup completed: %v", err)
 	}
 }

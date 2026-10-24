@@ -113,6 +113,17 @@ func (m *RunManager) HandleRepublishPublication(ctx context.Context, p ipc.Repub
 	opCtx, cancel := context.WithTimeout(ctx, republishTimeout)
 	defer cancel()
 
+	m.mu.Lock()
+	done := m.dones[run.ID]
+	m.mu.Unlock()
+	if done != nil {
+		select {
+		case <-done:
+		case <-opCtx.Done():
+			return nil, fmt.Errorf("wait for run %s cleanup: %w", run.ID, opCtx.Err())
+		}
+	}
+
 	gateDir := m.paths.RepoDir(repo.ID)
 	// The terminal run's own worktree was removed when the run finished, so
 	// carve a throwaway detached worktree from the gate bare repo at the exact
@@ -196,27 +207,38 @@ func (m *RunManager) HandleRepublishPublication(ctx context.Context, p ipc.Repub
 		log("republish refused or failed: " + safeurl.Redact(err.Error()))
 		return nil, err
 	}
+	if outcome == nil {
+		return nil, fmt.Errorf("republish returned no publication outcome")
+	}
+	if outcome.Skipped {
+		reason := strings.TrimSpace(outcome.SkipReason)
+		if reason == "" {
+			reason = "PR step was skipped"
+		}
+		return nil, fmt.Errorf("republish did not publish: %s", reason)
+	}
+	if strings.TrimSpace(outcome.PRURL) == "" {
+		return nil, fmt.Errorf("republish returned no PR URL")
+	}
 	result := &ipc.RepublishPublicationResult{
 		RunID:   run.ID,
 		HeadSHA: recorded,
+		PRURL:   outcome.PRURL,
 	}
 	for _, sr := range stepRows {
 		if sr.StepName != types.StepPR && sr.StepName != types.StepCI {
 			result.Steps = append(result.Steps, string(sr.StepName)+":"+string(sr.Status))
 		}
 	}
-	if outcome != nil && outcome.PRURL != "" {
-		result.PRURL = outcome.PRURL
-		if run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
-			// The same durable write the ordinary PR step makes when it creates
-			// a PR. Status, custody and gate refs are deliberately untouched:
-			// this is a publication continuation, not a run transition.
-			if err := m.db.UpdateRunPRURL(run.ID, outcome.PRURL); err != nil {
-				return nil, fmt.Errorf("persist PR URL: %w", err)
-			}
+	if run.PRURL == nil || strings.TrimSpace(*run.PRURL) == "" {
+		// The same durable write the ordinary PR step makes when it creates
+		// a PR. Status, custody and gate refs are deliberately untouched:
+		// this is a publication continuation, not a run transition.
+		if err := m.db.UpdateRunPRURL(run.ID, outcome.PRURL); err != nil {
+			return nil, fmt.Errorf("persist PR URL: %w", err)
 		}
-		log("republish published: " + outcome.PRURL)
 	}
+	log("republish published: " + outcome.PRURL)
 	return result, nil
 }
 
