@@ -116,6 +116,35 @@ func TestExistingPRLaunchPinsTargetAndFailsClosed(t *testing.T) {
 			if calls.Load() != before {
 				t.Fatal("invalid explicit association ran pipeline")
 			}
+			if tc.name == "wrong source" {
+				// The preflight refusal has already bound the normal submitted
+				// gate anchor, but it must be durably distinguishable from an
+				// executor failure with unique repair work. Branch-sync's narrow
+				// obsolete-preflight selection proof relies on this boundary.
+				runs, err := d.GetRunsByRepo(repo.ID)
+				if err != nil || len(runs) == 0 {
+					t.Fatalf("read refused launch: %v", err)
+				}
+				refused := runs[0]
+				if refused.Status != types.RunFailed || refused.HeadSHA != head || refused.SubmittedHeadSHA == nil || *refused.SubmittedHeadSHA != head || refused.ExistingPRURL != nil || refused.LaunchNonce != nil || refused.LastPushedSHA != nil || refused.TerminalHeadVerifiedAt != nil {
+					t.Fatalf("unexpected preflight provenance: %+v", refused)
+				}
+				if got := gitOutput(t, p.RepoDir(repo.ID), "rev-parse", "refs/heads/feature"); got != head {
+					t.Fatalf("normal submitted anchor = %s, want %s", got, head)
+				}
+				if gates, err := d.GetRunGates(refused.ID); err != nil || gates != "" {
+					t.Fatalf("preflight passed executor gate-pin boundary: %q %v", gates, err)
+				}
+				if steps, err := d.GetStepsByRun(refused.ID); err != nil || len(steps) != 0 {
+					t.Fatalf("preflight allocated execution: %+v %v", steps, err)
+				}
+				if invocations, err := d.GetAgentInvocationsByRun(refused.ID); err != nil || len(invocations) != 0 {
+					t.Fatalf("preflight invoked agent: %+v %v", invocations, err)
+				}
+				if work, err := d.GetRunSurvivedWork(refused.ID); err != nil || work != nil {
+					t.Fatalf("fresh explicit launch inherited unique repair work: %+v %v", work, err)
+				}
+			}
 		})
 	}
 	active, err := d.InsertRun(repo.ID, "feature", head, "")
