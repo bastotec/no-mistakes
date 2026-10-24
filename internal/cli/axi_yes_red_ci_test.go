@@ -159,21 +159,27 @@ func redCIRespondFixture(t *testing.T) *atomic.Bool {
 }
 
 func TestAxiRespond_YesRejectsApproveAndSkipOfRedCIGate(t *testing.T) {
-	for _, action := range []string{"approve", "skip"} {
-		t.Run(action, func(t *testing.T) {
-			responded := redCIRespondFixture(t)
-			out, err := executeCmd("axi", "respond", "--action", action, "--yes", "--wait", "3s")
-			var ee *exitError
-			if !errors.As(err, &ee) || ee.code != 2 {
-				t.Fatalf("respond --action %s --yes error = %v, want usage exit 2\n%s", action, err, out)
-			}
-			if responded.Load() {
-				t.Fatalf("respond --action %s --yes reached the daemon for a red CI gate", action)
-			}
-			if !strings.Contains(out, "--yes cannot "+action+" the ci gate: CI is not green") {
-				t.Fatalf("missing refusal reason:\n%s", out)
-			}
-		})
+	for _, step := range []string{"", "ci", "babysit"} {
+		for _, action := range []string{"approve", "skip"} {
+			t.Run(step+"/"+action, func(t *testing.T) {
+				responded := redCIRespondFixture(t)
+				args := []string{"axi", "respond", "--action", action, "--yes", "--wait", "3s"}
+				if step != "" {
+					args = append(args, "--step", step)
+				}
+				out, err := executeCmd(args...)
+				var ee *exitError
+				if !errors.As(err, &ee) || ee.code != 2 {
+					t.Fatalf("%v error = %v, want usage exit 2\n%s", args, err, out)
+				}
+				if responded.Load() {
+					t.Fatalf("%v reached the daemon for a red CI gate", args)
+				}
+				if !strings.Contains(out, "--yes cannot "+action+" the ci gate: CI is not green") {
+					t.Fatalf("missing refusal reason:\n%s", out)
+				}
+			})
+		}
 	}
 }
 

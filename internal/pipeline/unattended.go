@@ -10,5 +10,5 @@ import "github.com/kunchenguid/no-mistakes/internal/types"
 // come from an explicit operator response, never from standing --yes consent.
 // Unattended drivers may still answer such a gate with fix.
 func UnattendedMayApprove(step types.StepName) bool {
-	return step != types.StepCI
+	return step.Canonical() != types.StepCI
 }

@@ -1365,7 +1365,7 @@ func runAxiRespond(cmd *cobra.Command, ra respondArgs) error {
 	}
 	rv := runViewFromIPC(run)
 
-	stepName := types.StepName(strings.TrimSpace(ra.step))
+	stepName := types.StepName(strings.TrimSpace(ra.step)).Canonical()
 	if stepName == "" {
 		gate, ok := rv.awaitingStep()
 		if !ok {

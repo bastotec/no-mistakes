@@ -71,6 +71,10 @@ func normalizeStepName(s StepName) StepName {
 	return s
 }
 
+func (s StepName) Canonical() StepName {
+	return normalizeStepName(s)
+}
+
 func (s *StepName) UnmarshalJSON(data []byte) error {
 	var raw string
 	if err := json.Unmarshal(data, &raw); err != nil {
