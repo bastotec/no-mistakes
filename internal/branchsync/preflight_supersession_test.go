@@ -341,6 +341,85 @@ func TestPreflightSupersessionSurvivesDBReopen(t *testing.T) {
 	f.assertUnchanged(before, "after reopen")
 }
 
+func TestPreflightSupersessionSurvivesSubsequentRerunAndMissingHeadRecovery(t *testing.T) {
+	t.Parallel()
+
+	f := newPreflightSupersessionFixture(t)
+	time.Sleep(1100 * time.Millisecond)
+	repeated, err := f.database.InsertRun(f.repo.ID, "feature/preflight", f.pushed, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunPushBinding(repeated.ID, db.PushBinding{
+		HeadSHA: f.pushed, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/preflight",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunStatusWithVerifiedHead(repeated.ID, types.RunCompleted, f.pushed); err != nil {
+		t.Fatal(err)
+	}
+	repeatedBefore, err := f.database.GetRun(repeated.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := f.snapshot()
+	state := f.service.InspectCached(f.ctx)
+	if state.Pipeline.RunID != repeated.ID || state.State != StateDiverged || state.Safety != "refresh_required" {
+		t.Fatalf("subsequent rerun selection = %#v", state)
+	}
+	refreshed := f.service.Refresh(f.ctx)
+	if refreshed.Pipeline.RunID != repeated.ID || refreshed.State != StateDiverged || refreshed.Safety != SafetySafeEquivalentAdvance {
+		t.Fatalf("subsequent rerun refresh = %#v", refreshed)
+	}
+	f.assertUnchanged(before, "subsequent rerun")
+
+	time.Sleep(1100 * time.Millisecond)
+	missing, err := f.database.InsertRun(f.repo.ID, "feature/preflight", f.pushed, f.base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.database.UpdateRunStatusWithVerifiedHead(missing.ID, types.RunFailed, strings.Repeat("f", 40)); err != nil {
+		t.Fatal(err)
+	}
+	state = f.service.InspectCached(f.ctx)
+	if state.Pipeline.RunID != missing.ID || state.Safety != "blocked_recover_preserved_head_missing" ||
+		state.NextAction == nil || state.NextAction.Code != "recover_custody" || state.NextAction.Command != "no-mistakes axi sync --recover --keep-local" {
+		t.Fatalf("missing-head selection after subsequent rerun = %#v", state)
+	}
+	f.assertUnchanged(before, "missing-head inspection")
+	kept := f.service.Recover(f.ctx, true)
+	if !kept.Recovered {
+		t.Fatalf("missing-head recovery after subsequent rerun = %#v", kept)
+	}
+	after := f.snapshot()
+	if !reflect.DeepEqual(after.older, before.older) || !reflect.DeepEqual(after.newer, before.newer) {
+		t.Fatal("missing-head recovery mutated superseded or published history")
+	}
+	repeatedAfter, err := f.database.GetRun(repeated.ID)
+	if err != nil || !reflect.DeepEqual(repeatedAfter, repeatedBefore) {
+		t.Fatalf("subsequent published run mutated: %#v, %v", repeatedAfter, err)
+	}
+	missingAfter, err := f.database.GetRun(missing.ID)
+	if err != nil || missingAfter == nil || missingAfter.CustodyReturnedAt == nil {
+		t.Fatalf("missing run custody not returned: %#v, %v", missingAfter, err)
+	}
+}
+
+func TestPreflightSupersessionReportsChangedLiveRemote(t *testing.T) {
+	t.Parallel()
+
+	f := newPreflightSupersessionFixture(t)
+	mustRun(t, f.local, "push", f.remote, "+"+f.base+":refs/heads/feature/preflight")
+	before := f.snapshot()
+	f.assertNewerAuthoritative("changed remote cached inspection")
+	state := f.service.Refresh(f.ctx)
+	if state.Pipeline.RunID != f.newerID || state.State != StateRemoteRewritten || state.Safety != "blocked_remote_rewritten" ||
+		state.Remote.Freshness != "live" || state.Remote.ObservedHead != f.base || state.NextAction == nil || state.NextAction.Code != "release_binding" {
+		t.Fatalf("changed remote did not report the newer binding's ordinary refusal: %#v", state)
+	}
+	f.assertUnchanged(before, "changed remote refresh")
+}
+
 // TestPreflightSupersessionRefutesUnprovenOlderAttempts: every negative shape
 // keeps the older run authoritative - the unproven attempt must never lose
 // selection to a supersession it did not prove, and no ref or database row may
@@ -354,28 +433,9 @@ func TestPreflightSupersessionRefutesUnprovenOlderAttempts(t *testing.T) {
 			f := newPreflightSupersessionFixture(t)
 			mutate(f)
 			before := f.snapshot()
-			older, err := f.database.GetRun(f.olderID)
-			if err != nil || older == nil {
-				t.Fatalf("reload older run: %v", err)
-			}
-			newer, err := f.database.GetRun(f.newerID)
-			if err != nil || newer == nil {
-				t.Fatalf("reload newer run: %v", err)
-			}
-			// At selection the older attempt keeps authority: it stays the
-			// selected run (fail-closed exactly as before this change), or -
-			// where the mutation itself made an ordinary path govern, e.g. a
-			// push binding on the older row - the outcome is still a blocked
-			// refusal against that ordinary evidence, never a silent green
-			// pass and never the old attempt's unproven recovery offer.
 			state := f.service.InspectCached(f.ctx)
 			if state.Pipeline.RunID != f.olderID {
-				if !strings.HasPrefix(state.Safety, "blocked_") && state.Safety != "refresh_required" {
-					t.Fatalf("negative %s: older run lost authority to a non-blocked outcome: run=%s state=%s safety=%s", name, state.Pipeline.RunID, state.State, state.Safety)
-				}
-				if state.Pipeline.RunID == f.newerID && state.State == StateSynchronized && state.Safety == "already_synchronized" {
-					t.Fatalf("negative %s: unproven older attempt was silently resolved away: %#v", name, state)
-				}
+				t.Fatalf("negative %s: selected run=%s, want older %s; state=%s safety=%s", name, state.Pipeline.RunID, f.olderID, state.State, state.Safety)
 			}
 			f.assertUnchanged(before, "negative "+name)
 		})
@@ -417,20 +477,42 @@ func TestPreflightSupersessionRefutesUnprovenOlderAttempts(t *testing.T) {
 			f.t.Fatal(err)
 		}
 	})
-	// A push binding on the older run is execution evidence.
-	refuted("older has a partial push binding", func(f *preflightSupersessionFixture) {
-		if err := f.database.UpdateRunPushBinding(f.olderID, db.PushBinding{
-			HeadSHA: f.submitted, TargetKind: "upstream", TargetFingerprint: TargetFingerprint(f.remote), Ref: "refs/heads/feature/preflight",
-		}); err != nil {
+	refuted("older worktree is unreadable", func(f *preflightSupersessionFixture) {
+		loop := filepath.Join(f.t.TempDir(), "worktree-loop")
+		if err := os.Symlink(loop, loop); err != nil {
+			f.t.Skipf("cannot create symlink: %v", err)
+		}
+		if _, err := os.Stat(loop); err == nil || os.IsNotExist(err) {
+			f.t.Fatalf("expected an unreadable path, got %v", err)
+		}
+		if err := f.database.SetRunWorktreeDir(f.olderID, loop); err != nil {
 			f.t.Fatal(err)
 		}
-		if err := f.database.UpdateRunError(f.olderID, "explicit PR source repository/ref does not match the configured push target and run branch"); err != nil {
+	})
+	// A push binding on the older run is execution evidence.
+	refuted("older has a partial push binding", func(f *preflightSupersessionFixture) {
+		f.execSQL(`UPDATE runs SET push_target_kind = ? WHERE id = ?`, "upstream", f.olderID)
+	})
+	refuted("older has a conflicting push binding", func(f *preflightSupersessionFixture) {
+		if err := f.database.UpdateRunPushBinding(f.olderID, db.PushBinding{
+			HeadSHA: f.base, TargetKind: "upstream", TargetFingerprint: "different-target", Ref: "refs/heads/feature/preflight",
+		}); err != nil {
 			f.t.Fatal(err)
 		}
 	})
 	// The newer run must have submitted exactly the older attempt's head.
 	refuted("newer submitted a different head", func(f *preflightSupersessionFixture) {
-		updateRunSubmittedHeadForTest(f.t, f.dbPath, f.newerID, f.base)
+		f.execSQL(`UPDATE runs SET submitted_head_sha = ? WHERE id = ?`, f.base, f.newerID)
+	})
+	refuted("newer belongs to a different repository", func(f *preflightSupersessionFixture) {
+		other, err := f.database.InsertRepo(filepath.Join(f.local, "other"), f.remote, "main")
+		if err != nil {
+			f.t.Fatal(err)
+		}
+		f.execSQL(`UPDATE runs SET repo_id = ? WHERE id = ?`, other.ID, f.newerID)
+	})
+	refuted("newer belongs to a different branch", func(f *preflightSupersessionFixture) {
+		f.execSQL(`UPDATE runs SET branch = ?, push_ref = ? WHERE id = ?`, "feature/other", "refs/heads/feature/other", f.newerID)
 	})
 	// The newer run's terminal head must be verified.
 	refuted("newer terminal head unverified", func(f *preflightSupersessionFixture) {
@@ -453,19 +535,15 @@ func TestPreflightSupersessionRefutesUnprovenOlderAttempts(t *testing.T) {
 	})
 }
 
-// updateRunSubmittedHeadForTest rewrites the submitted head recorded for a run
-// without disturbing the rest of the row, for negative shapes only. It opens
-// its own sqlite handle because the production API surface intentionally has
-// no such writer.
-func updateRunSubmittedHeadForTest(t *testing.T, dbPath, runID, submitted string) {
-	t.Helper()
-	handle, err := sql.Open("sqlite", dbPath)
+func (f *preflightSupersessionFixture) execSQL(query string, args ...any) {
+	f.t.Helper()
+	handle, err := sql.Open("sqlite", f.dbPath)
 	if err != nil {
-		t.Fatalf("open sqlite: %v", err)
+		f.t.Fatalf("open sqlite: %v", err)
 	}
 	defer handle.Close()
-	if _, err := handle.Exec(`UPDATE runs SET submitted_head_sha = ? WHERE id = ?`, submitted, runID); err != nil {
-		t.Fatalf("rewrite submitted head: %v", err)
+	if _, err := handle.Exec(query, args...); err != nil {
+		f.t.Fatalf("update preflight fixture: %v", err)
 	}
 }
 
@@ -490,30 +568,4 @@ func TestPreflightSupersessionNewerActiveRunAlwaysWins(t *testing.T) {
 		t.Fatalf("newer active run did not own the branch: run=%s state=%s safety=%s", state.Pipeline.RunID, state.State, state.Safety)
 	}
 	f.assertUnchanged(before, "active run")
-}
-
-// TestPreflightSupersessionPredicateProvenRoute pins the positive-evidence
-// half directly: the preflight error text plus zero execution rows proves
-// never-started, and any execution row or non-preflight error refutes it.
-func TestPreflightSupersessionPredicateProvenRoute(t *testing.T) {
-	t.Parallel()
-
-	f := newPreflightSupersessionFixture(t)
-	older, err := f.database.GetRun(f.olderID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	newer, err := f.database.GetRun(f.newerID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = older
-	_ = newer
-}
-
-func ptrToStr(p *string) string {
-	if p == nil {
-		return ""
-	}
-	return *p
 }

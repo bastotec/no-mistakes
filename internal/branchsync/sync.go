@@ -1745,7 +1745,7 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	}
 	var run *db.Run
 	var newerPushed *db.Run
-	var olderRunIDs []string
+	var newerPushBindings []*db.Run
 	for _, candidate := range runs {
 		if candidate.Branch != branch {
 			continue
@@ -1762,15 +1762,17 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 			// never executed anything and its unchanged submitted head was
 			// published by the newer run. Selection skips only the
 			// obstruction; its history stays untouched.
-			if newerPushed != nil && unpublishedPipelineHead(candidate) && s.supersededNeverStartedPreflightRun(ctx, candidate, newerPushed, branch) {
-				olderRunIDs = append(olderRunIDs, candidate.ID)
+			if unpublishedPipelineHead(candidate) && s.supersededPreflightRunByBindings(ctx, candidate, newerPushBindings, branch) {
 				continue
 			}
 			run = candidate
 			break
 		}
-		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, branch) {
-			newerPushed = candidate
+		if exactPushedBinding(s.Repo, candidate, branch) {
+			newerPushBindings = append(newerPushBindings, candidate)
+			if newerPushed == nil {
+				newerPushed = candidate
+			}
 		}
 		// Custody-returned runs stay selectable so a recovered branch reports
 		// custody_returned (or its ordinary post-push classification) instead
@@ -2228,7 +2230,7 @@ func (s *Service) provenNeverStartedPreflightAttempt(ctx context.Context, older 
 		return false
 	}
 	if older.WorktreeDir != nil && strings.TrimSpace(*older.WorktreeDir) != "" {
-		if _, err := os.Stat(*older.WorktreeDir); err == nil {
+		if _, err := os.Stat(*older.WorktreeDir); !os.IsNotExist(err) {
 			return false
 		}
 	}
@@ -2302,14 +2304,20 @@ func (s *Service) supersededNeverStartedPreflightRun(ctx context.Context, older,
 	if _, statErr := os.Stat(s.GateDir); statErr != nil {
 		return false
 	}
-	if symbolic, err := git.Run(ctx, s.GateDir, "symbolic-ref", "-q", "refs/heads/"+branch); err == nil && symbolic != "" {
-		return false
-	}
-	gateHead, gateHeadExists, err := git.ExactRefTarget(ctx, s.GateDir, "refs/heads/"+branch)
+	gateHead, gateHeadExists, err := git.DirectRefTarget(ctx, s.GateDir, "refs/heads/"+branch)
 	if err != nil || !gateHeadExists || gateHead != ptr(newer.LastPushedSHA) {
 		return false
 	}
 	return true
+}
+
+func (s *Service) supersededPreflightRunByBindings(ctx context.Context, older *db.Run, bindings []*db.Run, branch string) bool {
+	for _, newer := range bindings {
+		if s.supersededNeverStartedPreflightRun(ctx, older, newer, branch) {
+			return true
+		}
+	}
+	return false
 }
 
 func samePushTargetBinding(older, newer *db.Run) bool {
@@ -2491,6 +2499,7 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 	anyMissing := false
 	allEligible := true
 	var newerPushed *db.Run
+	var newerPushBindings []*db.Run
 	for _, candidate := range runs {
 		if candidate.Branch != state.Local.Branch {
 			continue
@@ -2498,14 +2507,17 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
 			continue
 		}
-		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
-			newerPushed = candidate
+		if exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
+			newerPushBindings = append(newerPushBindings, candidate)
+			if newerPushed == nil {
+				newerPushed = candidate
+			}
 		}
 		// A proven never-started preflight attempt superseded by the newer
 		// binding is not a stranded stack member: it has no executed work to
 		// anchor, so it must not poison the stack's missing/eligibility
 		// verdict. Its history is skipped, never rewritten.
-		if newerPushed != nil && unpublishedPipelineHead(candidate) && s.supersededNeverStartedPreflightRun(ctx, candidate, newerPushed, state.Local.Branch) {
+		if unpublishedPipelineHead(candidate) && s.supersededPreflightRunByBindings(ctx, candidate, newerPushBindings, state.Local.Branch) {
 			continue
 		}
 		if !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
