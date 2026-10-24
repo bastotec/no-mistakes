@@ -18,16 +18,19 @@ const (
 	MethodStartHistoryRun = "start_history_run"
 	// Distinct RPC: older daemons must refuse, not launch an ordinary Test.
 	MethodStartIsolatedTestRun = "start_isolated_test_run"
-	MethodClaimLaunchReceipt   = "claim_launch_receipt"
-	MethodGetRun               = "get_run"
-	MethodGetStepDiff          = "get_step_diff"
-	MethodGetRuns              = "get_runs"
-	MethodGetRunsForHead       = "get_runs_for_head"
-	MethodGetActiveRun         = "get_active_run"
-	MethodRerun                = "rerun"
-	MethodSubscribe            = "subscribe"
-	MethodRespond              = "respond"
-	MethodPublishTestPreview   = "publish_test_preview"
+	// Distinct RPC for whole-run confinement: an older daemon must refuse
+	// rather than launch an unconfined run (same reason as above).
+	MethodStartConfinedRun   = "start_confined_run"
+	MethodClaimLaunchReceipt = "claim_launch_receipt"
+	MethodGetRun             = "get_run"
+	MethodGetStepDiff        = "get_step_diff"
+	MethodGetRuns            = "get_runs"
+	MethodGetRunsForHead     = "get_runs_for_head"
+	MethodGetActiveRun       = "get_active_run"
+	MethodRerun              = "rerun"
+	MethodSubscribe          = "subscribe"
+	MethodRespond            = "respond"
+	MethodPublishTestPreview = "publish_test_preview"
 	// Distinct RPC: an older daemon must refuse a terminal continuation
 	// instead of silently ignoring it or misreading it as a rerun.
 	MethodRepublishPublication = "republish_publication"

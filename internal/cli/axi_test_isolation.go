@@ -12,6 +12,17 @@ import (
 )
 
 func runAxiIsolatedTest(cmd *cobra.Command, autoYes bool, intent, baseBranch string, wait time.Duration) error {
+	return startIsolationLaunch(cmd, autoYes, intent, baseBranch, wait, ipc.MethodStartIsolatedTestRun, "test-isolation-v1", "--isolate-test", "start isolated Test run")
+}
+
+// runAxiConfinedRun launches a whole-run confined run. It shares the isolated
+// Test launch's shape on purpose: no push, no hook, no fallback, and a distinct
+// RPC so an old daemon refuses instead of silently launching an unconfined run.
+func runAxiConfinedRun(cmd *cobra.Command, autoYes bool, intent, baseBranch string, wait time.Duration) error {
+	return startIsolationLaunch(cmd, autoYes, intent, baseBranch, wait, ipc.MethodStartConfinedRun, "run-confinement-v1", "--isolate", "start confined run")
+}
+
+func startIsolationLaunch(cmd *cobra.Command, autoYes bool, intent, baseBranch string, wait time.Duration, method string, generation, flag, action string) error {
 	ctx := cmd.Context()
 	driveCtx, cancel, err := boundAxiWait(ctx, wait)
 	if err != nil {
@@ -28,7 +39,7 @@ func runAxiIsolatedTest(cmd *cobra.Command, autoYes bool, intent, baseBranch str
 	}
 	branch, err := git.CurrentBranch(ctx, ".")
 	if err != nil || branch == "HEAD" || branch == env.repo.DefaultBranch {
-		return emitError(cmd, 2, "--isolate-test requires a checked-out feature branch")
+		return emitError(cmd, 2, flag+" requires a checked-out feature branch")
 	}
 	head, err := git.HeadSHA(ctx, ".")
 	if err != nil {
@@ -40,12 +51,12 @@ func runAxiIsolatedTest(cmd *cobra.Command, autoYes bool, intent, baseBranch str
 	}
 	var result ipc.StartFreshRunResult
 	// No push, no hook, no fallback. An old daemon must reject this new method.
-	err = env.client.Call(ipc.MethodStartIsolatedTestRun, &ipc.StartHistoryRunParams{
-		StartFreshRunParams: ipc.StartFreshRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: head, Intent: intent, PRBaseBranch: baseBranch, LaunchNonce: rand.Text(), ValidationGeneration: "test-isolation-v1"},
+	err = env.client.Call(method, &ipc.StartHistoryRunParams{
+		StartFreshRunParams: ipc.StartFreshRunParams{RepoID: env.repo.ID, Branch: branch, HeadSHA: head, Intent: intent, PRBaseBranch: baseBranch, LaunchNonce: rand.Text(), ValidationGeneration: generation},
 		WorkDir:             wd, ReuseActive: true,
 	}, &result)
 	if err != nil {
-		return emitError(cmd, 1, fmt.Sprintf("start isolated Test run: %v", err), "Both CLI and daemon must support Test isolation; no ordinary fallback or shared daemon restart is attempted")
+		return emitError(cmd, 1, fmt.Sprintf("%s: %v", action, err), "Both CLI and daemon must support this isolation mode; no ordinary fallback or shared daemon restart is attempted")
 	}
 	emitLaunchReceipt(cmd, result.Receipt)
 	run, ready, err := driveRun(driveCtx, cmd.ErrOrStderr(), env.client, env.p.Socket(), result.Receipt.RunID, autoYes)
