@@ -92,6 +92,8 @@ When the pipeline pauses for approval, you can manually trigger a fix from the T
 The agent receives the merged fix payload for that round: the selected agent findings, any per-finding user notes, any selected user-authored findings added from the TUI or AXI interface, and the shared [finding decision history](/no-mistakes/reference/pipeline-steps/#finding-decision-history).
 The current step's part of that history also includes one-line summaries from earlier fix commits.
 
+For legacy gates where an informational `no-op` row shares an ID with one actionable row, selecting that exact ID selects only the actionable row. Per-finding notes and repair execution use that selection, including after restart recovery, without rewriting the original recorded findings. Multiple actionable rows with the same ID remain ambiguous and are rejected. IDs containing only `no-op` rows keep their existing selection behavior; a missing `action` counts as `ask-user` under the [finding-action rules](#finding-actions).
+
 After a user-triggered fix, the step re-runs. It completes if the check passes, or pauses again with the new results in `fix_review` status. A manual Review fix that selects only part of its gate also keeps the omitted findings pending; the [Review reference](/no-mistakes/reference/pipeline-steps/#review) owns that subset-selection rule. You can then approve, request another fix, skip, or abort under the [one-repair response rule](#how-it-works). The [`protected_paths` refusal rules](/no-mistakes/reference/repo-config/#protected_paths) can further restrict those choices.
 
 ## Fix commits
