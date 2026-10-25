@@ -123,6 +123,9 @@ func (s *PushStep) Execute(sctx *pipeline.StepContext) (*pipeline.StepOutcome, e
 // revalidation); pass this run's current steps (sctx.DB.GetStepsByRun) for
 // the ordinary Push step.
 func publishRunHead(sctx *pipeline.StepContext, headBeingPushed, localRefUpdate string, attestationSteps []*db.StepResult) error {
+	if err := pipeline.RefuseConfinedPublication(sctx.DB, sctx.Run.ID); err != nil {
+		return err
+	}
 	if err := AssertHistoryPolicy(sctx); err != nil {
 		return err
 	}

@@ -952,9 +952,9 @@ func survivedWorkCleanupReason(d *db.DB, run *db.Run, workDir string) string {
 	if run == nil {
 		return ""
 	}
-	isolated, err := d.TestIsolationEnabled(run.ID)
+	isolated, err := d.GitCallbacksDisabled(run.ID)
 	if err != nil {
-		return "cannot read Test isolation policy"
+		return "cannot read Git isolation policy"
 	}
 	if pipeline.SurvivedWorkMarked(workDir, isolated) {
 		return "interrupted repair left unrecorded uncommitted work; preserving worktree"
@@ -1371,6 +1371,21 @@ func registerHandlers(srv *ipc.Server, mgr *RunManager, d *db.DB, shutdown func(
 			return nil, fmt.Errorf("invalid params: %w", err)
 		}
 		receipt, err := mgr.HandleStartIsolatedTestRun(ctx, &p)
+		if err != nil {
+			return nil, err
+		}
+		return &ipc.StartFreshRunResult{Receipt: receipt}, nil
+	})
+
+	srv.Handle(ipc.MethodStartConfinedRun, func(ctx context.Context, params json.RawMessage) (interface{}, error) {
+		if err := refuseNested(ctx, false); err != nil {
+			return nil, err
+		}
+		var p ipc.StartHistoryRunParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("invalid params: %w", err)
+		}
+		receipt, err := mgr.HandleStartConfinedRun(ctx, &p)
 		if err != nil {
 			return nil, err
 		}

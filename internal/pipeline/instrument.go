@@ -297,12 +297,19 @@ func classifyFallbackReason(err error) string {
 }
 
 func InstrumentIsolatedTestAgent(inner agent.Agent, database *db.DB, runID string, round int, record func(db.AgentInvocation), activity func()) agent.Agent {
+	return InstrumentIsolatedStepAgent(types.StepTest, inner, database, runID, round, record, activity)
+}
+
+// InstrumentIsolatedStepAgent is the step-generic form used by the whole-run
+// confinement worker: every confined step's invocations are recorded under
+// their own step name, exactly as the Test-only worker records Test's.
+func InstrumentIsolatedStepAgent(step types.StepName, inner agent.Agent, database *db.DB, runID string, round int, record func(db.AgentInvocation), activity func()) agent.Agent {
 	return &perfRecordingAgent{
 		inner: &lifecycleAgent{inner: inner, onLifecycle: func(event agent.LifecycleEvent) {
 			if event.Phase == agent.LifecyclePhaseActivity && activity != nil {
 				activity()
 			}
 		}},
-		db: database, runID: runID, stepName: types.StepTest, round: func() int { return round }, onRecord: record,
+		db: database, runID: runID, stepName: step, round: func() int { return round }, onRecord: record,
 	}
 }

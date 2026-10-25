@@ -6,7 +6,7 @@ description: All fields for .no-mistakes.yaml.
 Per-repo configuration lives in `.no-mistakes.yaml` at the root of your repository.
 
 :::caution[Security: gate-control fields are read from the default branch]
-`commands.*` and `gates[].command` execute arbitrary shell on the daemon host via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches there (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets) with the maintainer's credentials.
+`commands.*` and `gates[].command` execute arbitrary shell via `sh -c` / `cmd.exe /c`, and `agent` selects which process launches (including ordered fallback lists, ACP aliases such as `cursor`, and `acp:` targets). Ordinary runs execute these on the daemon host with the maintainer's credentials; explicit [run-scoped isolation](/no-mistakes/reference/cli/#offline-run-confinement) confines opted-in steps without weakening this trust policy.
 To prevent a supply-chain attack where a contributor lands a hostile value on a gated branch, the daemon always reads **`commands` and `agent` from your default branch** (e.g. `origin/main`), never from the pushed SHA, and reads them at the exact commit a fresh fetch resolved (so a stale `origin/<default>` ref cannot serve a value the live default branch removed).
 The daemon also reads `document.instructions`, `review.path_instructions`, `gates`, `protected_paths`, `disable_project_settings`, `no_ci`, `ci.rerun_transient`, `ci.revalidate_repairs`, `rebase.strategy`, `test.instructions`, `test.allow_approve_over_failure`, `test.evidence.branch`, `pr.template`, and `pr.publish_intent` only from that trusted copy.
 `pr.base_branch` is trusted-default-branch-only as well, but unlike those fields it follows the same `allow_repo_commands: true` opt-in exception as `commands`/`agent` (see [`pr.base_branch`](#prbase_branch) below).
@@ -335,7 +335,7 @@ Optional dependency-preparation command for isolated run worktrees. Run via the 
 
 When set, no-mistakes runs this command before the first configured `commands.test`, `commands.lint`, or `commands.format` command that the pipeline reaches. It is a lazy command hook, not an additional pipeline step: `commands.prepare` alone does nothing when no configured command needs it. On the ordinary execution path, a successful result is shared by all later configured commands in that run worktree, including after daemon recovery. The dependent step log records the preparation command, output, and elapsed preparation time. A non-zero exit or launch failure fails that step before its command runs.
 
-With [`axi run --isolate-test`](/no-mistakes/reference/cli/#run-scoped-test-isolation), each Test worker has a fresh private Git preparation marker and takes preparation snapshots in namespace-local temporary storage, not the shared bare gate. It runs preparation before its configured test command even if another invocation already prepared the worktree. That success is not exported to later Test workers or ordinary Lint/Format commands; they perform their own preparation when needed. Dependencies must be available without general network access under the [Test isolation boundary](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md).
+With either [`axi run --isolate-test`](/no-mistakes/reference/cli/#run-scoped-test-isolation) or [`axi run --isolate`](/no-mistakes/reference/cli/#offline-run-confinement), each worker has a fresh private Git preparation marker and takes preparation snapshots in namespace-local temporary storage, not the shared bare gate. A configured test/lint/format command in that worker triggers preparation even if another invocation already prepared the worktree. That success is not exported to later workers or ordinary Lint/Format commands; they perform their own preparation when needed. Dependencies must be available without general network access under the [isolation boundary](https://github.com/bastotec/no-mistakes/blob/main/docs/test-isolation-design.md).
 
 Use this for deterministic dependency materialization such as `npm ci --prefer-offline`. The run worktree starts with tracked files only, so ignored dependency directories such as `node_modules` are otherwise absent. no-mistakes keeps ignored files produced by preparation, while removing its tracked, ordinary untracked, and nested-repository mutations before continuing. Earlier pending tracked and ordinary untracked pipeline changes are restored exactly, so preparation can run before a later configured command without admitting setup artifacts into a fix commit.
 
@@ -368,8 +368,7 @@ Explicit lint command. Run via the platform shell - `sh -c` on POSIX, `cmd.exe /
 | Default | Empty (agent auto-detects) |
 
 When set, the lint step runs this exact command and checks the exit code.
-When empty, the agent-driven lint duty is folded into the document step's combined housekeeping pass: one agent invocation covers both documentation and lint, and the lint step consumes that result, reporting lint-category findings with the same gate semantics (blocking findings park for a decision).
-Neither responsibility is skipped: when the document step has nothing to run against (or its structured output cannot be trusted), the lint step runs its own agent pass as before.
+When empty, lint is agent-driven. The [Document/Lint reference](/no-mistakes/reference/pipeline-steps/#document) owns combined-pass eligibility, fallback behavior and confined-worker execution; neither documentation nor lint is silently skipped.
 
 ### commands.format
 
@@ -483,6 +482,8 @@ A `risky_paths` glob containing `/` matches like `ignore_patterns` (a trailing `
 Risky paths are matched against every changed file, including ignored ones. Unset, the defaults are `*auth*`, `*secur*`, `*secret*`, `*credential*`, `*password*`, `*crypto*`, `*permission*` and `*migration*`; an empty list turns path risk off.
 What each level runs is described under [Review](/no-mistakes/reference/pipeline-steps/#review).
 
+For [`axi run --isolate`](/no-mistakes/reference/cli/#offline-run-confinement), the worker pins review to `medium` regardless of diff size, risky paths or `min_effort`: one sequential reviewer, without parallel finders or claim verifiers. This uses the medium level's turn and deadline bounds because independent reviewers cannot safely share the single-use model channel. Ordinary runs retain the sizing rules above; confined model selection is covered under [`review.routes`](/no-mistakes/reference/global-config/#reviewroutes).
+
 ```yaml
 review:
   sizing:
@@ -556,7 +557,7 @@ A malformed entry fails when the config is parsed, so the run aborts before any 
 
 #### Trust
 
-A gate executes shell on the daemon host, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of [`allow_repo_commands`](#allow_repo_commands).
+A gate executes repository commands, so it is honored **only from the trusted default-branch copy** of `.no-mistakes.yaml`, regardless of [`allow_repo_commands`](#allow_repo_commands).
 
 That opt-in deliberately does not extend here. It covers a pushed branch re-running its own suite through `commands.*`; a gate instead defines what validating the branch *means*, so a contributor must not be able to declare, retarget, or delete the check that clears them.
 
@@ -634,7 +635,7 @@ Override auto-fix attempt limits for specific steps. Fields not set here inherit
 
 The [global field reference](/no-mistakes/reference/global-config/#auto_fix) owns the automatic limits and zero-limit behavior; the [auto-fix loop](/no-mistakes/concepts/auto-fix/#how-it-works) owns durable counting, manual grants, and exhaustion behavior.
 The document step attempts documentation fixes during its initial pass, so unresolved documentation findings pause for approval instead of using an automatic follow-up loop.
-For empty `commands.lint`, the document step's combined housekeeping pass also attempts safe lint fixes, and the lint step consumes its result; unresolved blocking lint findings pause for approval instead of starting another automatic fix loop.
+When a [combined housekeeping result](/no-mistakes/reference/pipeline-steps/#document) is available, the lint step consumes it; unresolved blocking lint findings pause for approval instead of starting another automatic fix loop.
 
 `auto_fix.ci` covers the CI step's CI failure and merge-conflict auto-fix attempts.
 The CI step reports each settled failure as an `auto-fix` finding and the shared auto-fix loop drives its fix rounds, exactly as for review; `ask-user` findings (a supported review bot's red check, a provider-attributed check no rerun will replace) never consume an attempt.

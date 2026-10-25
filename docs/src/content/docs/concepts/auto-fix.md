@@ -76,7 +76,7 @@ See [AXI `--yes`](/no-mistakes/reference/cli/#no-mistakes-axi-run) and [TUI yolo
 
 The `review`, `test`, `ci`, and configured-command `lint` steps use this shared model directly; the CI step derives its findings from the pull request's settled checks rather than from an agent, as the [pipeline-step reference](/no-mistakes/reference/pipeline-steps/#ci) describes. The `document` step also uses the same `action` field, but unresolved documentation findings pause for approval because the initial document pass already attempted the documentation updates it could make safely.
 A failed repository gate returns an `ask-user` finding through the same decision model but has no automatic fix budget. The [`gates` reference](/no-mistakes/reference/repo-config/#gates) owns its operator-authorized repair behavior.
-When `commands.lint` is empty, the combined housekeeping pass routes documentation and lint findings to their owning gates. Its unresolved lint findings describe issues left after safe fixes, so blocking findings pause for approval instead of remaining eligible for another automatic fix loop.
+The [Document/Lint reference](/no-mistakes/reference/pipeline-steps/#document) owns combined housekeeping eligibility and fallback behavior. When a combined pass returns unresolved lint findings, blocking findings pause for approval because that pass already attempted safe fixes.
 
 Documentation findings use the same approval UI, but the `document` step treats any finding as an unresolved documentation gap or judgment call that should pause for approval.
 

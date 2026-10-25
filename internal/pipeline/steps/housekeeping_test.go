@@ -12,6 +12,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
+	"github.com/kunchenguid/no-mistakes/internal/runconfine"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
@@ -396,5 +397,27 @@ func TestPipeline_ConfiguredLintCommandStaysFirstClassGate(t *testing.T) {
 	}
 	if outcome.ExitCode != 3 {
 		t.Fatalf("exit code = %d, want 3", outcome.ExitCode)
+	}
+}
+
+func TestDocumentStep_ConfinedWorkerLeavesLintToDedicatedStep(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	ag := &mockAgent{name: "deck", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"clean"}`)}, nil
+	}}
+	sctx := newHousekeepingContext(t, ag, dir, base, head, config.Commands{})
+	for _, step := range []pipeline.Step{&DocumentStep{}, &LintStep{}} {
+		request := roundTripIsolatedRunInput(t, newIsolatedRunInput(sctx, step, "fixture", runconfine.DefaultPolicy(), "digest"))
+		request.GateDir = sctx.GateDir
+		workerCtx := request.stepContext(sctx.DB, ag, nil, func(isolatedStepEvent) error { return nil })
+		if _, err := step.Execute(workerCtx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(ag.calls) != 2 || ag.calls[0].Purpose != "document" || ag.calls[1].Purpose != "lint" {
+		t.Fatalf("workers did not perform one pass per duty: %+v", ag.calls)
+	}
+	if strings.Contains(ag.calls[0].Prompt, "Combined lint duty") {
+		t.Fatal("confined Document requested a duplicate lint subpass")
 	}
 }

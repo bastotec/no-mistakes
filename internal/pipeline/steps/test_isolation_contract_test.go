@@ -437,10 +437,10 @@ func TestTestStepOrdinaryRunKeepsAmbientEnvironment(t *testing.T) {
 func TestIsolatedTestErrorProtocolPreservesExecutorClassifications(t *testing.T) {
 	for _, failure := range []error{fmt.Errorf("repair: %w", pipeline.ErrTestAgentTimeout), &pipeline.ProtectedPathError{Path: "secrets.yaml", Rule: "secrets.*"}} {
 		var wire bytes.Buffer
-		if err := json.NewEncoder(&wire).Encode(isolatedTestEvent{Kind: "error", Error: pipeline.EncodeIsolatedTestError(failure)}); err != nil {
+		if err := json.NewEncoder(&wire).Encode(isolatedStepEvent{Kind: "error", Error: pipeline.EncodeIsolatedTestError(failure)}); err != nil {
 			t.Fatal(err)
 		}
-		var received isolatedTestEvent
+		var received isolatedStepEvent
 		if err := json.NewDecoder(&wire).Decode(&received); err != nil {
 			t.Fatal(err)
 		}
@@ -549,12 +549,12 @@ func TestIsolatedTestInvocationAndActivityProtocol(t *testing.T) {
 	defer workerDB.Close()
 	wrapped := pipeline.InstrumentIsolatedTestAgent(ag, workerDB, sctx.Run.ID, 1,
 		func(inv db.AgentInvocation) {
-			if err := encoder.Encode(isolatedTestEvent{Kind: "invocation", Invocation: &inv}); err != nil {
+			if err := encoder.Encode(isolatedStepEvent{Kind: "invocation", Invocation: &inv}); err != nil {
 				t.Fatal(err)
 			}
 		},
 		func() {
-			if err := encoder.Encode(isolatedTestEvent{Kind: "activity"}); err != nil {
+			if err := encoder.Encode(isolatedStepEvent{Kind: "activity"}); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -575,7 +575,7 @@ func TestIsolatedTestInvocationAndActivityProtocol(t *testing.T) {
 	}
 	decoder := json.NewDecoder(&wire)
 	for {
-		var event isolatedTestEvent
+		var event isolatedStepEvent
 		err := decoder.Decode(&event)
 		if err == io.EOF {
 			break
@@ -583,7 +583,7 @@ func TestIsolatedTestInvocationAndActivityProtocol(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := applyIsolatedTestObservation(sctx, event); err != nil {
+		if err := applyIsolatedStepObservation(sctx, types.StepTest, event); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -607,5 +607,89 @@ func TestIsolatedTestInvocationAndActivityProtocol(t *testing.T) {
 	}
 	if activities != 2 || known != 1 || unknown != 2 {
 		t.Fatalf("observations lost: activities=%d known=%d unknown=%d", activities, known, unknown)
+	}
+}
+
+func TestIsolatedWorkerHandoffPreservesHeadIndexAndReviewProvenance(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("protocol fixture requires a POSIX shell")
+	}
+	for _, stepName := range []types.StepName{types.StepReview, types.StepTest, types.StepLint} {
+		t.Run(string(stepName), func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			gitCmd(t, dir, "checkout", "--detach", head)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "deck"}, dir, base, head, config.Commands{})
+			sctx.Fixing, sctx.ReviewStartingHeadSHA = true, head
+			workerDir := filepath.Join(t.TempDir(), "worker")
+			gitCmd(t, dir, "clone", "--no-hardlinks", dir, workerDir)
+			gitCmd(t, workerDir, "config", "user.name", "test")
+			gitCmd(t, workerDir, "config", "user.email", "test@test.com")
+			if err := os.WriteFile(filepath.Join(workerDir, "fixed.txt"), []byte("fixed"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, workerDir, "add", "fixed.txt")
+			gitCmd(t, workerDir, "commit", "-m", "worker fix")
+			fixedHead := gitCmd(t, workerDir, "rev-parse", "HEAD")
+			pack, err := testisolation.ExportGitHead(context.Background(), workerDir, head, fixedHead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(workerDir, "staged-only.txt"), []byte("staged blob"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, workerDir, "add", "staged-only.txt")
+			index, err := testisolation.ExportGitIndex(context.Background(), workerDir, fixedHead)
+			if err != nil {
+				t.Fatal(err)
+			}
+			root := t.TempDir()
+			headPath, resultPath, ackPath := filepath.Join(root, "head.json"), filepath.Join(root, "result.json"), filepath.Join(root, "ack.json")
+			final := isolatedStepEvent{Kind: "result", Outcome: &pipeline.StepOutcome{}, Index: index}
+			if stepName == types.StepReview {
+				final = isolatedStepEvent{Kind: "error", Error: pipeline.EncodeIsolatedTestError(pipeline.ErrAgentTimeout), Index: index}
+			}
+			for path, event := range map[string]isolatedStepEvent{headPath: {Kind: "head", Text: fixedHead, Pack: pack}, resultPath: final} {
+				data, err := json.Marshal(event)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, append(data, '\n'), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			defer cancel()
+			sctx.Ctx = ctx
+			cmd := exec.CommandContext(ctx, "sh", "-c", `IFS= read -r request || exit 11
+cat "$1" || exit 12
+IFS= read -r ack || exit 13
+printf '%s' "$ack" > "$3"
+cat "$2"`, "worker", headPath, resultPath, ackPath)
+			outcome, retained, err := executeIsolatedWorker(sctx, cmd, "request", stepName, nil)
+			if retained || stepName == types.StepReview && !errors.Is(err, pipeline.ErrAgentTimeout) || stepName != types.StepReview && (err != nil || outcome == nil) {
+				t.Fatalf("handoff failed: %+v retained=%v %v", outcome, retained, err)
+			}
+			if data, err := os.ReadFile(ackPath); err != nil || string(data) != `""` {
+				t.Fatalf("durable acknowledgement failed: %s %v", data, err)
+			}
+			run, err := sctx.DB.GetRun(sctx.Run.ID)
+			if err != nil || run.HeadSHA != fixedHead || gitCmd(t, dir, "rev-parse", "HEAD") != fixedHead {
+				t.Fatalf("head not durably imported: %+v %v", run, err)
+			}
+			if got := gitCmd(t, dir, "show", ":staged-only.txt"); got != "staged blob" {
+				t.Fatalf("index-only blob lost: %q", got)
+			}
+			rng, err := sctx.DB.GetUncertifiedPipelineRange(sctx.Repo.ID, run.Branch)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stepName == types.StepReview {
+				if rng == nil || rng.FromSHA != head || rng.ToSHA != fixedHead || rng.SourceRunID != run.ID {
+					t.Fatalf("failed review lost host provenance: %+v", rng)
+				}
+			} else if rng != nil {
+				t.Fatalf("non-review fix created review provenance: %+v", rng)
+			}
+		})
 	}
 }

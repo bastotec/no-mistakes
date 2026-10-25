@@ -36,7 +36,7 @@ type isolatedTestInput struct {
 	PriorBranchDecisions                                                                                      []*db.BranchDecisionRound
 	PriorBranchDecisionsTruncated                                                                             bool
 }
-type isolatedTestEvent struct {
+type isolatedStepEvent struct {
 	Kind       string
 	Text       string
 	Outcome    *pipeline.StepOutcome
@@ -109,31 +109,6 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 		return nil, err
 	}
 	defer invocation.Close()
-	cmd := invocation.Command
-	in, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
-	}
-	defer in.Close()
-	out, err := cmd.StdoutPipe()
-	if err != nil {
-		return nil, err
-	}
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := shellenv.StartShellCommand(cmd); err != nil {
-		return nil, fmt.Errorf("test-isolation-confinement: %w", err)
-	}
-	keepWorkspace = true
-	defer shellenv.TerminateShellCommandGroup(cmd)
-	if markStarted != nil {
-		if err := markStarted(cmd.Process.Pid); err != nil {
-			keepWorkspace = false
-			cmd.Cancel()
-			cmd.Wait()
-			return nil, err
-		}
-	}
 	// Do not serialize config fields unrelated to Test. Agent arguments are fixed
 	// below, so a global --hook or --base-url cannot bypass the model channel.
 	cfg := config.Config{Agent: types.AgentDeck, Commands: config.Commands{Prepare: sctx.Config.Commands.Prepare, Test: sctx.Config.Commands.Test}, Test: sctx.Config.Test, Commit: sctx.Config.Commit, PR: config.PR{BaseBranch: sctx.Config.PR.BaseBranch},
@@ -143,6 +118,35 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 		StepResultID: sctx.StepResultID, Fixing: sctx.Fixing, PreviousFindings: sctx.PreviousFindings, DeferredFindings: sctx.DeferredFindings,
 		UserIntent: sctx.UserIntent, IntentSource: sctx.IntentSource, PriorBranchDecisions: isolatedBranchDecisions(sctx.PriorBranchDecisions), PriorBranchDecisionsTruncated: sctx.PriorBranchDecisionsTruncated}
 	input.Round = isolatedRound(sctx)
+	outcome, keepWorkspace, err = executeIsolatedWorker(sctx, invocation.Command, input, types.StepTest, markStarted)
+	return outcome, err
+}
+
+func executeIsolatedWorker(sctx *pipeline.StepContext, cmd *exec.Cmd, input any, stepName types.StepName, markStarted func(int) error) (outcome *pipeline.StepOutcome, keepWorkspace bool, invocationErr error) {
+	in, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, keepWorkspace, err
+	}
+	defer in.Close()
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, keepWorkspace, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := shellenv.StartShellCommand(cmd); err != nil {
+		return nil, keepWorkspace, fmt.Errorf("test-isolation-confinement: %w", err)
+	}
+	keepWorkspace = true
+	defer shellenv.TerminateShellCommandGroup(cmd)
+	if markStarted != nil {
+		if err := markStarted(cmd.Process.Pid); err != nil {
+			keepWorkspace = false
+			cmd.Cancel()
+			cmd.Wait()
+			return nil, keepWorkspace, err
+		}
+	}
 	encoder := json.NewEncoder(in)
 	if err := encoder.Encode(input); err != nil {
 		cmd.Cancel()
@@ -150,13 +154,13 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 		if waitErr != nil {
 			err = errors.Join(err, fmt.Errorf("test-isolation-worker: %w: %s", waitErr, stderr.String()))
 		}
-		return nil, errors.Join(err, pipeline.ErrIsolatedTestHandoff)
+		return nil, keepWorkspace, errors.Join(err, pipeline.ErrIsolatedTestHandoff)
 	}
 	decoder := json.NewDecoder(bufio.NewReader(out))
 	var workerErr error
 	finished := false
 	for {
-		var event isolatedTestEvent
+		var event isolatedStepEvent
 		err := decoder.Decode(&event)
 		if err == io.EOF {
 			break
@@ -183,9 +187,10 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 				sctx.LogFile(event.Text)
 			}
 		case "activity", "invocation":
-			workerErr = applyIsolatedTestObservation(sctx, event)
+			workerErr = applyIsolatedStepObservation(sctx, stepName, event)
 		case "head":
-			workerErr = testisolation.ImportGitHead(sctx.Ctx, sctx.WorkDir, sctx.Run.HeadSHA, event.Text, event.Pack)
+			startingHead := sctx.Run.HeadSHA
+			workerErr = testisolation.ImportGitHead(sctx.Ctx, sctx.WorkDir, startingHead, event.Text, event.Pack)
 			if workerErr == nil {
 				workerErr = sctx.DB.UpdateRunHeadSHA(sctx.Run.ID, event.Text)
 			}
@@ -194,6 +199,12 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 				ack = "durable head acknowledgement failed"
 			} else {
 				sctx.Run.HeadSHA = event.Text
+				if stepName == types.StepReview && sctx.Fixing {
+					if sctx.ReviewStartingHeadSHA != "" {
+						startingHead = sctx.ReviewStartingHeadSHA
+					}
+					pipeline.PersistUncertifiedPipelineRange(sctx, startingHead, event.Text)
+				}
 			}
 			if err := encoder.Encode(ack); err != nil {
 				workerErr = err
@@ -236,12 +247,12 @@ func executeIsolatedTestInvocation(sctx *pipeline.StepContext, markStarted func(
 		workerErr = errors.Join(workerErr, fmt.Errorf("test-isolation-worker: %w: %s", waitErr, stderr.String()))
 	}
 	if workerErr != nil {
-		return nil, workerErr
+		return nil, keepWorkspace, workerErr
 	}
 	if !finished || outcome == nil {
-		return nil, fmt.Errorf("test-isolation-worker: missing final result")
+		return nil, keepWorkspace, fmt.Errorf("test-isolation-worker: missing final result")
 	}
-	return outcome, nil
+	return outcome, keepWorkspace, nil
 }
 
 // RunIsolatedTestWorker is an internal binary entrypoint. Its fixed filesystem
@@ -289,42 +300,17 @@ func RunIsolatedTestWorker(input io.Reader, output io.Writer) error {
 	defer ag.Close()
 	encoder := json.NewEncoder(output)
 	var mu sync.Mutex
-	emit := func(event isolatedTestEvent) error { mu.Lock(); defer mu.Unlock(); return encoder.Encode(event) }
+	emit := func(event isolatedStepEvent) error { mu.Lock(); defer mu.Unlock(); return encoder.Encode(event) }
 	workerAgent := pipeline.InstrumentIsolatedTestAgent(isolatedTestGateAgent{ag}, database, request.Run.ID, request.Round,
-		func(inv db.AgentInvocation) { emit(isolatedTestEvent{Kind: "invocation", Invocation: &inv}) },
-		func() { emit(isolatedTestEvent{Kind: "activity"}) })
+		func(inv db.AgentInvocation) { emit(isolatedStepEvent{Kind: "invocation", Invocation: &inv}) },
+		func() { emit(isolatedStepEvent{Kind: "activity"}) })
 	sctx := &pipeline.StepContext{Ctx: context.Background(), Run: request.Run, Repo: request.Repo, Config: &request.Config, WorkDir: request.WorkDir, GateDir: request.GateDir,
 		EvidenceDir: request.EvidenceDir, StepResultID: request.StepResultID, Fixing: request.Fixing, PreviousFindings: request.PreviousFindings,
 		DeferredFindings: request.DeferredFindings, UserIntent: request.UserIntent, IntentSource: request.IntentSource, DB: database, Agent: workerAgent,
 		Shared: &pipeline.RunShared{}, IsolatedTestWorker: true, PriorBranchDecisions: request.PriorBranchDecisions, PriorBranchDecisionsTruncated: request.PriorBranchDecisionsTruncated,
-		Log:      func(text string) { emit(isolatedTestEvent{Kind: "log", Text: text}) },
-		LogChunk: func(text string) { emit(isolatedTestEvent{Kind: "chunk", Text: text}) },
-		LogFile:  func(text string) { emit(isolatedTestEvent{Kind: "file", Text: text}) },
-		RecordIsolatedHead: func(head string) error {
-			pack, err := testisolation.ExportGitHead(context.Background(), request.WorkDir, request.Run.HeadSHA, head)
-			if err != nil {
-				return err
-			}
-			if err := emit(isolatedTestEvent{Kind: "head", Text: head, Pack: pack}); err != nil {
-				return err
-			}
-			var acknowledgement string
-			if err := decoder.Decode(&acknowledgement); err != nil {
-				return err
-			}
-			if acknowledgement != "" {
-				return fmt.Errorf("%s", acknowledgement)
-			}
-			return nil
-		},
 	}
-	outcome, err := (&TestStep{}).Execute(sctx)
-	index, indexErr := testisolation.ExportGitIndex(context.Background(), request.WorkDir, request.Run.HeadSHA)
-	err = errors.Join(err, indexErr)
-	if err != nil {
-		return emit(isolatedTestEvent{Kind: "error", Error: pipeline.EncodeIsolatedTestError(err), Index: index})
-	}
-	return emit(isolatedTestEvent{Kind: "result", Outcome: outcome, Index: index})
+	configureIsolatedWorkerContext(sctx, decoder, emit)
+	return executeIsolatedWorkerStep(&TestStep{}, sctx, emit)
 }
 
 // The worker recreates the ordinary Test gate's prompt boundary, without
@@ -354,10 +340,7 @@ func isolatedBranchDecisions(decisions []*db.BranchDecisionRound) []*db.BranchDe
 		if decision == nil || decision.Round == nil {
 			continue
 		}
-		r := decision.Round
-		result = append(result, &db.BranchDecisionRound{RunID: decision.RunID, StepName: decision.StepName,
-			Round: &db.StepRound{Round: r.Round, Trigger: r.Trigger, FindingsJSON: r.FindingsJSON, UserFindingsJSON: r.UserFindingsJSON,
-				SelectedFindingIDs: r.SelectedFindingIDs, SelectionSource: r.SelectionSource, FixSummary: r.FixSummary}})
+		result = append(result, &db.BranchDecisionRound{RunID: decision.RunID, StepName: decision.StepName, Round: isolatedStepRound(decision.Round)})
 	}
 	return result
 }
@@ -369,7 +352,7 @@ func isolatedRound(sctx *pipeline.StepContext) int {
 	return 1
 }
 
-func applyIsolatedTestObservation(sctx *pipeline.StepContext, event isolatedTestEvent) error {
+func applyIsolatedStepObservation(sctx *pipeline.StepContext, stepName types.StepName, event isolatedStepEvent) error {
 	switch event.Kind {
 	case "activity":
 		if sctx.IsolatedActivity != nil {
@@ -380,10 +363,15 @@ func applyIsolatedTestObservation(sctx *pipeline.StepContext, event isolatedTest
 			return fmt.Errorf("test-isolation-protocol: missing invocation")
 		}
 		inv := *event.Invocation
-		inv.ID, inv.RunID, inv.StepName, inv.Round = "", sctx.Run.ID, string(types.StepTest), isolatedRound(sctx)
+		inv.ID, inv.RunID, inv.StepName, inv.Round = "", sctx.Run.ID, string(stepName), isolatedRound(sctx)
 		if _, err := sctx.DB.InsertAgentInvocation(inv); err != nil {
-			sctx.Log(fmt.Sprintf("warning: failed to record isolated Test invocation: %v", err))
+			sctx.Log(fmt.Sprintf("warning: failed to record isolated %s invocation: %v", stepName, err))
 		}
 	}
 	return nil
+}
+
+func isolatedStepRound(r *db.StepRound) *db.StepRound {
+	return &db.StepRound{Round: r.Round, Trigger: r.Trigger, FindingsJSON: r.FindingsJSON, UserFindingsJSON: r.UserFindingsJSON,
+		SelectedFindingIDs: r.SelectedFindingIDs, SelectionSource: r.SelectionSource, FixSummary: r.FixSummary}
 }

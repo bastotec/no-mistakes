@@ -32,7 +32,18 @@ type Options struct {
 	Git                                                      *GitWorkspace
 	PostgresRoot                                             string
 	Model                                                    ModelConfig
+	// Entry selects the worker binary's internal entrypoint ("test" for the
+	// Test-only worker, "run" for the whole-run confinement worker). Both
+	// entries share this exact confinement; only the protocol the worker
+	// speaks past the boundary differs.
+	Entry string
 }
+
+// Worker entrypoint names accepted by Options.Entry.
+const (
+	EntryTest = "test"
+	EntryRun  = "run"
+)
 
 type Invocation struct {
 	Command        *exec.Cmd
@@ -50,13 +61,21 @@ func Environment(workdir string) []string {
 	return []string{"PATH=/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin", "LANG=C.UTF-8", "HOME=/tmp/home", "TMPDIR=/tmp", "PWD=" + workdir, "NO_MISTAKES_GATE=1", "GIT_TERMINAL_PROMPT=0", "GIT_CONFIG_NOSYSTEM=1", "GIT_CONFIG_GLOBAL=/dev/null", "GIT_EDITOR=true", "GIT_SEQUENCE_EDITOR=true", "DATABASE_URL=" + DatabaseURL, "NM_TEST_DATABASE_URL=" + DatabaseURL, "PROXAI_BASE_URL=" + ModelURL, "DECK_NO_PROJECT_CONTEXT=1"}
 }
 
-// Start prepares one invocation. The namespace's PID 1 owns every Test process,
-// including detached grandchildren; killing it tears down the whole namespace.
-// /tmp is a fresh tmpfs, so database, HOME and model-frontend state disappear on
-// worker/daemon death without requiring a host-side database cleanup process.
+// Start prepares one invocation. The namespace's PID 1 owns every confined
+// process, including detached grandchildren; killing it tears down the whole
+// namespace. /tmp is a fresh tmpfs, so database, HOME and model-frontend state
+// disappear on worker/daemon death without requiring a host-side database
+// cleanup process. The default entry keeps the historical Test-only worker
+// argv ("isolated-test-worker"); EntryRun selects the whole-run worker.
 func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 	if err := Check(); err != nil {
 		return nil, err
+	}
+	if o.Entry == "" {
+		o.Entry = EntryTest
+	}
+	if o.Entry != EntryTest && o.Entry != EntryRun {
+		return nil, fmt.Errorf("test-isolation-entry: unsupported worker entry %q", o.Entry)
 	}
 	credential, err := filepath.EvalSymlinks(o.Model.KeyFile)
 	if err != nil {
@@ -179,7 +198,7 @@ func Start(ctx context.Context, o Options) (_ *Invocation, err error) {
 			}
 		}
 	}
-	args = append(args, "--chdir", o.WorkDir, "/nm/worker", "isolated-test-worker")
+	args = append(args, "--chdir", o.WorkDir, "/nm/worker", "isolated-"+o.Entry+"-worker")
 	bwrap, err := exec.LookPath("bwrap")
 	if err != nil {
 		return nil, err

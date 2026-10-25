@@ -440,4 +440,14 @@ var migrationStatements = []string{
 	`ALTER TABLE agent_invocations ADD COLUMN workload_lines INTEGER`,
 	`ALTER TABLE agent_invocations ADD COLUMN finding_count INTEGER`,
 	`CREATE TABLE IF NOT EXISTS run_test_isolation (run_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE)`,
+	// Per-run whole-execution confinement pin (runconfine). Distinct from
+	// run_test_isolation: `--isolate` binds every confinable step, not Test
+	// alone. The digest is validated before every dispatch and stamped on
+	// every receipt; a mismatch refuses rather than reinterpreting the pin.
+	`CREATE TABLE IF NOT EXISTS run_confinement (
+		run_id        TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+		head_sha      TEXT NOT NULL,
+		policy_digest TEXT NOT NULL,
+		created_at    INTEGER NOT NULL DEFAULT (unixepoch())
+	)`,
 }

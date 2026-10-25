@@ -66,7 +66,7 @@ This refusal also applies when deterministic test or lint commands are configure
 | Test, with or without `commands.test` | No | The optional command is only a baseline; the agent must derive and drive end-user scenarios. |
 | Document | No | Requires the agent to discover and update documentation gaps. |
 | Lint with `commands.lint` | No, as part of a full gate | The command is deterministic, but the full gate still requires an agent. |
-| Lint without `commands.lint` and all fix rounds | No | The document step performs the initial combined housekeeping pass, and an agent is still needed for fallback assessment or code changes. |
+| Lint without `commands.lint` and all fix rounds | No | Requires agent assessment or code changes; see [Document/Lint](/no-mistakes/reference/pipeline-steps/#document) for combined-pass and fallback behavior. |
 | Push, PR, and CI as part of a gate | No | They run only after the required validation steps, and PR or CI paths may invoke the agent themselves. |
 
 ### Antigravity and Gemini setups

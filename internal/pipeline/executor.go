@@ -24,6 +24,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/git"
 	"github.com/kunchenguid/no-mistakes/internal/ipc"
 	"github.com/kunchenguid/no-mistakes/internal/paths"
+	"github.com/kunchenguid/no-mistakes/internal/runconfine"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/telemetry"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -148,6 +149,69 @@ func (e *Executor) runEvidenceDir(runID string) string {
 		configured = e.config.Test.Evidence.LocalRoot
 	}
 	return e.paths.RunEvidenceDir(configured, runID)
+}
+
+// confinedStep answers whether this run carries the per-run confinement pin
+// and what the executor should dispatch for step. A confined run replaces the
+// confinable step with the isolation-worker proxy (the ConfinedStepInvoker
+// hook the steps package registers) and refuses the steps whose whole action
+// the offline policy forbids by skipping them with an explicit reason; every
+// other dispatch is unchanged. The pin is read once per dispatch and a read
+// error fails the step, never silently degrades to a native dispatch.
+func (e *Executor) confinedStep(sctx *StepContext, step Step) (Step, bool) {
+	if e.db == nil || sctx == nil || sctx.Run == nil || sctx.IsolatedTestWorker {
+		return step, false
+	}
+	enabled, err := e.db.RunConfinementEnabled(sctx.Run.ID)
+	if err != nil {
+		return errorStep{step: step, err: fmt.Errorf("run-confinement-policy: read pin: %w", err)}, true
+	}
+	if !enabled {
+		return step, false
+	}
+	if runconfine.IsConfinableStep(step.Name()) {
+		if invoker := ConfinedStepInvoker(); invoker != nil {
+			return invoker(step), true
+		}
+		return errorStep{step: step, err: errors.New("run-confinement-policy: confinement worker unavailable")}, true
+	}
+	return skipStep{step: step, reason: "run-confinement-policy: the offline capability policy forbids " + string(step.Name()) + " from a confined run"}, true
+}
+
+// ConfinedStepInvoker builds the isolation-worker proxy for one confinable
+// step. The steps package - which owns the worker protocol - registers its
+// implementation in init; pipeline cannot import steps (steps imports
+// pipeline), so the hook is the seam. Never call outside a confined dispatch.
+var confinedStepInvoker func(Step) Step
+
+// SetConfinedStepInvoker registers the confinement worker proxy builder. It
+// exists for the steps package's init; other callers must not override it.
+func SetConfinedStepInvoker(fn func(Step) Step) { confinedStepInvoker = fn }
+
+// ConfinedStepInvoker returns the registered proxy builder, or nil when the
+// steps package (and with it the whole confinement worker) is not linked in.
+func ConfinedStepInvoker() func(Step) Step { return confinedStepInvoker }
+
+// errorStep fails a step with a fixed error, preserving the wrapped step's
+// identity so failure records and events stay step-attributed.
+type errorStep struct {
+	step Step
+	err  error
+}
+
+func (s errorStep) Name() types.StepName                       { return s.step.Name() }
+func (s errorStep) Execute(*StepContext) (*StepOutcome, error) { return nil, s.err }
+
+// skipStep completes a step as skipped with a fixed reason, preserving the
+// wrapped step's identity.
+type skipStep struct {
+	step   Step
+	reason string
+}
+
+func (s skipStep) Name() types.StepName { return s.step.Name() }
+func (s skipStep) Execute(*StepContext) (*StepOutcome, error) {
+	return &StepOutcome{Skipped: true, SkipReason: s.reason}, nil
 }
 
 // SetGateReconcileTimings overrides the interval between approval-gate
@@ -1435,7 +1499,18 @@ func (e *Executor) executeStep(ctx context.Context, step Step, sr *db.StepResult
 			}
 		}
 		if err == nil {
-			outcome, err = step.Execute(sctx)
+			// The per-run confinement boundary wraps dispatch itself: a
+			// confined run's confinable step (core or custom gate, initial
+			// round and every fix round) executes inside the isolation worker
+			// instead of natively, and steps the offline policy forbids
+			// (push/pr/ci, jev) skip with an explicit reason rather than
+			// executing against daemon credentials. Unconfined runs and
+			// unlisted steps are untouched.
+			if confinedStep, confined := e.confinedStep(sctx, step); confined {
+				outcome, err = confinedStep.Execute(sctx)
+			} else {
+				outcome, err = step.Execute(sctx)
+			}
 			// Only repair steps capture: another step's leftovers are not a
 			// repair to continue, and capturing them would replace a handoff
 			// they never contained.

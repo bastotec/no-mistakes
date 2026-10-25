@@ -27,6 +27,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline/steps"
 	"github.com/kunchenguid/no-mistakes/internal/procreap"
+	"github.com/kunchenguid/no-mistakes/internal/runconfine"
 	"github.com/kunchenguid/no-mistakes/internal/runenv"
 	"github.com/kunchenguid/no-mistakes/internal/safeurl"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
@@ -280,11 +281,21 @@ func (m *RunManager) loadRecoveredConfig(ctx context.Context, run *db.Run, repo 
 	if err != nil {
 		return nil, fmt.Errorf("load repo config: %w", err)
 	}
+	callbacksDisabled, err := m.db.GitCallbacksDisabled(run.ID)
+	if err != nil {
+		return nil, fmt.Errorf("read Git callback policy: %w", err)
+	}
+	fetch := fetchRecoveredRemoteBranch
+	if callbacksDisabled {
+		fetch = func(ctx context.Context, dir, remote, branch string) error {
+			return git.FetchRemoteBranchToRefWithoutCallbacks(ctx, dir, remote, branch, "refs/remotes/"+remote+"/"+branch)
+		}
+	}
 	var trustedSHA string
 	if repo.DefaultBranch != "" {
 		fetchCtx, cancel := context.WithTimeout(ctx, recoveredConfigFetchTimeout)
 		defer cancel()
-		if err := fetchRecoveredRemoteBranch(fetchCtx, workDir, "origin", repo.DefaultBranch); err != nil {
+		if err := fetch(fetchCtx, workDir, "origin", repo.DefaultBranch); err != nil {
 			slog.Warn("failed to fetch default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
 		} else if sha, err := git.ResolveRef(ctx, workDir, "refs/remotes/origin/"+repo.DefaultBranch); err != nil {
 			slog.Warn("failed to resolve default branch while recovering run; trusted config disabled", "run_id", run.ID, "branch", repo.DefaultBranch, "error", err)
@@ -1393,11 +1404,12 @@ func stageCallerHeadForComparison(ctx context.Context, gateDir, workingPath, cal
 // redaction, origin remains authoritative so embedded credentials retained in
 // the gate can still authenticate without ever entering the database.
 func fetchRunDefaultBranch(ctx context.Context, workDir string, repo *db.Repo) error {
+	remote := repo.UpstreamURL
 	originURL, err := git.GetRemoteURL(ctx, workDir, "origin")
 	if !repo.URLsVerified || (err == nil && safeurl.Redact(originURL) == repo.UpstreamURL) {
-		return git.FetchRemoteBranch(ctx, workDir, "origin", repo.DefaultBranch)
+		remote = "origin"
 	}
-	return git.FetchRemoteBranchToRef(ctx, workDir, repo.UpstreamURL, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
+	return git.FetchRemoteBranchToRef(ctx, workDir, remote, repo.DefaultBranch, "refs/remotes/origin/"+repo.DefaultBranch)
 }
 
 // startRun creates a run, sets up a worktree, and launches pipeline execution.
@@ -1475,6 +1487,10 @@ func (m *RunManager) endQuietWindow(ctx context.Context, repoID, branch, runID s
 // startRunWithIntentSourceLocked performs run creation while the caller owns
 // the repository/branch lock. Proof fields are empty for ordinary launches.
 func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *db.Repo, branch, headSHA, baseSHA, trigger string, skipSteps []types.StepName, intent, source, launchNonce, validationGeneration, intentDigest, prBaseBranch, inheritedPRURL, existingPR, preserveHistoryBase string) (string, error) {
+	callbacksDisabled := ctx.Value(confinedRunLaunchKey{}) == true || ctx.Value(isolatedTestLaunchKey{}) == true
+	if callbacksDisabled {
+		ctx = git.WithoutCallbacks(ctx)
+	}
 	branchRole := telemetryBranchRole(branch, repo.DefaultBranch)
 	trackStartFailure := func(stage string) {
 		telemetry.Track("run", telemetry.Fields{
@@ -1610,6 +1626,23 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 			return "", fmt.Errorf("pin Test isolation: %w", err)
 		}
 	}
+	if ctx.Value(confinedRunLaunchKey{}) == true {
+		// The whole-run confinement pin is minted against the submitted head
+		// before any pipeline side effect; every dispatch re-derives the
+		// digest and refuses on mismatch (runconfine.PolicyDigest). Head
+		// equality is not the contract - repairs legitimately advance the
+		// head - digest equality is.
+		policy := runconfine.DefaultPolicy()
+		if err := policy.Validate(); err != nil {
+			m.db.UpdateRunError(run.ID, "pin run confinement failed")
+			return "", fmt.Errorf("pin run confinement: %w", err)
+		}
+		digest := runconfine.PolicyDigest(policy, run.ID, headSHA)
+		if err := m.db.EnableRunConfinement(run.ID, headSHA, digest); err != nil {
+			m.db.UpdateRunError(run.ID, "pin run confinement failed")
+			return "", fmt.Errorf("pin run confinement: %w", err)
+		}
+	}
 	// The target constrains this run from here on, but it is not durable until
 	// the forge has proven it below: a launch that is refused there must leave
 	// the branch mapped exactly where it already was, so the next unflagged run
@@ -1663,7 +1696,11 @@ func (m *RunManager) startRunWithIntentSourceLocked(ctx context.Context, repo *d
 		trackStartFailure("carry_survived_work")
 		return "", fmt.Errorf("carry interrupted repair work: %w", err)
 	}
-	if err := git.WorktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
+	worktreeAdd := git.WorktreeAdd
+	if callbacksDisabled {
+		worktreeAdd = git.WorktreeAddWithoutCallbacks
+	}
+	if err := worktreeAdd(ctx, gateDir, wtDir, headSHA); err != nil {
 		m.db.UpdateRunError(run.ID, fmt.Sprintf("create worktree: %s", err))
 		trackStartFailure("create_worktree")
 		return "", fmt.Errorf("create worktree: %w", err)

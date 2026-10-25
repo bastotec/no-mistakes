@@ -34,6 +34,13 @@ func run() int {
 		}
 		return 0
 	}
+	if len(os.Args) == 2 && os.Args[1] == "isolated-run-worker" {
+		if err := steps.RunIsolatedRunWorker(os.Stdin, os.Stdout); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 1
+		}
+		return 0
+	}
 	if len(os.Args) == 3 && os.Args[1] == "repair-invocation-wrapper" {
 		if err := pipeline.RunRepairInvocationWrapper(os.Args[2]); err != nil {
 			fmt.Fprintln(os.Stderr, err)

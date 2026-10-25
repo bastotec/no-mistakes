@@ -190,6 +190,152 @@ func TestIsolatedGitImportsOnlyRunHeadAndResolvedIdentity(t *testing.T) {
 	}
 }
 
+func TestIsolatedGitAttributesRejectEscapeAcrossHandoffs(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		parent   bool
+		absolute bool
+		relative bool
+		alias    bool
+	}{
+		{name: "relative-file"},
+		{name: "absolute-file", absolute: true},
+		{name: "relative-parent", parent: true},
+		{name: "absolute-parent", parent: true, absolute: true},
+		{name: "relative-symlink-target", relative: true},
+		{name: "aliased-worktree", absolute: true, alias: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, source, work, base := isolationGitFixture(t)
+			secretDir := t.TempDir()
+			secret := filepath.Join(secretDir, "attrs")
+			secretBytes := "host credential canary\n"
+			if err := os.WriteFile(secret, []byte(secretBytes), 0600); err != nil {
+				t.Fatal(err)
+			}
+			name := "attrs"
+			if tc.parent {
+				name = filepath.Join("rules", name)
+			}
+			attributePath := filepath.Join(work, name)
+			if err := os.MkdirAll(filepath.Dir(attributePath), 0700); err != nil {
+				t.Fatal(err)
+			}
+			initial := "tracked -text\n"
+			if err := os.WriteFile(attributePath, []byte(initial), 0600); err != nil {
+				t.Fatal(err)
+			}
+			configured := name
+			if tc.absolute {
+				configured = attributePath
+			}
+			isolationGit(t, source, nil, "config", "core.attributesFile", configured)
+			if tc.alias {
+				alias := filepath.Join(t.TempDir(), "work-alias")
+				if err := os.Symlink(work, alias); err != nil {
+					t.Fatal(err)
+				}
+				work = alias
+			}
+			workspace, err := PrepareGit(context.Background(), work, t.TempDir(), base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(filepath.Join(workspace.Dir, "attributes")); err != nil || string(data) != initial {
+				t.Fatalf("first handoff lost attributes: %q %v", data, err)
+			}
+			privateGit := func(args ...string) string {
+				return isolationGit(t, work, append(Environment(work), workspace.Identity...), append([]string{"--git-dir=" + workspace.Dir}, args...)...)
+			}
+			privateGit("add", "--", name)
+			privateGit("commit", "-m", "initial attributes")
+			link, target := attributePath, secret
+			if tc.parent {
+				link, target = filepath.Dir(attributePath), secretDir
+			}
+			if tc.relative {
+				target, err = filepath.Rel(filepath.Dir(link), target)
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if err := os.RemoveAll(link); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, link); err != nil {
+				t.Fatal(err)
+			}
+			privateGit("add", "-A")
+			privateGit("commit", "-m", "worker replaces attributes with symlink")
+			head := privateGit("rev-parse", "HEAD")
+			pack, err := ExportGitHead(context.Background(), workspace.Dir, base, head)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := ImportGitHead(context.Background(), work, base, head, pack); err != nil {
+				t.Fatal(err)
+			}
+			if data, err := os.ReadFile(attributePath); err != nil || string(data) != secretBytes {
+				t.Fatalf("escape positive control: %q %v", data, err)
+			}
+			nextRoot := t.TempDir()
+			if _, err := PrepareGit(context.Background(), work, nextRoot, head); err == nil || !strings.Contains(err.Error(), "read isolated Git attributes") {
+				t.Fatalf("repeated handoff accepted escaped attributes: %v", err)
+			}
+			if data, err := os.ReadFile(filepath.Join(nextRoot, "git", "attributes")); err == nil && strings.Contains(string(data), secretBytes) {
+				t.Fatal("host credential copied into next worker")
+			}
+		})
+	}
+}
+
+func TestIsolatedGitAttributesPreserveAuthorizedSources(t *testing.T) {
+	for _, mode := range []string{"relative-symlink", "external", "default"} {
+		t.Run(mode, func(t *testing.T) {
+			_, source, work, base := isolationGitFixture(t)
+			attributes := "tracked text eol=lf\n"
+			infoAttributes := "tracked -diff\n"
+			path := filepath.Join(t.TempDir(), "attributes")
+			switch mode {
+			case "relative-symlink":
+				path = filepath.Join(work, "attributes")
+				if err := os.Symlink("attributes", filepath.Join(work, "attrs")); err != nil {
+					t.Fatal(err)
+				}
+				isolationGit(t, source, nil, "config", "core.attributesFile", "attrs")
+			case "external":
+				isolationGit(t, source, nil, "config", "core.attributesFile", path)
+			case "default":
+				configHome := t.TempDir()
+				t.Setenv("XDG_CONFIG_HOME", configHome)
+				path = filepath.Join(configHome, "git", "attributes")
+			}
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(attributes), 0600); err != nil {
+				t.Fatal(err)
+			}
+			info := isolationGit(t, work, nil, "rev-parse", "--path-format=absolute", "--git-path", "info/attributes")
+			if err := os.MkdirAll(filepath.Dir(info), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(info, []byte(infoAttributes), 0600); err != nil {
+				t.Fatal(err)
+			}
+			workspace, err := PrepareGit(context.Background(), work, t.TempDir(), base)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for name, expected := range map[string]string{"attributes": attributes, filepath.Join("info", "attributes"): infoAttributes} {
+				if data, err := os.ReadFile(filepath.Join(workspace.Dir, name)); err != nil || string(data) != expected {
+					t.Fatalf("authorized attributes %s: %q %v", name, data, err)
+				}
+			}
+		})
+	}
+}
+
 func TestIsolatedGitHostHandoffDisablesInheritedCallbacks(t *testing.T) {
 	root, source, work, base := isolationGitFixture(t)
 	hooks := filepath.Join(work, ".githooks")

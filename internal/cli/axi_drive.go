@@ -124,6 +124,7 @@ func newAxiRunCmd() *cobra.Command {
 	var existingPR string
 	var retireExistingPR bool
 	var isolateTest bool
+	var isolateRun bool
 	var wait time.Duration
 
 	cmd := &cobra.Command{
@@ -181,6 +182,12 @@ func newAxiRunCmd() *cobra.Command {
 				if cmd.Flags().Changed("existing-pr") && existingPR == "" {
 					return emitError(cmd, 2, "--existing-pr requires a PR URL")
 				}
+				if isolateRun {
+					if isolateTest || retireExistingPR || existingPR != "" || preserveHistoryBase != "" || len(skipSteps) != 0 || launchNonce != "" || validationGeneration != "" {
+						return emitError(cmd, 2, "--isolate cannot combine with --isolate-test, PR association, history, skip or launch-receipt flags")
+					}
+					return runAxiConfinedRun(cmd, autoYes, intent, baseBranch, wait)
+				}
 				if isolateTest {
 					if retireExistingPR || existingPR != "" || preserveHistoryBase != "" || len(skipSteps) != 0 || launchNonce != "" || validationGeneration != "" {
 						return emitError(cmd, 2, "--isolate-test cannot combine with PR association, history, skip or launch-receipt flags")
@@ -213,6 +220,7 @@ func newAxiRunCmd() *cobra.Command {
 	cmd.Flags().StringVar(&existingPR, "existing-pr", "", "associate this branch with an existing github.com PR URL; requires the submitted head to equal its live source head; never creates another PR")
 	cmd.Flags().BoolVar(&retireExistingPR, "retire-existing-pr", false, "drop this branch's remembered PR association and start no run; later runs use ordinary repository-scoped discovery")
 	cmd.Flags().BoolVar(&isolateTest, "isolate-test", false, "opt this run's whole Test descendant tree into Linux/bubblewrap isolation with a private native PostgreSQL database and constrained model channel; refuse unsupported setups")
+	cmd.Flags().BoolVar(&isolateRun, "isolate", false, "bind this whole run to the offline Linux confinement policy: every confinable step (review, test, document, lint and repository gates, including repair rounds) runs inside one isolation worker pinned by a versioned policy digest; push/pr/ci and advisory jev skip with an explicit reason instead of using daemon credentials; requires a supported Linux substrate, refuses before the first side effect otherwise")
 	bindAxiWaitFlag(cmd, &wait)
 	return cmd
 }

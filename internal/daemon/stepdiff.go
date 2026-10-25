@@ -43,7 +43,19 @@ func (m *RunManager) StepDiff(ctx context.Context, runID string) (string, bool, 
 		return "", false, fmt.Errorf("repo not found for run %s", runID)
 	}
 
-	diff, err := git.DiffHead(ctx, worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID))
+	confined, err := m.db.RunConfinementEnabled(runID)
+	if err != nil {
+		return "", false, fmt.Errorf("read confinement pin: %w", err)
+	}
+	isolated, err := m.db.TestIsolationEnabled(runID)
+	if err != nil {
+		return "", false, fmt.Errorf("read Test isolation pin: %w", err)
+	}
+	diffHead := git.DiffHead
+	if confined || isolated {
+		diffHead = git.DiffHeadWithoutCallbacks
+	}
+	diff, err := diffHead(ctx, worktrees.RecordedDir(m.paths, run.WorktreePath(), repo.ID, run.ID))
 	if err != nil {
 		return "", false, fmt.Errorf("diff worktree: %w", err)
 	}

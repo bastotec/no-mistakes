@@ -18,9 +18,10 @@ func TestSurvivedWorkCleanupSuppressesIsolatedGitCallbacks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("callback fixtures require a POSIX shell")
 	}
-	for _, isolated := range []bool{false, true} {
+	for _, mode := range []string{"ordinary", "test", "run"} {
+		isolated := mode != "ordinary"
 		for _, marked := range []bool{false, true} {
-			t.Run(fmt.Sprintf("isolated=%v/marked=%v", isolated, marked), func(t *testing.T) {
+			t.Run(fmt.Sprintf("mode=%s/marked=%v", mode, marked), func(t *testing.T) {
 				p := paths.WithRoot(t.TempDir())
 				if err := p.EnsureDirs(); err != nil {
 					t.Fatal(err)
@@ -35,8 +36,12 @@ func TestSurvivedWorkCleanupSuppressesIsolatedGitCallbacks(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if isolated {
+				if mode == "test" {
 					if err := database.EnableTestIsolation(run.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else if mode == "run" {
+					if err := database.EnableRunConfinement(run.ID, run.HeadSHA, "fixture-digest"); err != nil {
 						t.Fatal(err)
 					}
 				}

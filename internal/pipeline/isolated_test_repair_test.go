@@ -410,12 +410,17 @@ func TestExecutor_IsolatedSurvivedWorkSuppressesGitCallbacks(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("callback fixtures require a POSIX shell")
 	}
-	for _, isolated := range []bool{false, true} {
+	for _, mode := range []string{"ordinary", "test", "run"} {
+		isolated := mode != "ordinary"
 		for _, moved := range []bool{false, true} {
-			t.Run(fmt.Sprintf("isolated=%v/moved=%v", isolated, moved), func(t *testing.T) {
+			t.Run(fmt.Sprintf("mode=%s/moved=%v", mode, moved), func(t *testing.T) {
 				database, p, run, _ := setupTest(t)
-				if isolated {
+				if mode == "test" {
 					if err := database.EnableTestIsolation(run.ID); err != nil {
+						t.Fatal(err)
+					}
+				} else if mode == "run" {
+					if err := database.EnableRunConfinement(run.ID, run.HeadSHA, "fixture-digest"); err != nil {
 						t.Fatal(err)
 					}
 				}

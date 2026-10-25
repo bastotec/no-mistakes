@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -130,5 +131,58 @@ func TestStepDiff_ServesTheDiffWhileTheGlobalConfigIsUnreadable(t *testing.T) {
 	}
 	if truncated || !strings.Contains(diff, "agent fix") {
 		t.Fatalf("diff = %q (truncated=%v), want the worktree's change", diff, truncated)
+	}
+}
+
+func TestStepDiffSuppressesConfinedGitCallbacks(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX callback fixture")
+	}
+	for _, mode := range []string{"ordinary", "test", "run"} {
+		for _, callback := range []string{"filter.evil.clean", "diff.evil.textconv", "diff.external", "core.fsmonitor"} {
+			t.Run(mode+"/"+callback, func(t *testing.T) {
+				m, runID := stepDiffFixture(t, "agent fix\n")
+				run, err := m.db.GetRun(runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode == "run" {
+					if err := m.db.EnableRunConfinement(runID, run.HeadSHA, "fixture"); err != nil {
+						t.Fatal(err)
+					}
+				} else if mode == "test" {
+					if err := m.db.EnableTestIsolation(runID); err != nil {
+						t.Fatal(err)
+					}
+				}
+				dir := m.paths.WorktreeDir(run.RepoID, runID)
+				if err := os.WriteFile(filepath.Join(dir, ".gitattributes"), []byte("tracked.txt filter=evil diff=evil\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				marker := filepath.Join(t.TempDir(), "called")
+				script := filepath.Join(dir, "callback.sh")
+				if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf called >> '"+marker+"'\ncat\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				runGit(t, dir, "config", callback, script)
+				diff, _, err := m.StepDiff(context.Background(), runID)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_, markerErr := os.Stat(marker)
+				if mode == "ordinary" {
+					if markerErr != nil {
+						t.Fatalf("ordinary callback changed: %v", markerErr)
+					}
+				} else {
+					if !os.IsNotExist(markerErr) {
+						t.Fatalf("confined diff ran %s: %v", callback, markerErr)
+					}
+					if !strings.Contains(diff, "agent fix") {
+						t.Fatalf("confined diff lost repair: %s", diff)
+					}
+				}
+			})
+		}
 	}
 }
