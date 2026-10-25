@@ -267,28 +267,11 @@ func RunIsolatedTestWorker(input io.Reader, output io.Writer) error {
 	if err := decoder.Decode(&request); err != nil {
 		return err
 	}
-	state, err := os.ReadFile("/nm/state.db")
+	database, closeRuntime, err := bootstrapIsolatedWorker()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile("/tmp/control.db", state, 0600); err != nil {
-		return err
-	}
-	database, err := db.Open("/tmp/control.db")
-	if err != nil {
-		return err
-	}
-	defer database.Close()
-	closeServices, err := testisolation.ServePrivateServices()
-	if err != nil {
-		return err
-	}
-	defer closeServices()
-	// This is an invocation-local dummy, not a provider credential. The host
-	// bridge strips it and supplies the configured host-side key itself.
-	if err := os.WriteFile("/tmp/model-client-key", []byte("isolated-client"), 0600); err != nil {
-		return err
-	}
+	defer closeRuntime()
 	profile := request.Config.AgentConfig["deck"]
 	profile.Model = request.Model
 	ag, err := agent.NewWithOptions(types.AgentDeck, "/nm/deck", []string{"--base-url", testisolation.ModelURL, "--api-key-file", "/tmp/model-client-key"}, agent.Options{

@@ -31,6 +31,7 @@ type isolatedRunInput struct {
 	Policy                                                                                                              runconfine.Policy
 	PolicyDigest                                                                                                        string
 	WorkDir, GateDir, EvidenceDir, StepResultID, StepName, PreviousFindings, DeferredFindings, UserIntent, IntentSource string
+	RestoredSurvivedWork                                                                                                *types.SurvivedWork
 	Fixing                                                                                                              bool
 	FixWithoutRereview                                                                                                  bool
 	ReviewStartingHeadSHA                                                                                               string
@@ -155,7 +156,8 @@ func newIsolatedRunInput(sctx *pipeline.StepContext, step pipeline.Step, model s
 	return isolatedRunInput{Run: sctx.Run, Repo: confinedRepo(sctx.Repo), Config: confinedRunConfig(sctx.Config), Model: model, Policy: policy, PolicyDigest: digest,
 		WorkDir: sctx.WorkDir, GateDir: "/nm/git", EvidenceDir: sctx.EvidenceDir, StepResultID: sctx.StepResultID, StepName: string(step.Name()),
 		PreviousFindings: sctx.PreviousFindings, DeferredFindings: sctx.DeferredFindings, UserIntent: sctx.UserIntent, IntentSource: sctx.IntentSource,
-		Fixing: sctx.Fixing, FixWithoutRereview: sctx.FixWithoutRereview, ReviewStartingHeadSHA: sctx.ReviewStartingHeadSHA,
+		RestoredSurvivedWork: sctx.RestoredSurvivedWork,
+		Fixing:               sctx.Fixing, FixWithoutRereview: sctx.FixWithoutRereview, ReviewStartingHeadSHA: sctx.ReviewStartingHeadSHA,
 		UncertifiedFromSHA: sctx.UncertifiedFromSHA, UncertifiedToSHA: sctx.UncertifiedToSHA, UncertifiedSourceRunID: sctx.UncertifiedSourceRunID, UncertifiedPriorRounds: priorRounds,
 		Round: isolatedRound(sctx), Gate: gate,
 		PriorBranchDecisions: isolatedBranchDecisions(sctx.PriorBranchDecisions), PriorBranchDecisionsTruncated: sctx.PriorBranchDecisionsTruncated}
@@ -221,28 +223,11 @@ func runIsolatedRunRequest(request isolatedRunInput, decoder *json.Decoder, outp
 	if err := validateIsolatedRunRequest(request); err != nil {
 		return err
 	}
-	state, err := os.ReadFile("/nm/state.db")
+	database, closeRuntime, err := bootstrapIsolatedWorker()
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile("/tmp/control.db", state, 0600); err != nil {
-		return err
-	}
-	database, err := db.Open("/tmp/control.db")
-	if err != nil {
-		return err
-	}
-	defer database.Close()
-	closeServices, err := testisolation.ServePrivateServices()
-	if err != nil {
-		return err
-	}
-	defer closeServices()
-	// Invocation-local dummy, not a provider credential: the host bridge
-	// strips it and supplies the configured host-side key itself.
-	if err := os.WriteFile("/tmp/model-client-key", []byte("isolated-client"), 0600); err != nil {
-		return err
-	}
+	defer closeRuntime()
 	profile := request.Config.AgentConfig["deck"]
 	profile.Model = request.Model
 	ag, err := agent.NewWithOptions(types.AgentDeck, "/nm/deck", []string{"--base-url", testisolation.ModelURL, "--api-key-file", "/tmp/model-client-key"}, agent.Options{
@@ -304,7 +289,8 @@ func (request isolatedRunInput) stepContext(database *db.DB, workerAgent agent.A
 	sctx := &pipeline.StepContext{Ctx: context.Background(), Run: request.Run, Repo: request.Repo, Config: &request.Config, WorkDir: request.WorkDir, GateDir: request.GateDir,
 		EvidenceDir: request.EvidenceDir, StepResultID: request.StepResultID, Fixing: request.Fixing, PreviousFindings: request.PreviousFindings,
 		DeferredFindings: request.DeferredFindings, UserIntent: request.UserIntent, IntentSource: request.IntentSource, DB: database, Agent: workerAgent,
-		FixWithoutRereview: request.FixWithoutRereview, ReviewStartingHeadSHA: request.ReviewStartingHeadSHA,
+		RestoredSurvivedWork: request.RestoredSurvivedWork,
+		FixWithoutRereview:   request.FixWithoutRereview, ReviewStartingHeadSHA: request.ReviewStartingHeadSHA,
 		UncertifiedFromSHA: request.UncertifiedFromSHA, UncertifiedToSHA: request.UncertifiedToSHA, UncertifiedSourceRunID: request.UncertifiedSourceRunID, UncertifiedPriorRounds: request.UncertifiedPriorRounds,
 		Shared: &pipeline.RunShared{}, IsolatedTestWorker: true, PriorBranchDecisions: request.PriorBranchDecisions, PriorBranchDecisionsTruncated: request.PriorBranchDecisionsTruncated,
 	}

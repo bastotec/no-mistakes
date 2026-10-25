@@ -3,19 +3,30 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/runconfine"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
 // Start a later real review repair with both index and working-tree progress.
 // It must hand that progress to the fixer, not reset to the recorded head.
 func TestReviewFixContinuesExistingUncommittedWork(t *testing.T) {
+	for _, confined := range []bool{false, true} {
+		t.Run(fmt.Sprintf("confined=%v", confined), func(t *testing.T) {
+			testReviewFixContinuesExistingUncommittedWork(t, confined)
+		})
+	}
+}
+
+func testReviewFixContinuesExistingUncommittedWork(t *testing.T, confined bool) {
 	t.Parallel()
 	dir, base, head := setupGitRepo(t)
 	staged := filepath.Join(dir, "staged-repair.txt")
@@ -47,6 +58,27 @@ func TestReviewFixContinuesExistingUncommittedWork(t *testing.T) {
 	// The executor restores captured work before a fix round and names it.
 	sctx.RestoredSurvivedWork = &types.SurvivedWork{Files: []string{"A  staged-repair.txt", "?? unstaged-repair.txt"}}
 	sctx.PreviousFindings = `{"findings":[{"id":"review-1","description":"finish repair","severity":"error","action":"auto-fix"}]}`
+	if confined {
+		// Exercise the actual host request, JSON boundary and worker rebuild,
+		// without namespaces, services or a live provider.
+		input := newIsolatedRunInput(sctx, &ReviewStep{}, "synthetic", runconfine.DefaultPolicy(), "synthetic")
+		data, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request isolatedRunInput
+		if err := json.Unmarshal(data, &request); err != nil {
+			t.Fatal(err)
+		}
+		worker := request.stepContext(sctx.DB, ag, json.NewDecoder(strings.NewReader(`""`)), func(isolatedStepEvent) error { return nil })
+		if !reflect.DeepEqual(worker.RestoredSurvivedWork, sctx.RestoredSurvivedWork) {
+			t.Fatalf("restored repair metadata lost: got %+v, want %+v", worker.RestoredSurvivedWork, sctx.RestoredSurvivedWork)
+		}
+		// Head/index transport has independent protocol coverage. This test
+		// observes the real repair prompt and commit in the synthetic worktree.
+		worker.RecordIsolatedHead = nil
+		sctx = worker
+	}
 	if _, _, err := resolveCIRepairBases(context.Background(), sctx, "main"); err != nil {
 		t.Fatal(err)
 	}
