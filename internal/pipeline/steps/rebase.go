@@ -43,6 +43,9 @@ func runIntegrationRef(sctx *pipeline.StepContext, branch string) string {
 	if repo := explicitTargetRepo(sctx); repo != "" {
 		return explicitIntegrationRefPrefix + repo + "/" + branch
 	}
+	if prefix := sctx.IntegrationRefPrefixNS(); prefix != "" {
+		return prefix + branch
+	}
 	return "origin/" + branch
 }
 

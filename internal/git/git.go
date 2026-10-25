@@ -554,6 +554,20 @@ func FetchRemoteBranchToPrivateRef(ctx context.Context, dir, remote, branch, loc
 	return err
 }
 
+// FetchURLBranchToPrivateRef is FetchRemoteBranchToPrivateRef with the source
+// spelled as a URL. The difference matters for shared-ref repositories (the
+// gate): `git fetch <remote-name> <refspec>` opportunistically creates or
+// updates the named remote's tracking ref for the source branch (observed
+// with git 2.53 even with --no-write-fetch-head and a private destination),
+// while `git fetch <url> <refspec>` touches only the destination. Callers
+// that must leave refs/remotes/*/ untouched - the terminal-publication
+// continuation - resolve the URL first and use this form.
+func FetchURLBranchToPrivateRef(ctx context.Context, dir, remoteURL, branch, localRef string) error {
+	refspec := fmt.Sprintf("+refs/heads/%s:%s", branch, localRef)
+	_, err := Run(ctx, dir, "fetch", "--no-tags", "--no-write-fetch-head", remoteURL, refspec)
+	return err
+}
+
 // FetchRemoteRef imports the object named by one exact remote ref without
 // touching FETCH_HEAD or any caller-owned ref. The temporary ref is private to
 // this operation, allowing the caller to publish the verified object with its

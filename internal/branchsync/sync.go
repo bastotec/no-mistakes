@@ -1745,22 +1745,34 @@ func (s *Service) inspect(ctx context.Context) (State, *db.Run, bool) {
 	}
 	var run *db.Run
 	var newerPushed *db.Run
+	var newerPushBindings []*db.Run
 	for _, candidate := range runs {
 		if candidate.Branch != branch {
 			continue
 		}
 		if candidate.Status == types.RunPending || candidate.Status == types.RunRunning || unpublishedPipelineHead(candidate) {
-			// A terminal unpublished run can be superseded only by a newer
-			// exact binding whose pushed head is proven, in the local gate, to
-			// contain the preserved head. Active ownership remains absolute.
+			// The retained-work path supersedes a terminal unpublished run only
+			// with a newer exact binding proven, in the local gate, to retain
+			// its preserved work. Active ownership remains absolute.
 			if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, branch) {
+				continue
+			}
+			// A newer binding already seen in this newest-first walk can make
+			// a proven never-started preflight attempt obsolete: that attempt
+			// never executed anything, and the newer run published its result
+			// from the same submitted head. Selection skips only the
+			// obstruction; its history stays untouched.
+			if unpublishedPipelineHead(candidate) && s.supersededPreflightRunByBindings(ctx, candidate, newerPushBindings, branch) {
 				continue
 			}
 			run = candidate
 			break
 		}
-		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, branch) {
-			newerPushed = candidate
+		if exactPushedBinding(s.Repo, candidate, branch) {
+			newerPushBindings = append(newerPushBindings, candidate)
+			if newerPushed == nil {
+				newerPushed = candidate
+			}
 		}
 		// Custody-returned runs stay selectable so a recovered branch reports
 		// custody_returned (or its ordinary post-push classification) instead
@@ -2159,6 +2171,160 @@ func (s *Service) supersededUnpublishedRun(ctx context.Context, older, newer *db
 	return retentionErr == nil && retention.RetainsAll()
 }
 
+// preflightValidationErrors are the exact producer substrings of the
+// launch-time explicit-PR validation route (startRunWithIntentSourceLocked's
+// validate_existing_pr stage): the ValidateExistingPR /
+// ValidateExistingPRIdentity family in internal/pipeline/steps/existing_pr.go
+// and internal/scm/github/existing_pr.go. The daemon persists the error as a
+// plain string, so the route is recognized by quoting its producers verbatim.
+// The same functions are reused at pre-push and publication, but those calls
+// happen inside a running step, so a run with zero execution rows that carries
+// one of these texts can only have failed at launch preflight - before any
+// step was inserted, any gates were pinned, or any managed mutation beyond
+// worktree setup (rolled back on that path) happened.
+var preflightValidationErrors = []string{
+	"explicit PR source repository/ref does not match the configured push target and run branch",
+	"explicit PR head mismatch",
+	"explicit PR differs from persisted publication identity",
+	"the push remote has no head for the source branch",
+	"explicit PR is supported only for GitHub",
+	"explicit PR source must be a github.com push repository",
+	"validate explicit PR:",
+	"explicit PR repository does not match selected host",
+	"explicit PR response repository/identity mismatch",
+	"explicit PR answers to ",
+	"explicit PR is not an open, readable review object",
+	"explicit PR reports no source head",
+}
+
+// preflightValidationFailure reports whether the terminal run's recorded
+// error is the launch explicit-PR validation route above.
+func preflightValidationFailure(errText string) bool {
+	for _, marker := range preflightValidationErrors {
+		if strings.Contains(errText, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// provenNeverStartedPreflightAttempt is the positive evidence half of
+// preflight supersession: every durable trace of execution is absent, and the
+// recorded failure route is one that runs before the executor starts. Absence
+// of rows alone would not be proof - a legacy run that predates a row family
+// has absent rows and real side effects - so the recorded route must
+// positively place the failure before any step could run, and any surviving
+// execution row (a step, an agent invocation, or a pinned gate list) refutes
+// it. The launch path records its worktree placement before validation and
+// never clears the column when that setup fails (the defer removes the
+// directory instead), so a still-existing recorded worktree refutes
+// never-started just like an execution row: its presence means either the
+// worktree-creation stage never reached its failure cleanup or a later owner
+// re-created it. A read failure is uncertainty, not proof, and refuses.
+func (s *Service) provenNeverStartedPreflightAttempt(ctx context.Context, older *db.Run) bool {
+	if older == nil || !terminalRunStatus(older.Status) {
+		return false
+	}
+	errText := strings.TrimSpace(ptr(older.Error))
+	if !preflightValidationFailure(errText) {
+		return false
+	}
+	if older.WorktreeDir != nil && strings.TrimSpace(*older.WorktreeDir) != "" {
+		if _, err := os.Stat(*older.WorktreeDir); !os.IsNotExist(err) {
+			return false
+		}
+	}
+	if steps, err := s.DB.GetStepsByRun(older.ID); err != nil || len(steps) != 0 {
+		return false
+	}
+	if invocations, err := s.DB.GetAgentInvocationsByRun(older.ID); err != nil || len(invocations) != 0 {
+		return false
+	}
+	if gates, err := s.DB.GetRunGates(older.ID); err != nil || gates != "" {
+		return false
+	}
+	return true
+}
+
+// supersededNeverStartedPreflightRun proves the second narrow relationship
+// that can make an older terminal run non-authoritative: the older attempt is
+// a proven never-started preflight failure (it died inside launch preflight,
+// with its submitted head unchanged and no execution or publication binding of
+// its own), and a newer run published its result from that same submitted
+// head. The newer run must carry its own authority: terminal, verified head,
+// exact current repository/branch push binding, no live push, and the bare
+// gate's exact non-symbolic branch head equal to that binding. Unlike
+// retained-work supersession there is no content proof between the two final
+// heads: the older attempt executed no work, so matching submitted heads
+// makes it obsolete without certifying retention by the newer final head.
+// Ordinary synchronization still checks the caller's relation to that head.
+// A newer ACTIVE run is never supersession evidence at all - it owns the
+// branch while it runs - so this only ever runs for a newer terminal binding,
+// and only from selection paths that have already established the strict
+// older/newer ordering. Unreadable, symbolic, stale, or missing required proof
+// leaves the older run authoritative. Read-only: nothing here stamps,
+// rewrites, or erases.
+func (s *Service) supersededNeverStartedPreflightRun(ctx context.Context, older, newer *db.Run, branch string) bool {
+	if s == nil || s.Repo == nil || s.DB == nil || older == nil || newer == nil || branch == "" {
+		return false
+	}
+	// 1. Same repository and exact branch with strict ordering are the
+	// caller's invariant (runs arrive newest-first); the repo must agree.
+	if older.RepoID != s.Repo.ID || older.RepoID != newer.RepoID || older.Branch != branch || newer.Branch != branch {
+		return false
+	}
+	// The older attempt must be terminal, never started, and unchanged: head
+	// equals a non-empty submitted head, with no publication binding, no live
+	// push, and no custody mutation. unverified terminal state is expected
+	// here - launch preflight fails before terminalization could verify - but
+	// no push binding may exist at all (a partial one is execution evidence).
+	if !terminalRunStatus(older.Status) || !s.provenNeverStartedPreflightAttempt(ctx, older) {
+		return false
+	}
+	if older.SubmittedHeadSHA == nil || strings.TrimSpace(*older.SubmittedHeadSHA) == "" || older.HeadSHA != *older.SubmittedHeadSHA {
+		return false
+	}
+	if older.PushActive || older.LastPushedSHA != nil || older.PushTargetKind != nil || older.PushTargetFingerprint != nil || older.PushRef != nil || older.PushGeneration != nil || older.CustodyReturnedAt != nil {
+		return false
+	}
+	// 2. The newer run must carry the branch's real authority: terminal, exact
+	// current repository/branch push binding, no live push. The strict
+	// older/newer ordering (newer.CreatedAt > older.CreatedAt, or equal
+	// timestamps with a greater ULID) is the caller's invariant, not re-derived
+	// from wall clocks here.
+	if !terminalRunStatus(newer.Status) || newer.TerminalHeadVerifiedAt == nil || !exactPushedBinding(s.Repo, newer, branch) {
+		return false
+	}
+	// 3. The newer run submitted exactly the older attempt's unchanged head,
+	// and the bare gate's exact non-symbolic branch head equals the newer
+	// binding. The normal live-remote equality and clean caller checks are not
+	// this predicate's to relax or perform: they stay in the ordinary
+	// classification the selection falls through to.
+	if newer.SubmittedHeadSHA == nil || *newer.SubmittedHeadSHA != *older.SubmittedHeadSHA {
+		return false
+	}
+	if strings.TrimSpace(s.GateDir) == "" {
+		return false
+	}
+	if _, statErr := os.Stat(s.GateDir); statErr != nil {
+		return false
+	}
+	gateHead, gateHeadExists, err := git.DirectRefTarget(ctx, s.GateDir, "refs/heads/"+branch)
+	if err != nil || !gateHeadExists || gateHead != ptr(newer.LastPushedSHA) {
+		return false
+	}
+	return true
+}
+
+func (s *Service) supersededPreflightRunByBindings(ctx context.Context, older *db.Run, bindings []*db.Run, branch string) bool {
+	for _, newer := range bindings {
+		if s.supersededNeverStartedPreflightRun(ctx, older, newer, branch) {
+			return true
+		}
+	}
+	return false
+}
+
 func samePushTargetBinding(older, newer *db.Run) bool {
 	return older != nil && newer != nil &&
 		older.PushTargetKind != nil && newer.PushTargetKind != nil && ptr(older.PushTargetKind) == ptr(newer.PushTargetKind) &&
@@ -2338,6 +2504,7 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 	anyMissing := false
 	allEligible := true
 	var newerPushed *db.Run
+	var newerPushBindings []*db.Run
 	for _, candidate := range runs {
 		if candidate.Branch != state.Local.Branch {
 			continue
@@ -2345,8 +2512,18 @@ func (s *Service) missingHeadKeepLocalRuns(ctx context.Context, state *State, ru
 		if unpublishedPipelineHead(candidate) && s.supersededUnpublishedRun(ctx, candidate, newerPushed, state.Local.Branch) {
 			continue
 		}
-		if newerPushed == nil && exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
-			newerPushed = candidate
+		if exactPushedBinding(s.Repo, candidate, state.Local.Branch) {
+			newerPushBindings = append(newerPushBindings, candidate)
+			if newerPushed == nil {
+				newerPushed = candidate
+			}
+		}
+		// A proven never-started preflight attempt superseded by the newer
+		// binding is not a stranded stack member: it has no executed work to
+		// anchor, so it must not poison the stack's missing/eligibility
+		// verdict. Its history is skipped, never rewritten.
+		if unpublishedPipelineHead(candidate) && s.supersededPreflightRunByBindings(ctx, candidate, newerPushBindings, state.Local.Branch) {
+			continue
 		}
 		if !terminalRunStatus(candidate.Status) || !unpublishedPipelineHead(candidate) {
 			continue

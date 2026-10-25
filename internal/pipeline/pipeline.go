@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"strings"
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
@@ -111,6 +112,30 @@ type StepContext struct {
 	// OnPRMerged is a best-effort hook after a merged PR state is persisted.
 	// Eval uses it to relabel auto-fix/shipped-unfixed gold; nil is a no-op.
 	OnPRMerged func(ctx context.Context, runID string)
+	// IntegrationRefPrefix, when non-empty, reroutes where this context's
+	// default-branch integration fetches land and are read from. Ordinary runs
+	// leave it empty and share refs/remotes/origin/ in the gate repository;
+	// a terminal-publication continuation (daemon.HandleRepublishPublication)
+	// sets it to an operation-private namespace so its config/policy reads
+	// cannot move the gate's ordinary tracking refs while no executor owns
+	// them. The ref is fetched and read through runIntegrationRef, so both
+	// sides of that pair move together.
+	IntegrationRefPrefix string
+}
+
+// IntegrationRefPrefixNS normalizes the private integration-ref namespace:
+// consumers spell the full ref (refs/...), so a configured prefix must end in
+// a slash and never leak the ordinary origin/ shorthand. Empty means the
+// ordinary shared refs/remotes/origin/ namespace.
+func (sctx *StepContext) IntegrationRefPrefixNS() string {
+	if sctx == nil {
+		return ""
+	}
+	prefix := strings.TrimRight(strings.TrimSpace(sctx.IntegrationRefPrefix), "/")
+	if !strings.HasPrefix(prefix, "refs/") || prefix == "refs" {
+		return ""
+	}
+	return prefix + "/"
 }
 
 // RunAgentSession executes one turn of a durable review-loop role session,
