@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -52,6 +53,7 @@ func executorMonitorFixture(t *testing.T, state string) (*Executor, db.MonitorDi
 	if state == "parked-review" {
 		e.waiting = true
 		e.waitingStep = types.StepReview
+		e.waitingContext = &StepContext{Ctx: context.Background()}
 	}
 	return e, db.MonitorDisposition{RunID: run.ID, RepoID: repo.ID, PRURL: "https://github.com/example/repo/pull/1", PublishedHead: head, ObservedHead: head, State: state}
 }
@@ -165,6 +167,40 @@ func TestMonitorStopCancelledRequestCannotFreezeLater(t *testing.T) {
 	frozen, _ := e.db.MonitorFrozen(p.RunID)
 	if frozen {
 		t.Fatal("late freeze")
+	}
+}
+
+func TestMonitorStopParkedCancelledOwnerCannotFreeze(t *testing.T) {
+	e, p := executorMonitorFixture(t, "parked-review")
+	events := monitorStopEvents(t, e)
+	before, err := e.db.GetRun(p.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepsBefore, err := e.db.GetStepsByRun(p.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, cancel := context.WithCancel(context.Background())
+	e.waitingContext.Ctx = owner
+	cancel()
+	if err := e.StopMonitor(context.Background(), p); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancelled owner stop = %v, want context cancellation", err)
+	}
+	frozen, err := e.db.MonitorFrozen(p.RunID)
+	if err != nil || frozen || e.monitorFrozen || len(events) != 0 {
+		t.Fatalf("cancelled owner froze: durable=%v executor=%v events=%d err=%v", frozen, e.monitorFrozen, len(events), err)
+	}
+	after, err := e.db.GetRun(p.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stepsAfter, err := e.db.GetStepsByRun(p.RunID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(stepsBefore, stepsAfter) {
+		t.Fatal("refusal changed validation or custody evidence")
 	}
 }
 

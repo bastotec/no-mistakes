@@ -74,7 +74,12 @@ func (d *DB) monitorDisposition(p MonitorDisposition, persist bool) error {
 		return err
 	}
 	var dispatch int
-	if err := tx.QueryRow(`SELECT count(*) FROM repair_budget_decisions b JOIN step_results s ON s.id=b.step_result_id WHERE s.run_id=? AND b.dispatch_state IN ('claimed','started','repair_started_unresolved')`, p.RunID).Scan(&dispatch); err != nil {
+	if err := tx.QueryRow(`SELECT count(*) FROM repair_budget_decisions b JOIN step_results s ON s.id=b.step_result_id
+		WHERE s.run_id=? AND b.dispatch_state IN ('claimed','started','repair_started_unresolved')
+		AND NOT (b.dispatch_state IN ('claimed','started') AND s.step_name='ci' AND s.status='running'
+			AND EXISTS (SELECT 1 FROM repair_invocations ri WHERE ri.step_result_id=b.step_result_id AND ri.round_id=b.round_id
+				AND ri.state='terminal' AND ri.lifecycle_phase='post_repair_monitor'
+				AND ri.ordinal=(SELECT MAX(latest.ordinal) FROM repair_invocations latest WHERE latest.step_result_id=b.step_result_id AND latest.round_id=b.round_id)))`, p.RunID).Scan(&dispatch); err != nil {
 		return err
 	}
 	if active != 0 || dispatch != 0 {

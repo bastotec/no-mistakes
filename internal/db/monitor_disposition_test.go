@@ -109,6 +109,95 @@ func TestMonitorDispositionPreservesEvidenceAndRecovery(t *testing.T) {
 	}
 }
 
+func TestMonitorDispositionPostRepairPolling(t *testing.T) {
+	for _, stage := range []string{"prepared", "registered", "started", "terminal", "post-monitor", "unresolved", "newer-terminal"} {
+		t.Run(stage, func(t *testing.T) {
+			d, p := monitorFixture(t, "polling")
+			must := func(err error) {
+				t.Helper()
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			steps, err := d.GetStepsByRun(p.RunID)
+			must(err)
+			var stepID string
+			for _, step := range steps {
+				if step.StepName == types.StepCI {
+					stepID = step.ID
+				}
+			}
+			must(d.UpdateStepStatus(stepID, types.StepStatusPending))
+			must(d.StartStepWithAutoFixLimit(stepID, 1))
+			round, err := d.InsertStepRound(stepID, 1, "initial", nil, nil, 1)
+			must(err)
+			decision, err := d.ReserveStepRepairWithSelection(stepID, round.ID, 1, nil)
+			must(err)
+			if !decision.Granted {
+				t.Fatal("repair reservation refused")
+			}
+			must(d.ClaimStepRepair(stepID, round.ID))
+			if stage != "prepared" {
+				inv, err := d.RegisterRepairInvocation(stepID, round.ID, 0, t.TempDir(), "agent", "ci-fix", 0)
+				must(err)
+				if stage != "registered" {
+					must(d.BindRepairInvocationProcess(inv.ID, "repair active", 4242))
+					if stage != "started" {
+						must(d.FinishRepairInvocation(inv.ID, []byte(`{"text":"published repair"}`), true, nil, nil))
+						if stage != "terminal" {
+							must(d.MarkRepairPostMonitor(stepID, round.ID))
+							if stage == "unresolved" {
+								_, err := d.MarkRepairInvocationUnresolved(stepID, round.ID)
+								must(err)
+							}
+							if stage == "newer-terminal" {
+								next, err := d.RegisterRepairInvocation(stepID, round.ID, 1, t.TempDir(), "agent", "ci-fix", 0)
+								must(err)
+								must(d.FinishRepairInvocation(next.ID, nil, false, nil, nil))
+							}
+						}
+					}
+				}
+			}
+			must(d.UpdateStepStatus(stepID, types.StepStatusRunning))
+			before, err := d.GetRun(p.RunID)
+			must(err)
+			stepsBefore, err := d.GetStepsByRun(p.RunID)
+			must(err)
+			var dispatchBefore string
+			must(d.sql.QueryRow(`SELECT dispatch_state FROM repair_budget_decisions WHERE round_id=?`, round.ID).Scan(&dispatchBefore))
+			invBefore, err := d.RepairInvocationForRound(stepID, round.ID)
+			must(err)
+			repairBefore, err := d.GetRepairInvocation(invBefore)
+			must(err)
+			for _, apply := range []func(MonitorDisposition) error{d.ValidateMonitorDisposition, d.FreezeMonitor} {
+				err := apply(p)
+				if stage == "post-monitor" {
+					must(err)
+				} else if err == nil || !strings.Contains(err.Error(), "active or uncertain repair") {
+					t.Fatalf("%s freeze = %v, want repair refusal", stage, err)
+				}
+			}
+			frozen, err := d.MonitorFrozen(p.RunID)
+			must(err)
+			if frozen != (stage == "post-monitor") {
+				t.Fatalf("frozen=%v for %s", frozen, stage)
+			}
+			after, err := d.GetRun(p.RunID)
+			must(err)
+			stepsAfter, err := d.GetStepsByRun(p.RunID)
+			must(err)
+			repairAfter, err := d.GetRepairInvocation(invBefore)
+			must(err)
+			var dispatchAfter string
+			must(d.sql.QueryRow(`SELECT dispatch_state FROM repair_budget_decisions WHERE round_id=?`, round.ID).Scan(&dispatchAfter))
+			if !reflect.DeepEqual(before, after) || !reflect.DeepEqual(stepsBefore, stepsAfter) || !reflect.DeepEqual(repairBefore, repairAfter) || dispatchBefore != dispatchAfter {
+				t.Fatal("monitor disposition changed validation, custody, or repair evidence")
+			}
+		})
+	}
+}
+
 func TestMonitorDispositionRefusesChangedOrUncertainEvidence(t *testing.T) {
 	for _, change := range []string{"repo", "run", "url", "published", "observed", "state", "repair", "push", "step", "unknown-repair"} {
 		t.Run(change, func(t *testing.T) {

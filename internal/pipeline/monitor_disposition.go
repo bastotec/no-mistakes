@@ -33,11 +33,15 @@ func (e *Executor) StopMonitor(ctx context.Context, p db.MonitorDisposition) err
 		return err
 	}
 	if p.State == "parked-review" {
-		if !e.waiting || e.waitingStep != types.StepReview || e.waitingRepairReconciliation || e.waitingShutdownInterruption {
+		if !e.waiting || e.waitingStep != types.StepReview || e.waitingContext == nil || e.waitingRepairReconciliation || e.waitingShutdownInterruption {
 			e.mu.Unlock()
 			return fmt.Errorf("executor is not parked at Review")
 		}
 		if err := ctx.Err(); err != nil {
+			e.mu.Unlock()
+			return err
+		}
+		if err := e.waitingContext.Ctx.Err(); err != nil {
 			e.mu.Unlock()
 			return err
 		}
