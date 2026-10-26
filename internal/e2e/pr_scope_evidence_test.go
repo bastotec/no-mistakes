@@ -43,6 +43,9 @@ func writeFinalPRScopeScenario(t *testing.T) string {
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
+      risk_level: medium
+      risk_rationale: "medium risk because only two source files changed"
+      risk_scope: source-or-external
       artifacts: []
   - match: "Perform the combined documentation and lint housekeeping pass for this change."
     text: "documentation updated"
