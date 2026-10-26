@@ -346,7 +346,7 @@ func validateFindingSelection(raw string, ids []string, added []types.Finding) e
 		return fmt.Errorf("parse parked findings: %w", err)
 	}
 	available := make(map[string]int, len(findings.Items))
-	for _, item := range findings.Items {
+	for _, item := range findingSelectionCandidates(findings).Items {
 		available[item.ID]++
 	}
 	selected := make(map[string]bool, len(ids))
@@ -380,6 +380,27 @@ func validateRepairPayload(raw string) error {
 	return nil
 }
 
+// findingSelectionCandidates resolves only legacy no-op/actionable ID collisions.
+// An explicit ID names the actionable row, never its informational namesake.
+// Keep no-op-only IDs unchanged, and keep every actionable row so validation
+// still refuses genuinely ambiguous selections. Do not rewrite persisted evidence.
+func findingSelectionCandidates(findings types.Findings) types.Findings {
+	actionable := make(map[string]bool, len(findings.Items))
+	for _, item := range findings.Items {
+		if item.ActionOrDefault() != types.ActionNoOp {
+			actionable[item.ID] = true
+		}
+	}
+	result := types.FindingsMetadata(findings)
+	for _, item := range findings.Items {
+		if item.ActionOrDefault() == types.ActionNoOp && actionable[item.ID] {
+			continue
+		}
+		result.Items = append(result.Items, item)
+	}
+	return result
+}
+
 func filterFindingsJSON(raw string, ids []string) string {
 	if raw == "" {
 		return raw
@@ -388,7 +409,7 @@ func filterFindingsJSON(raw string, ids []string) string {
 	if err != nil {
 		return raw
 	}
-	filtered := types.FilterFindings(findings, ids)
+	filtered := types.FilterFindings(findingSelectionCandidates(findings), ids)
 	if len(ids) == 0 {
 		filtered = types.FindingsMetadata(findings)
 		filtered.Summary = "0 selected findings"
