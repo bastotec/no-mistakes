@@ -153,7 +153,10 @@ func PublishTestPreview(sctx *pipeline.StepContext) (*ipc.PublishTestPreviewResu
 	if err := publishRunHead(sctx, head, "", rows); err != nil {
 		return nil, err
 	}
-	summary, _, _ := (&PRStep{}).buildPipelineSections(sctx, scm.ProviderGitHub, false, false)
+	summary, _, _, err := (&PRStep{}).buildPipelineSections(sctx, scm.ProviderGitHub, false, false, false)
+	if err != nil {
+		return nil, err
+	}
 	if summary == "" {
 		return nil, fmt.Errorf("cannot render pending pipeline evidence")
 	}

@@ -305,7 +305,10 @@ func TestReviewBoundedApprovalLifecycleReachesPublicationGuard(t *testing.T) {
 				pipeline.BindBranchDecisions(sctx)
 				for _, provider := range []scm.Provider{scm.ProviderGitHub, scm.ProviderBitbucket} {
 					for _, owned := range []bool{false, true} {
-						pipelineMD, riskLine, _ := (&PRStep{}).buildPipelineSections(sctx, provider, owned, false)
+						pipelineMD, riskLine, _, err := (&PRStep{}).buildPipelineSections(sctx, provider, owned, false, true)
+						if err != nil {
+							t.Fatal(err)
+						}
 						if !strings.Contains(pipelineMD, "original concern is not certified as repaired") || !strings.Contains(riskLine, "original concern is not certified as repaired") || strings.Contains(pipelineMD+riskLine, privateSentinel) || strings.Contains(pipelineMD+riskLine, "Accept diagnostic intermediate only") {
 							t.Fatalf("later=%v provider=%s owned=%v: inaccurate public scope:\n%s\nRisk: %s", laterRun, provider, owned, pipelineMD, riskLine)
 						}

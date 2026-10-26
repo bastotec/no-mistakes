@@ -808,7 +808,7 @@ func TestPRTemplateUpdateAppliesConfiguredTitleFormat(t *testing.T) {
 				t.Errorf("title-only drafting prompt still carries the body-format clause %q", clause)
 			}
 		}
-		if !strings.Contains(opts.Prompt, "Write all natural-language title and body text in English") {
+		if !strings.Contains(opts.Prompt, "Write all authored natural-language title and body text in English") {
 			t.Error("title drafting prompt lost the English requirement")
 		}
 		data, _ := json.Marshal(map[string]string{"title": "add widget"})
@@ -910,7 +910,7 @@ func TestPRStep_NarrativeFreeAppendixPublicationSkipsFormatVerdict(t *testing.T)
 				t.Errorf("narrative-free verdict prompt still carries the policy clause %q", policyClause)
 			}
 		}
-		if !strings.Contains(opts.Prompt, "Write all natural-language title and body text in English") {
+		if !strings.Contains(opts.Prompt, "Write all authored natural-language title and body text in English") {
 			t.Error("narrative-free verdict prompt lost the English requirement")
 		}
 		digest, err := validationDigestFromPrompt(opts.Prompt)

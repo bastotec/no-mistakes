@@ -1253,7 +1253,7 @@ func TestValidateFinalPRContentIntentProseHeadingsDoNotBreakDefaultOrder(t *test
 	sctx := newTestContext(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
 	sctx.UserIntent = "## Testing\n\nManual verification.\n\n## What Changed\n\nNested intent heading."
 	body := prependIntentSection("## What Changed\n\n- add helper\n\n## Testing\n\nunit passed\n\n## Pipeline\n\ncomplete", sctx)
-	content := prContent{Title: "feat: helper", Body: body}
+	content := prContent{Title: "feat: helper", Body: body, PublicIntent: sctx.UserIntent}
 	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, "", strings.Repeat("a", 40), true); err != nil {
 		t.Fatalf("intent prose headings broke default heading order validation: %v", err)
 	}
@@ -1268,7 +1268,7 @@ func TestValidateFinalPRContentRedactedIntentStillStripsIntentSection(t *testing
 	if got := redactPRContent(prContent{Body: body}).Body; got == body {
 		t.Fatalf("test intent path was not redacted; regression cannot exercise the published bytes:\n%s", got)
 	}
-	content := redactPRContent(prContent{Title: "feat: helper", Body: body})
+	content := redactPRContent(prContent{Title: "feat: helper", Body: body, PublicIntent: sctx.UserIntent})
 	if err := (&PRStep{}).validateFinalPRContent(sctx, content, content, "", strings.Repeat("a", 40), true); err != nil {
 		t.Fatalf("redacted intent broke default heading order validation: %v", err)
 	}

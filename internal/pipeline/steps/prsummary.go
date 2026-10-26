@@ -116,6 +116,19 @@ type testingSummaryOptions struct {
 	// uploaded at PR render time. Nil means nothing was uploaded; the renderer
 	// then keeps today's local-path or commit-pinned link.
 	attachments map[string]string
+	// literalEvidence is render-only provenance for the final language judge.
+	// It never comes from agent-authored draft metadata or durable records.
+	literalEvidence *[]prLiteralEvidence
+	artifacts       []types.TestArtifact
+}
+
+func artifactInlineContentIsLiteral(artifact types.TestArtifact) bool {
+	target := artifact.URL
+	if target == "" {
+		target = artifact.Path
+	}
+	return artifact.Kind == "log" || artifact.Kind == "command-output" ||
+		(artifact.Kind == "" && !isImageArtifact(artifact.Kind, target) && !isVideoArtifact(artifact.Kind, target))
 }
 
 // BuildPipelineSummary produces a deterministic markdown section from step results and rounds.
@@ -385,10 +398,10 @@ func BuildTestingSummaryForPR(steps []*db.StepResult, rounds map[string][]*db.St
 }
 
 func BuildTestingSummaryForPRWithProvider(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider) string {
-	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil)
+	return buildPRTestingSummary(steps, rounds, upstreamURL, ref, repoRoot, evidenceRoot, links, provider, nil, nil)
 }
 
-func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string) string {
+func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRound, upstreamURL, ref, repoRoot, evidenceRoot string, links *evidenceLinks, provider scm.Provider, attachments map[string]string, artifacts []types.TestArtifact, literalEvidence ...*[]prLiteralEvidence) string {
 	opts := testingSummaryOptionsForGitHub(upstreamURL, ref)
 	opts.flavor = prBodyFlavorFor(provider)
 	opts.compactArtifacts = true
@@ -398,6 +411,10 @@ func buildPRTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepR
 	opts.evidenceRoot = evidenceRoot
 	opts.evidence = links
 	opts.attachments = attachments
+	opts.artifacts = artifacts
+	if len(literalEvidence) > 0 {
+		opts.literalEvidence = literalEvidence[0]
+	}
 	return buildTestingSummary(steps, rounds, opts)
 }
 
@@ -415,7 +432,10 @@ func buildTestingSummary(steps []*db.StepResult, rounds map[string][]*db.StepRou
 
 		testingSummary := collectTestingSummary(sr, stepRounds)
 		tested := collectTestingDetails(sr, stepRounds)
-		artifacts := collectTestingArtifacts(sr, stepRounds, opts)
+		artifacts := opts.artifacts
+		if artifacts == nil {
+			artifacts = collectTestingArtifacts(sr, stepRounds, opts)
+		}
 		scenarios := collectTestingScenarios(sr, stepRounds)
 		liveValidation := renderLiveValidationLine(scenarios, collectTestingVerdict(sr, stepRounds))
 		if testingSummary == "" && len(tested) == 0 && len(artifacts) == 0 && liveValidation == "" {
@@ -810,8 +830,12 @@ func renderCompactTestingArtifact(artifact types.TestArtifact, opts testingSumma
 		inner.WriteString(renderTestedDetailFor(descriptionLine, opts.flavor))
 		inner.WriteString("\n\n")
 	}
-	inner.WriteString(fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody))))
+	fence := fmt.Sprintf("```text\n%s\n```\n", escapeMarkdownFence(escapePipelineFoldMarkers(fenceBody)))
+	inner.WriteString(fence)
 	folded := foldPRBlock("Evidence: "+html.EscapeString(label), inner.String(), opts.flavor)
+	if opts.literalEvidence != nil && (hasFile || artifactInlineContentIsLiteral(artifact)) {
+		*opts.literalEvidence = append(*opts.literalEvidence, prLiteralEvidence{Block: folded, Fence: fence})
+	}
 	if attachment == "" {
 		return folded
 	}

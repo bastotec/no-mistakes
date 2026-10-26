@@ -46,11 +46,17 @@ func writeJevSecrets(t *testing.T, h *Harness, content string) {
 
 // assertJevNeverLeaks scans every durable byte the product wrote for this
 // run (logs, database, state) for the key value: the key is read by
-// reference and must never be logged, stored, or rendered.
+// reference and must never be logged, stored, or rendered. Call this after
+// all daemon-backed assertions: it stops the isolated test daemon so run
+// cleanup cannot remove directories while WalkDir is traversing them.
 func assertJevNeverLeaks(t *testing.T, h *Harness, key string) {
 	t.Helper()
 	if key == "" {
 		return
+	}
+	// A terminal run record can be visible before worktree cleanup finishes.
+	if out, err := h.Run("daemon", "stop"); err != nil {
+		t.Fatalf("stop isolated daemon before key-leak scan: %v\n%s", err, out)
 	}
 	err := filepath.WalkDir(h.NMHome, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() || !d.Type().IsRegular() {
@@ -272,10 +278,10 @@ func TestJevAdvisoryRealGatewayJourney(t *testing.T) {
 	if !strings.Contains(logsOut, "Jev advisory verdict:") {
 		t.Fatalf("axi logs should render the advisory verdict:\n%s", logsOut)
 	}
-	assertJevNeverLeaks(t, h, key)
 	t.Logf("jev findings summary: %s", findings.Summary)
 	t.Logf("axi logs --step jev:\n%s", logsOut)
 	t.Logf("axi status:\n%s", mustAxiStatus(t, h, run))
+	assertJevNeverLeaks(t, h, key)
 }
 
 func mustAxiStatus(t *testing.T, h *Harness, run *ipc.RunInfo) string {
