@@ -66,7 +66,7 @@ func TestCIStep_ProtectedPathRetryUsesPersistedRepair(t *testing.T) {
 						t.Fatal(err)
 					}
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"repair CI","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair CI","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`)}, nil
 			}}
 			f.sctx.Config.ProtectedPaths = []string{"*.lock"}
 			outcome, err := f.run(t)
@@ -390,7 +390,7 @@ func TestCIStep_ProtectedPathRefusalStopsAutomaticAndManualRepair(t *testing.T) 
 						t.Fatal(err)
 					}
 				}
-				return &agent.Result{Output: json.RawMessage(`{"summary":"repair checks","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+				return &agent.Result{Output: json.RawMessage(`{"summary":"repair checks","code_change_needed":true,"findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`)}, nil
 			}}
 			sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 			sctx.Env = append(fakeCIGH(t, "OPEN", `[{"name":"test","state":"FAILURE","bucket":"fail","app":"github-actions"},{"name":"Greptile Review","state":"FAILURE","bucket":"fail","app":"greptile-apps"}]`), `FAKE_CLI_REVIEW_COMMENTS=[{"author":"greptile-apps[bot]","path":"main.go","line":4,"body":"deferred bot finding"}]`)
@@ -465,7 +465,7 @@ func TestTestStep_FixMode_ProtectedPathDoesNotReachCommit(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go"}`)}, nil
+		return &agent.Result{Output: json.RawMessage(`{"summary":"repair test failure","findings":[],"tested":["go test ./..."],"testing_summary":"re-verified the repaired behaviour","artifacts":[],"scenarios":[{"name":"the repaired behaviour works for a user","result":"pass","live":true,"evidence":"go test ./...","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{})
 	repo, err := config.LoadRepoFromBytes([]byte("commands:\n  test: exit 0\nprotected_paths:\n  - generated-ledger.json\n"))
