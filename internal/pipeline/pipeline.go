@@ -17,6 +17,7 @@ var ErrFatalGateReconciliation = errors.New("fatal gate reconciliation")
 // StepContext provides shared resources to pipeline steps during execution.
 type StepContext struct {
 	PublicationRefresh    <-chan *PublicationRefreshRequest
+	MonitorCheckpoint     func(context.Context) error // executor-owned quiescent CI boundary
 	Ctx                   context.Context
 	Run                   *db.Run
 	Repo                  *db.Repo

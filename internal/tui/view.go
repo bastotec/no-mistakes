@@ -56,6 +56,9 @@ func (m Model) View() string {
 			Render("⚠ Diff truncated at 512 KiB. Approval applies to the full diff.")
 		actionBar = warning + "\n" + actionBar
 	}
+	if m.run != nil && m.run.MonitorStopped {
+		actionBar = ""
+	}
 
 	footer := renderFooter(m.done, m.showHelp, m.confirmAbort, m.yoloMode, m.run, m.latestVersion, m.width)
 	contentBudget := -1

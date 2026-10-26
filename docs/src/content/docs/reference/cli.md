@@ -481,9 +481,64 @@ Step logs include native subprocess agent lifecycle lines such as `codex started
 They also include fix-loop markers such as `auto-fix round 1/3 starting after round 1` and `user-fix round starting after round 2`.
 `--step` accepts the ten core step names and valid repository gate names such as `gate.test.mutation-budget`. Use the exact gate name shown by `axi status`.
 
+## no-mistakes axi monitor-stop
+
+Freeze monitoring for an explicitly selected publication without aborting validation,
+responding to a gate, cancelling a repair, changing Git or the forge, or returning
+edit custody. This is a one-way frozen disposition, not a successful validation or a
+pause/resume interface. It never approves unfinished work.
+
+```sh
+no-mistakes axi monitor-stop --run <id> --repo-id <registered-repo-id> \
+  --pr-url <exact-recorded-url> --published-head <full-last-pushed-sha> \
+  --observed-head <full-current-pipeline-sha> --state parked-review
+```
+
+Read `axi status --run <id>` for the recorded `repo_id`, `pr` (`--pr-url`),
+`last_pushed_sha` (`--published-head`), and full `head_sha` (`--observed-head`).
+All identity flags are required and rechecked against durable records; the run
+must be running with a recorded open PR and no active push.
+`--state parked-review` requires an unfinished Review approval gate with CI
+still pending; it preserves the gate and all findings. It does **not** assert that a
+historical monitor caused that Review: legacy runs do not record that origin.
+`--state polling` requires a running, post-green CI monitor at the exact published
+head with all prior steps completed or skipped. This includes green polling after
+a published CI repair when the latest repair invocation durably finished and
+entered post-repair monitoring; a still-open repair-budget dispatch alone does
+not make that repair active. A polling request is acknowledged only at a quiescent
+poll boundary, never by cancelling ongoing work. Active or uncertain repairs,
+changed identity/state, incomplete evidence, absent owners, and an owner already
+cancelled before the stop is accepted refuse the request. These two exact-pin
+states are the only supported cessation boundaries; this is not a general
+run-lifecycle control or readiness certification.
+Invoke it outside managed validation worktrees, which refuse pipeline control.
+The daemon checks the authenticated caller's OS-reported working directory as
+well as its ancestry; unverifiable caller topology refuses the request.
+
+Success reports `monitor_stopped: true`, `validation_finished: false`, and
+`custody_returned: false`. The stored validation, readiness evidence, rounds,
+publication binding and commits are unchanged. Live status exposes
+`monitor_stopped: true` and no longer advertises old readiness as current green.
+The frozen run keeps pipeline custody and accepts no gate response, cancellation,
+or superseding launch. There is no same-run fix release. Reattaching with
+`axi run` returns immediately with `outcome: monitor-stopped`, not validation
+success or a custody transfer. [Daemon crash recovery](/no-mistakes/concepts/daemon/#crash-recovery)
+preserves this disposition. Existing PR body, labels and draft status are untouched;
+a do-not-merge publication must already have that policy set by its owner.
+
+Repeating the exact request succeeds while its identity and observed state still
+match. A timeout or disconnected client reports cessation **unconfirmed**, never
+success; repeat the same exact request to reconcile a possibly accepted write.
+The command uses the distinct `stop_monitor` RPC and never falls back to abort or
+starts a daemon. Both CLI and the running daemon must contain this feature; an
+older daemon refuses it. Installing only a newer CLI cannot add the owner boundary
+to an already-running daemon. Coordinate a normal authorized daemon rollout before
+application; do not restart a shared daemon to make this command available.
+
 ## no-mistakes axi abort
 
-Cancel the active run for the current branch.
+Cancel the active run for the current branch, unless it has a
+[frozen monitor disposition](#no-mistakes-axi-monitor-stop), which refuses cancellation.
 Active runs on other branches are left alone.
 
 ```sh

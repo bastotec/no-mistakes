@@ -31,6 +31,7 @@ const (
 	MethodSubscribe          = "subscribe"
 	MethodRespond            = "respond"
 	MethodPublishTestPreview = "publish_test_preview"
+	MethodStopMonitor        = "stop_monitor"
 	// Distinct RPC: an older daemon must refuse a terminal continuation
 	// instead of silently ignoring it or misreading it as a rerun.
 	MethodRepublishPublication = "republish_publication"
@@ -324,6 +325,11 @@ type RespondResult struct {
 	OK bool `json:"ok"`
 }
 
+// StopMonitorResult confirms a durable frozen disposition, never cancellation.
+type StopMonitorResult struct {
+	MonitorStopped bool `json:"monitor_stopped"`
+}
+
 // CancelRunResult confirms the run cancellation request was accepted.
 type CancelRunResult struct {
 	OK bool `json:"ok"`
@@ -363,11 +369,13 @@ type RunInfo struct {
 	RepoID           string          `json:"repo_id"`
 	Branch           string          `json:"branch"`
 	HeadSHA          string          `json:"head_sha"`
+	LastPushedSHA    *string         `json:"last_pushed_sha,omitempty"`
 	SubmittedHeadSHA *string         `json:"submitted_head_sha,omitempty"`
 	BaseSHA          string          `json:"base_sha"`
 	Status           types.RunStatus `json:"status"`
 	PRURL            *string         `json:"pr_url,omitempty"`
 	Error            *string         `json:"error,omitempty"`
+	MonitorStopped   bool            `json:"monitor_stopped,omitempty"`
 	CIReady          bool            `json:"ci_ready,omitempty"`
 	CIReadyNoCI      bool            `json:"ci_ready_no_ci,omitempty"`
 	// PRBaseBranch is the per-run PR target branch, if the operator set
@@ -485,9 +493,10 @@ type Event struct {
 	// delta only when StateRev exceeds the revision it has already applied,
 	// which makes a delta queued before an authoritative snapshot an
 	// idempotent no-op after it.
-	StateRev    int64 `json:"state_rev,omitempty"`
-	CIReady     *bool `json:"ci_ready,omitempty"`
-	CIReadyNoCI *bool `json:"ci_ready_no_ci,omitempty"`
+	StateRev       int64 `json:"state_rev,omitempty"`
+	CIReady        *bool `json:"ci_ready,omitempty"`
+	CIReadyNoCI    *bool `json:"ci_ready_no_ci,omitempty"`
+	MonitorStopped *bool `json:"monitor_stopped,omitempty"`
 	// CIOverrideReason rides run_completed so the live TUI banner can show a
 	// passed-with-override run without a snapshot read. It is derived from the
 	// CI step's OverrideReason the same way RunInfo.CIOverrideReason is, and is
