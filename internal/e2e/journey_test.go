@@ -484,6 +484,9 @@ func cleanReviewScenario(t *testing.T) string {
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
+      risk_level: low
+      risk_rationale: "simulated scenario driven live with nothing untested"
+      risk_scope: source-or-external
       artifacts: []
   - match: "You are validating a code change by driving the product itself. Derive the scenarios this change must satisfy, then run each one against the real running product.\n\nContext:\n- branch: test-malformed-structured-output"
     text: "tests found some issues"
@@ -511,6 +514,9 @@ func cleanReviewScenario(t *testing.T) string {
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
+      risk_level: low
+      risk_rationale: "simulated scenario driven live with nothing untested"
+      risk_scope: source-or-external
       artifacts: []
   - match: "You are validating a code change by driving the product itself. Derive the scenarios this change must satisfy, then run each one against the real running product."
     text: "tests passed with no evidence artifacts"
@@ -527,6 +533,9 @@ func cleanReviewScenario(t *testing.T) string {
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
+      risk_level: low
+      risk_rationale: "simulated scenario driven live with nothing untested"
+      risk_scope: source-or-external
       artifacts: []
   - match: "Review the code changes and return structured findings with a risk assessment.\n\nContext:\n- branch: feature/e2e"
     text: "looks good"
