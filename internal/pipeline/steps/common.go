@@ -128,7 +128,11 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 	if payload.RiskLevel == nil || strings.TrimSpace(*payload.RiskLevel) == "" {
 		issues = append(issues, "missing risk_level - set risk_level to low, medium, or high for the tested head")
 	} else {
-		switch types.FindingsRiskLevel(*payload.RiskLevel) {
+		// The JSON schema enforces the exact lowercase enum; this guard
+		// repeats it exactly (no case/whitespace tolerance) so a tolerated
+		// spelling can never enter the recorded vocabulary behind the
+		// schema's back.
+		switch *payload.RiskLevel {
 		case types.FindingsRiskLevelLow, types.FindingsRiskLevelMedium, types.FindingsRiskLevelHigh:
 		default:
 			issues = append(issues, fmt.Sprintf("risk_level %q is not one of low, medium, high", *payload.RiskLevel))

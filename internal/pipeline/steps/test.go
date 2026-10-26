@@ -265,8 +265,10 @@ Rules:
 	findings.TestedHeadSHA = sctx.Run.HeadSHA
 	// The risk verdict is bound to the exact tested head: this step is the last
 	// revalidating step, so its head-attributed risk is the final-head provenance
-	// consumers (autoland included) read. Required by testFindingsSchema, so an
-	// empty risk record cannot pass validation silently.
+	// consumers (autoland included) read. The schema requires an explicit
+	// verdict from the analyzer; this default is only the recording-path backstop
+	// (validator drift, a non-analyzer producer), stamping a truthful head-named
+	// "medium pending explicit assessment" - never a claimed assessment.
 	findings.RiskLevel = cmp.Or(findings.RiskLevel, "medium")
 	findings.RiskRationale = cmp.Or(findings.RiskRationale,
 		fmt.Sprintf("risk not stated by the test analyzer for head %s; defaulted medium pending explicit assessment", sctx.Run.HeadSHA))
