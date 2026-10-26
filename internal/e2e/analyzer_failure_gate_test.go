@@ -38,6 +38,9 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
+      risk_level: low
+      risk_rationale: "simulated scenario driven live with nothing untested"
+      risk_scope: source-or-external
       artifacts: []
   - match: "Detect the linting and formatting tools for this project, run the relevant checks yourself, apply safe fixes, and verify the result.\n\nContext:\n- branch: analyzer-lint-malformed-output"
     text: "lint unavailable"
@@ -57,6 +60,9 @@ func TestAnalyzerEvidenceFailuresFailPipelineJourney(t *testing.T) {
           evidence: "fakeagent: simulated test run"
           reason: ""
       verdict: go
+      risk_level: low
+      risk_rationale: "simulated scenario driven live with nothing untested"
+      risk_scope: source-or-external
       artifacts: []
   - match: "branch: analyzer-review-null-findings"
     text: "review unavailable"

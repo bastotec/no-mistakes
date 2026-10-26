@@ -81,6 +81,25 @@ const (
 	FindingsRiskScopePipelineOwnedDelivery = "pipeline-owned-delivery"
 )
 
+// Risk-level vocabulary shared by the review and test structured outputs. The
+// test step's risk verdict is head-attributed provenance: consumers asking
+// whether the final submitted head was risk-assessed read this field rather
+// than inferring from earlier steps.
+const (
+	FindingsRiskLevelLow    = "low"
+	FindingsRiskLevelMedium = "medium"
+	FindingsRiskLevelHigh   = "high"
+)
+
+// FindingsRiskLevel normalizes one risk-level spelling so equivalent forms
+// compare equal; it does not check membership. The schema protocol is the
+// exact lowercase vocabulary, so the Test-step validator compares raw values
+// against the constants and uses this normalizer only for display/storage
+// equivalence of already-accepted values.
+func FindingsRiskLevel(level string) string {
+	return strings.ToLower(strings.TrimSpace(level))
+}
+
 // NoActionableFindingRationale is the risk rationale a review writes when it
 // found nothing actionable itself; carried findings are added beside it.
 const NoActionableFindingRationale = "no actionable finding survived verification"

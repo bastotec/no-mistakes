@@ -165,7 +165,9 @@ const passingScenarioFindingsJSON = `{
   "testing_summary": "drove checkout end to end",
   "artifacts": [],
   "scenarios": [{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""}],
-  "verdict": "go"
+  "verdict": "go",
+  "risk_level": "low",
+  "risk_rationale": "checkout scenario driven live against the tested head with nothing untested"
 }`
 
 // TestTestStep_VerdictPolicy proves captain's call C2 = a end to end: a no-go
@@ -195,7 +197,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 				"scenarios":[
 					{"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""},
 					{"name":"payment declines are shown","result":"untested","live":false,"evidence":"","reason":"no card sandbox credential on this machine"}
-				],"verdict":"go"}`,
+				],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantApproval:      false,
 			wantScenarioCount: 2,
 		},
@@ -203,7 +205,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 			name: "no-go parks",
 			output: `{"findings":[],"summary":"","tested":["npm run e2e -- checkout"],"testing_summary":"checkout broke","artifacts":[],
 				"scenarios":[{"name":"user reaches the success screen","result":"fail","live":true,"evidence":"checkout.png","reason":""}],
-				"verdict":"no-go"}`,
+				"verdict":"no-go","risk_level":"high","risk_rationale":"a driven scenario failed at this head, so the intent is not safe to ship"}`,
 			wantApproval:      true,
 			wantDescription:   "live validation verdict: no-go",
 			wantAction:        types.ActionAutoFix,
@@ -213,7 +215,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 			name: "inconclusive parks for a human",
 			output: `{"findings":[],"summary":"","tested":["read the diff"],"testing_summary":"nothing could be driven","artifacts":[],
 				"scenarios":[{"name":"user reaches the success screen","result":"untested","live":false,"evidence":"","reason":"no browser on this machine"}],
-				"verdict":"inconclusive"}`,
+				"verdict":"inconclusive","risk_level":"high","risk_rationale":"too little could be driven live to judge the change at this head"}`,
 			wantApproval:      true,
 			wantDescription:   "live validation verdict: inconclusive",
 			wantAction:        types.ActionAskUser,
@@ -223,7 +225,7 @@ func TestTestStep_VerdictPolicy(t *testing.T) {
 			name: "no-surface parks as ask-user",
 			output: `{"findings":[],"summary":"","tested":["inspected .github/workflows/ci.yml"],"testing_summary":"CI workflow has no running product to drive","artifacts":[],
 				"scenarios":[{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
-				"verdict":"no-surface"}`,
+				"verdict":"no-surface","risk_level":"low","risk_rationale":"the change has no runtime product surface to assess"}`,
 			wantApproval:      true,
 			wantDescription:   "this change has no live-validatable surface; proceed without live validation?",
 			wantAction:        types.ActionAskUser,
@@ -297,12 +299,12 @@ func TestTestStep_MissingScenarioContractFails(t *testing.T) {
 	}{
 		{
 			name:    "no scenarios array",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: "missing scenarios array",
 		},
 		{
 			name:    "empty scenarios array",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[],"verdict":"inconclusive","risk_level":"high","risk_rationale":"too little could be driven live to judge the change at this head"}`,
 			wantErr: "empty scenarios array",
 		},
 		{
@@ -317,67 +319,67 @@ func TestTestStep_MissingScenarioContractFails(t *testing.T) {
 		},
 		{
 			name:    "scenario result outside the vocabulary",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"maybe","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"maybe","live":true,"evidence":"ok","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: "is not one of",
 		},
 		{
 			name:    "unnamed scenario",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"  ","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"  ","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: "missing name",
 		},
 		{
 			name:    "missing declared scenario fields",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass"}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass"}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: "missing live",
 		},
 		{
 			name:    "pass must be live",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"evidence":"ok","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: `result "pass" but live=false`,
 		},
 		{
 			name:    "pass requires evidence",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"  ","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"  ","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: "missing evidence",
 		},
 		{
 			name:    "fail requires evidence",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"","reason":""}],"verdict":"no-go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"","reason":""}],"verdict":"no-go","risk_level":"high","risk_rationale":"a driven scenario failed at this head, so the intent is not safe to ship"}`,
 			wantErr: "missing evidence",
 		},
 		{
 			name:    "untested cannot be live",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":true,"evidence":"","reason":"no browser"}],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":true,"evidence":"","reason":"no browser"}],"verdict":"inconclusive","risk_level":"high","risk_rationale":"too little could be driven live to judge the change at this head"}`,
 			wantErr: `result "untested" but live=true`,
 		},
 		{
 			name:    "untested without a reason",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":false,"evidence":"","reason":""}],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"untested","live":false,"evidence":"","reason":""}],"verdict":"inconclusive","risk_level":"high","risk_rationale":"too little could be driven live to judge the change at this head"}`,
 			wantErr: `result "untested" without a reason`,
 		},
 		{
 			name:    "go cannot override failure",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"failure","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"failure","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: `verdict "go" contradicts failed scenario`,
 		},
 		{
 			name:    "inconclusive cannot override failure",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"failure","reason":""}],"verdict":"inconclusive"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"fail","live":true,"evidence":"failure","reason":""}],"verdict":"inconclusive","risk_level":"high","risk_rationale":"too little could be driven live to judge the change at this head"}`,
 			wantErr: `verdict "inconclusive" contradicts failed scenario`,
 		},
 		{
 			name:    "no-surface cannot cover a live pass",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"no-surface"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":true,"evidence":"ok","reason":""}],"verdict":"no-surface","risk_level":"low","risk_rationale":"the change has no runtime product surface to assess"}`,
 			wantErr: `verdict "no-surface" contradicts live-exercisable scenario`,
 		},
 		{
 			name:    "no-surface cannot cover a claimed pass without live",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"evidence":"ok","reason":""}],"verdict":"no-surface"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"pass","live":false,"evidence":"ok","reason":""}],"verdict":"no-surface","risk_level":"low","risk_rationale":"the change has no runtime product surface to assess"}`,
 			wantErr: `result "pass" but live=false`,
 		},
 		{
 			name:    "protocol vocabulary is exact",
-			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"Pass","live":true,"evidence":"ok","reason":""}],"verdict":"go"}`,
+			output:  `{"findings":[],"summary":"","tested":["ok"],"testing_summary":"ok","artifacts":[],"scenarios":[{"name":"x","result":"Pass","live":true,"evidence":"ok","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`,
 			wantErr: "is not one of",
 		},
 	} {
@@ -413,7 +415,9 @@ const noSurfaceCIWorkflowFindingsJSON = `{
   "testing_summary": "CI workflow split has no running product to drive",
   "artifacts": [],
   "scenarios": [{"name":"Windows git-heavy shard runs the git-backed packages","result":"untested","live":false,"evidence":"","reason":"CI workflow YAML has no running product no-mistakes can drive"}],
-  "verdict": "no-surface"
+  "verdict": "no-surface",
+  "risk_level": "low",
+  "risk_rationale": "workflow YAML cannot be driven live; the change carries no runtime product surface to assess"
 }`
 
 // TestTestStep_NoLiveSurfaceCIWorkflowAsksUser models the captain's
@@ -485,7 +489,9 @@ const mixedLivePassAndUntestedFindingsJSON = `{
     {"name":"user reaches the success screen","result":"pass","live":true,"evidence":"checkout.png","reason":""},
     {"name":"payment declines are shown","result":"untested","live":false,"evidence":"","reason":"no card sandbox credential on this machine"}
   ],
-  "verdict": "go"
+  "verdict": "go",
+  "risk_level": "medium",
+  "risk_rationale": "payment-decline behavior stayed untested without a card sandbox, so the intent is only partly covered"
 }`
 
 const passNotLiveFindingsJSON = `{
@@ -495,7 +501,9 @@ const passNotLiveFindingsJSON = `{
   "testing_summary": "adapter stubbed the scenario",
   "artifacts": [],
   "scenarios": [{"name":"adapter handles the request","result":"pass","live":false,"evidence":"stub","reason":""}],
-  "verdict": "go"
+  "verdict": "go",
+  "risk_level": "high",
+  "risk_rationale": "nothing was driven live; the only pass came from a stub, so the risk for this head is unproven"
 }`
 
 const untestedWithoutReasonFindingsJSON = `{
@@ -505,7 +513,9 @@ const untestedWithoutReasonFindingsJSON = `{
   "testing_summary": "could not drive live",
   "artifacts": [],
   "scenarios": [{"name":"user reaches the success screen","result":"untested","live":false,"evidence":"","reason":""}],
-  "verdict": "inconclusive"
+  "verdict": "inconclusive",
+  "risk_level": "high",
+  "risk_rationale": "nothing could be driven, so the change's behavior is entirely unproven at this head"
 }`
 
 type rejectedStructuredOutputError struct{ message string }

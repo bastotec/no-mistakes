@@ -69,6 +69,8 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 		} `json:"artifacts"`
 		Scenarios *[]testScenarioContractFields `json:"scenarios"`
 		Verdict   *string                       `json:"verdict"`
+		RiskLevel *string                       `json:"risk_level"`
+		Rationale *string                       `json:"risk_rationale"`
 	}
 	if err := json.Unmarshal(raw, &payload); err != nil {
 		return err
@@ -117,6 +119,33 @@ func unmarshalRequiredTestFindings(raw []byte, findings *Findings) error {
 	var issues []string
 	for i, scenario := range *payload.Scenarios {
 		issues = append(issues, scenarioContractIssues(i, scenario)...)
+	}
+	// The risk verdict is the step's head-attributed provenance contract: a
+	// successful Test is the last revalidating step, so consumers reading "was
+	// the final head risk-assessed?" need a recorded answer, not silence. The
+	// executor defaults an unstated verdict to a head-named medium; requiring
+	// the field here keeps the analyzer honest when it does state one.
+	if payload.RiskLevel == nil || strings.TrimSpace(*payload.RiskLevel) == "" {
+		issues = append(issues, "missing risk_level - set risk_level to low, medium, or high for the tested head")
+	} else {
+		// The JSON schema enforces the exact lowercase enum; this guard
+		// repeats it exactly (no case/whitespace tolerance) so a tolerated
+		// spelling can never enter the recorded vocabulary behind the
+		// schema's back.
+		switch *payload.RiskLevel {
+		case types.FindingsRiskLevelLow, types.FindingsRiskLevelMedium, types.FindingsRiskLevelHigh:
+		default:
+			issues = append(issues, fmt.Sprintf("risk_level %q is not one of low, medium, high", *payload.RiskLevel))
+		}
+	}
+	if payload.RiskLevel != nil && strings.TrimSpace(*payload.RiskLevel) != "" {
+		// A stated risk must say why: an empty rationale would make the level
+		// an unattributable label, defeating the provenance this field exists
+		// for. The executor still fills a fully-absent pair with a head-named
+		// default, so the contract can never end in silence either way.
+		if payload.Rationale == nil || strings.TrimSpace(*payload.Rationale) == "" {
+			issues = append(issues, "risk_rationale is required when risk_level is set - say why this level holds for the tested head")
+		}
 	}
 	if payload.Verdict == nil {
 		issues = append(issues, "missing verdict - set verdict to "+strings.Join(types.KnownTestVerdicts(), ", "))
@@ -291,9 +320,18 @@ var testFindingsSchema = json.RawMessage(`{
 			"type": "string",
 			"enum": ["go", "no-go", "inconclusive", "no-surface"],
 			"description": "go when every scenario that could be driven passed and nothing untested puts the intent in doubt; no-go when a scenario failed or the change is not safe to ship; inconclusive when the change has a live-exercisable product surface but too little could be driven live to judge; no-surface when this change has no runtime product surface no-mistakes can drive live"
+		},
+		"risk_level": {
+			"type": "string",
+			"enum": ["low", "medium", "high"],
+			"description": "the test step's own risk verdict for the submitted head, as tested: low when the driven evidence covers the change's behavior with nothing untested that could regress the intent; medium when meaningful behavior stayed untested or evidence was partial; high when a failure or gap threatens the intent's safety"
+		},
+		"risk_rationale": {
+			"type": "string",
+			"description": "why this risk level holds for the exact tested head, in one or two sentences, citing the driven scenarios or the specific gap"
 		}
 	},
-	"required": ["findings", "summary", "tested", "testing_summary", "artifacts", "scenarios", "verdict"]
+	"required": ["findings", "summary", "tested", "testing_summary", "artifacts", "scenarios", "verdict", "risk_level", "risk_rationale"]
 }`)
 
 // reviewFindingsSchema is the JSON schema for structured review output with risk assessment.
