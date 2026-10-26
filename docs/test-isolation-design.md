@@ -48,8 +48,18 @@ housekeeping result across namespaces. Each invocation uses the same host event
 transport and worker head-export/acknowledgement and terminal-index protocol as
 Test isolation. Head acknowledgement precedes the worker's recorded-head advance;
 terminal completion still requires validated handoffs and worker exit. The
-existing interrupted-repair custody and replay rules apply, not an unconfined
-agent replay.
+existing [interrupted-repair custody rules](src/content/docs/reference/pipeline-steps.md#ci)
+and replay rules apply, not an unconfined agent replay. When the executor restores
+survived work before an authorized fix round, its `RestoredSurvivedWork` metadata
+must cross the request serialization and worker-context rebuild too, so the
+confined fixer continues that work rather than resetting it.
+
+Both workers use `internal/pipeline/steps/isolated_bootstrap.go` for their fixed
+runtime lifecycle: a writable copy of the advisory database, private services,
+and an invocation-local dummy model-client key. Agent configuration and step
+execution remain caller-owned. Offline regressions for this shared lifecycle and
+the restored-work handoff live in `isolated_bootstrap_test.go` and
+`survived_work_test.go` in the same package.
 
 Offline contract canaries live in `internal/runconfine/policy_test.go`,
 `internal/pipeline/run_confinement_test.go`, and
