@@ -102,7 +102,7 @@ func runAxiStatus(cmd *cobra.Command, runID string) error {
 		// identity cannot be lost between this status read and the next command.
 		branchScopedCommandsSafe := runID == ""
 		if !branchScopedCommandsSafe {
-			fields = append(fields, inspectionOnlyGateFields(gate, run.ID)...)
+			fields = append(fields, inspectionOnlyGateFields(gate, run, rv)...)
 		} else {
 			fields = append(fields, gateFields(gate)...)
 		}

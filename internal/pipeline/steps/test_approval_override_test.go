@@ -74,7 +74,9 @@ func TestTestStep_VerifyApprovalOverride_PassingCommandLeavesNoMark(t *testing.T
   "testing_summary": "drove checkout",
   "artifacts": [],
   "scenarios": [{"name":"user reaches the success screen","result":"fail","live":true,"evidence":"checkout.png","reason":""}],
-  "verdict": "no-go"
+  "verdict": "no-go",
+  "risk_level": "high",
+  "risk_rationale": "the driven checkout scenario failed at this head, so the intent is not safe to ship"
 }`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, baseSHA, headSHA, config.Commands{Test: "exit 0"})

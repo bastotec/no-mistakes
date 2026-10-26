@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"os/exec"
 	"reflect"
 	"strings"
 	"time"
@@ -603,11 +604,47 @@ func gateFields(gate stepView) []toon.Field {
 	return gateFieldsWithHelp(gate, append(help, tail...))
 }
 
-func inspectionOnlyGateFields(gate stepView, runID string) []toon.Field {
-	return gateFieldsWithHelp(gate, []string{
+func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView) []toon.Field {
+	runID := run.ID
+	help := []string{
 		fmt.Sprintf("The explicitly selected gate for run %s is inspection-only; no run-scoped response command exists", runID),
 		fmt.Sprintf("Run `%s` to read the full step log", axiLogsFullCommand(gate.Name, runID)),
-	})
+	}
+	// A parked CI fix_review gate can outlive the evidence it was raised on:
+	// the provider may have replaced its cancelled checks at the same head,
+	// so the stale verdict on screen is no longer the CURRENT rollup. The
+	// durable repair for that stale-gate state is the gate's own approval:
+	// the CI step re-polls live checks through VerifyApprovalOverride at
+	// approval time and records any not-genuinely-green state as an override
+	// reason, so the approval can never read as a plain pass. Attach that
+	// prescription only behind a worktree head equality check the operator
+	// performs themselves - the response command stays out of the explicit
+	// selection, the exact-head requirement keeps the response from landing
+	// on a run this worktree cannot answer, and a mismatched head is told to
+	// stop rather than guess.
+	if gate.Name == string(types.StepCI) && gate.Status == string(types.StepStatusFixReview) {
+		if head := rv.HeadSHA; strings.TrimSpace(head) != "" {
+			if observed := worktreeHead(); observed == strings.TrimSpace(head) {
+				help = append(help,
+					fmt.Sprintf("Worktree head equals the run's submitted head %s; this stale cancelled-checks gate may be reconciled by answering it: run `no-mistakes axi respond --action approve` from the branch's own worktree after re-checking the live rollup.", strings.TrimSpace(head)))
+			} else {
+				help = append(help,
+					fmt.Sprintf("Worktree head %s does not match the run's submitted head %s; respond is refused until the heads match - do not answer this gate from a mismatched worktree.", observed, strings.TrimSpace(head)))
+			}
+		}
+	}
+	return gateFieldsWithHelp(gate, help)
+}
+
+// worktreeHead reports the current worktree's HEAD SHA, or "" when it cannot
+// be resolved (detached plumbing failure, bare dir). Callers treat empty as a
+// mismatch: an unreadable head never earns the approve prescription.
+func worktreeHead() string {
+	raw, err := exec.Command("git", "rev-parse", "HEAD").Output()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(raw))
 }
 
 func gateFieldsWithHelp(gate stepView, help []string) []toon.Field {
