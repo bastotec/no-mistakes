@@ -185,9 +185,10 @@ not a completion guarantee. `--wait` bounds only the caller's wait, not this bud
 The pin is immutable and survives daemon recovery. It affects neither other
 steps nor other runs, and `rerun` does not inherit it. Ordinary runs still use
 [`agent_timeout`](/no-mistakes/reference/global-config/#agent_timeout).
-The option cannot combine with skips, history pins, PR association, Test isolation,
-or explicit launch-receipt flags. A matching active invocation can be reattached
-with the same head, intent, base and timeout; different values never supersede it.
+The option cannot combine with skips, history pins, PR association, either isolation
+mode (`--isolate-test` or `--isolate`), or explicit launch-receipt flags. A matching
+active invocation can be reattached with the same head, intent, base and timeout;
+different values never supersede it.
 
 The launch accepts positively verified `user_owned` release as well as returned
 custody; an unchanged terminal head needs no new custody stamp. Unknown, ambiguous
