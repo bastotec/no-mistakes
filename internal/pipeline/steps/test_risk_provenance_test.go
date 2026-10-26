@@ -56,18 +56,18 @@ func TestTestFindingsSchemaRequiresRiskFields(t *testing.T) {
 func TestTestFindingsWithoutRiskFailsSchemaValidation(t *testing.T) {
 	// A payload missing the risk fields must be rejected by the same
 	// unmarshal path the step uses, so silence can never pass as a verdict.
-	payload := `{"findings":[],"summary":"ok","tested":["x"],"testing_summary":"ran","artifacts":[],"scenarios":[{"name":"s","result":"pass","live":true,"evidence":"e","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`
+	payload := `{"findings":[],"summary":"ok","tested":["x"],"testing_summary":"ran","artifacts":[],"scenarios":[{"name":"s","result":"pass","live":true,"evidence":"e","reason":""}],"verdict":"go"}`
 	var findings types.Findings
 	if err := json.Unmarshal([]byte(payload), &findings); err != nil {
 		t.Fatalf("types decode failed: %v", err)
 	}
 	if findings.RiskLevel != "" || findings.RiskRationale != "" {
-		t.Fatalf("expected empty risk fields before the executor default")
+		t.Fatal("an analyzer payload without risk fields must decode to empty risk fields")
 	}
-	// The step-side guard: runTestAnalyzer output lacking risk fields must not
+	// The step-side guard: analyzer output lacking risk fields must not
 	// survive validation. unmarshalRequiredTestFindings is the validator.
 	if err := unmarshalRequiredTestFindings(json.RawMessage(payload), &findings); err == nil {
-		t.Skip("validator does not yet enforce risk fields structurally; executor default covers provenance")
+		t.Fatal("validator accepted findings without risk_level/risk_rationale; silence must not pass as a verdict")
 	}
 }
 
