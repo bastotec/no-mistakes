@@ -92,7 +92,10 @@ const (
 )
 
 // FindingsRiskLevel normalizes one risk-level spelling so equivalent forms
-// compare equal; it does not check membership.
+// compare equal; it does not check membership. The schema protocol is the
+// exact lowercase vocabulary, so the Test-step validator compares raw values
+// against the constants and uses this normalizer only for display/storage
+// equivalence of already-accepted values.
 func FindingsRiskLevel(level string) string {
 	return strings.ToLower(strings.TrimSpace(level))
 }
