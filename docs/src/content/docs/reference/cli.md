@@ -502,11 +502,15 @@ must be running with a recorded open PR and no active push.
 still pending; it preserves the gate and all findings. It does **not** assert that a
 historical monitor caused that Review: legacy runs do not record that origin.
 `--state polling` requires a running, post-green CI monitor at the exact published
-head with all prior steps completed or skipped. A polling request is acknowledged
-only at a quiescent poll boundary, never by cancelling ongoing work. Active or
-uncertain repairs, changed identity/state, incomplete evidence, and absent owners
-refuse the request. These two exact-pin states are the only supported cessation
-boundaries; this is not a general run-lifecycle control or readiness certification.
+head with all prior steps completed or skipped. This includes green polling after
+a published CI repair when the latest repair invocation durably finished and
+entered post-repair monitoring; a still-open repair-budget dispatch alone does
+not make that repair active. A polling request is acknowledged only at a quiescent
+poll boundary, never by cancelling ongoing work. Active or uncertain repairs,
+changed identity/state, incomplete evidence, absent owners, and an owner already
+cancelled before the stop is accepted refuse the request. These two exact-pin
+states are the only supported cessation boundaries; this is not a general
+run-lifecycle control or readiness certification.
 Invoke it outside managed validation worktrees, which refuse pipeline control.
 The daemon checks the authenticated caller's OS-reported working directory as
 well as its ancestry; unverifiable caller topology refuses the request.

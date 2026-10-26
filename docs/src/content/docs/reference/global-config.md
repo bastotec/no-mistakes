@@ -467,7 +467,7 @@ The window begins after run setup finishes, not at the Git push timestamp. While
 A further push to the same branch inside the window replaces the waiting run before any step, and so any agent work, ran on it.
 The replaced run ends `cancelled: coalesced into a newer push`, and the new run waits out its own window, so each push resets the clock.
 If a same-branch launch is still setting up when the timer expires, the waiting run cannot start steps until that launch releases the branch lock; replacement by that push still counts as coalesced.
-Once the run leaves its window, a newer push keeps the usual semantics: the running run is cancelled as `cancelled: superseded by new push`.
+Once the run leaves its window, a newer push normally cancels it as `cancelled: superseded by new push`, subject to the [frozen-monitor launch restriction](/no-mistakes/reference/cli/#no-mistakes-axi-monitor-stop).
 [`no-mistakes stats`](/no-mistakes/reference/cli/#no-mistakes-stats) reports the replacement counts.
 When a coalesced run's own push rewrote history and the replacing push only appends, the replacement keeps that pre-rewrite base, so a force push followed by a quick follow-up is still integrated as a force push rather than having the dropped commits rebased back in.
 

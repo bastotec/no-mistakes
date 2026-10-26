@@ -102,7 +102,8 @@ That sweep is scoped by working directory: it never touches a worktree whose run
 
 ## Concurrent push handling
 
-If you push to the same branch while a run is already active, the daemon:
+For runs without a [frozen monitor disposition](/no-mistakes/reference/cli/#no-mistakes-axi-monitor-stop),
+if you push to the same branch while a run is already active, the daemon:
 
 1. Cancels the existing run, classified as coalesced or superseded under [`push_quiet_window`](/no-mistakes/reference/global-config/#push_quiet_window)
 2. Waits for it to finish
