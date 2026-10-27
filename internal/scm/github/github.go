@@ -177,12 +177,51 @@ func (h *Host) Available(ctx context.Context) error {
 			return fmt.Errorf("gh CLI is not on PATH: %w", err)
 		}
 		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return fmt.Errorf("gh CLI is not authenticated: %s: %w", detail, err)
+		label := "gh auth status failed"
+		if ghAuthTransportFailure(detail) {
+			label = "gh auth status transport failure"
+		} else if ghAuthRejected(detail) {
+			label = "gh CLI is not authenticated"
 		}
-		return fmt.Errorf("gh CLI is not authenticated: %w", err)
+		if detail != "" {
+			return fmt.Errorf("%s: %s: %w", label, detail, err)
+		}
+		return fmt.Errorf("%s: %w", label, err)
 	}
 	return nil
+}
+
+// gh can print "Failed to log in" for network errors too, alongside successful
+// accounts. That heading alone is not a credential rejection. Transport takes
+// precedence even when another account in the status output has an invalid token.
+func ghAuthTransportFailure(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, marker := range []string{
+		"timeout", "timed out", "context deadline exceeded", "connection reset",
+		"connection refused", "connection timed out", "temporary failure",
+		"no such host", "network is unreachable", "tls handshake", "unexpected eof",
+		"http 502", "http 503", "http 504",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+// gh's "The token in ... is invalid" boilerplate also covers transport errors
+// whose causes it suppresses. Only explicit credential rejection or missing-login
+// diagnostics justify an authentication label; ambiguous failures stay neutral.
+func ghAuthRejected(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, marker := range []string{
+		"not logged into", "not logged in", "bad credentials", "http 401",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isMissingExecutable(err error) bool {
