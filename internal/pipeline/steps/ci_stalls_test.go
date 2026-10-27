@@ -12,6 +12,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
 	"gopkg.in/yaml.v3"
@@ -454,5 +455,148 @@ func TestCIStallRevalidationArmsGraceOnCurrentPublishedHead(t *testing.T) {
 	_, out, err = restored.recoverStalls(sctx, host, pr, nil, now.Add(stallReplacementGrace+time.Second))
 	if err != nil || out == nil || !out.NeedsApproval || host.calls != 0 || restored.transientReruns.stalls[stall.Key].Stall.HeadSHA != base {
 		t.Fatalf("registration failure=%#v err=%v calls=%d", out, err, host.calls)
+	}
+}
+
+func TestCIStallRecoveredJobAfterOrdinaryRepairHandsOffNewHeadStall(t *testing.T) {
+	f := newCIRepairFixture(t, false, writeCIFix)
+	step := &CIStep{}
+	now := time.Now()
+	stall := scm.CIStall{Key: "ci/build", Class: "queued-no-runner", HeadSHA: f.headSHA, Check: scm.Check{Name: "build", WorkflowID: 1}}
+	state := stallRecoveryState{Stall: stall, Phase: "remedy", MonitorHead: f.headSHA, At: now.Add(-time.Hour)}
+	if err := step.saveStall(f.sctx, stall.Key, state); err != nil {
+		t.Fatal(err)
+	}
+	provider := &stallTestHost{allowed: true}
+	passed := stall.Check
+	passed.Bucket = scm.CheckBucketPass
+	if _, out, err := step.recoverStalls(f.sctx, provider, &scm.PR{HeadSHA: f.headSHA}, []scm.Check{passed}, now); err != nil || out != nil || step.transientReruns.stalls[stall.Key].Phase != "recovered" {
+		t.Fatalf("replacement did not recover: out=%#v err=%v", out, err)
+	}
+	finding := Finding{ID: "ci-test", Category: types.FindingCategoryCICheck, Check: "test", Action: types.ActionAutoFix, Severity: types.FindingSeverityError}
+	f.sctx.PreviousFindings, _ = types.MarshalFindingsJSON(Findings{Items: []Finding{finding}})
+	if out, err := step.repairFromFindings(f.sctx, &completionSnapshotHost{}, &scm.PR{Number: "42"}); err != nil || out != nil {
+		t.Fatalf("ordinary repair=%#v err=%v", out, err)
+	}
+	if f.remoteHead(t) == f.headSHA || f.remoteHead(t) != f.sctx.Run.HeadSHA {
+		t.Fatal("ordinary repair was not published")
+	}
+	restored := &CIStep{}
+	restored.loadRerunBudget(f.sctx)
+	stall.HeadSHA = f.sctx.Run.HeadSHA
+	stall.Check.Bucket = scm.CheckBucketPending
+	provider.stalls = []scm.CIStall{stall}
+	pr := &scm.PR{HeadSHA: stall.HeadSHA}
+	resumed := now.Add(time.Hour)
+	waiting, out, err := restored.recoverStalls(f.sctx, provider, pr, []scm.Check{stall.Check}, resumed)
+	if err != nil || !waiting || out != nil || restored.transientReruns.stalls[stall.Key].MonitorHead != stall.HeadSHA {
+		t.Fatalf("new-head monitoring=%v %#v %v", waiting, out, err)
+	}
+	_, out, err = restored.recoverStalls(f.sctx, provider, pr, []scm.Check{stall.Check}, resumed.Add(stallReplacementGrace+time.Second))
+	if err != nil || out == nil || !out.NeedsApproval || provider.calls != 0 || f.localHead(t) != stall.HeadSHA {
+		t.Fatalf("new-head handoff=%#v err=%v calls=%d", out, err, provider.calls)
+	}
+}
+
+func TestCIStallRetainedProtectedRepairsMonitorAbsentReplacement(t *testing.T) {
+	for _, workload := range []bool{false, true} {
+		for _, revalidate := range []bool{false, true} {
+			t.Run(fmt.Sprintf("workload=%t/revalidate=%t", workload, revalidate), func(t *testing.T) {
+				f := newCIRepairFixture(t, revalidate, nil)
+				p := ".github/workflows/ci.yml"
+				if err := os.MkdirAll(filepath.Join(f.dir, ".github/workflows"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(f.dir, p), []byte("name: CI\non: push\njobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo test\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				gitCmd(t, f.dir, "add", p)
+				gitCmd(t, f.dir, "commit", "-m", "add workflow")
+				head := f.localHead(t)
+				if _, err := (&CIStep{}).recordRepair(f.sctx, head); err != nil {
+					t.Fatal(err)
+				}
+				if revalidate {
+					gitCmd(t, f.dir, "push", "origin", "feature")
+				}
+				f.sctx.Config.ProtectedPaths = []string{p}
+				step := &CIStep{}
+				now := time.Now()
+				stall := scm.CIStall{Key: "ci/build", Class: "queued-no-runner", HeadSHA: head, WorkflowPath: p, JobKey: "build", Check: scm.Check{Name: "build", WorkflowID: 1}}
+				phase := "handed-off"
+				if workload {
+					phase = "rerun"
+				}
+				state := stallRecoveryState{Stall: stall, Phase: phase, At: now.Add(-time.Hour)}
+				if err := step.saveStall(f.sctx, stall.Key, state); err != nil {
+					t.Fatal(err)
+				}
+				provider := &stallTestHost{allowed: true, stalls: []scm.CIStall{stall}}
+				var out *pipeline.StepOutcome
+				var err error
+				if workload {
+					_, out, err = step.recoverStalls(f.sctx, provider, &scm.PR{HeadSHA: head}, nil, now)
+				} else {
+					f.sctx.Agent = &mockAgent{name: "test", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
+						writeCIFix(f.dir)
+						if err := os.WriteFile(filepath.Join(f.dir, p), []byte("protected edit\n"), 0644); err != nil {
+							t.Fatal(err)
+						}
+						return &agent.Result{Output: json.RawMessage(`{"summary":"repair stalled check","code_change_needed":true}`)}, nil
+					}}
+					f.sctx.PreviousFindings, _ = types.MarshalFindingsJSON(Findings{Items: []Finding{stallFinding(stall.Key, state, types.ActionAskUser)}})
+					out, err = step.repairFromFindings(f.sctx, &completionSnapshotHost{}, &scm.PR{Number: "42"})
+				}
+				if err != nil || out == nil || !pipeline.HasProtectedPathRefusal(out.Findings) || f.localHead(t) != head {
+					t.Fatalf("protected repair=%#v err=%v", out, err)
+				}
+				persistCIRefusal(t, f, out)
+				if workload {
+					f.sctx.Config.ProtectedPaths = nil
+				} else {
+					gitCmd(t, f.dir, "restore", "--", p)
+				}
+				refusal, err := types.ParseFindingsJSON(out.Findings)
+				if err != nil {
+					t.Fatal(err)
+				}
+				selected := Findings{}
+				for _, item := range refusal.Items {
+					if item.ID == "protected-path-refusal" {
+						selected.Items = append(selected.Items, item)
+					}
+				}
+				if len(selected.Items) != 1 {
+					t.Fatalf("missing retained-repair refusal: %#v", refusal)
+				}
+				f.sctx.PreviousFindings, _ = types.MarshalFindingsJSON(selected)
+				retry := &CIStep{}
+				retry.loadRerunBudget(f.sctx)
+				repair, err := retry.retryProtectedPathRepair(f.sctx)
+				if err != nil || !repair.HeadAdvanced || repair.Revalidate != revalidate {
+					t.Fatalf("retained retry=%#v err=%v", repair, err)
+				}
+				if revalidate {
+					gitCmd(t, f.dir, "push", "origin", "feature")
+				}
+				if f.remoteHead(t) != f.sctx.Run.HeadSHA || f.remoteHead(t) == head {
+					t.Fatal("retained repair was not published")
+				}
+				restored := &CIStep{}
+				restored.loadRerunBudget(f.sctx)
+				provider.stalls = nil
+				resumed := now.Add(time.Hour)
+				pr := &scm.PR{HeadSHA: f.sctx.Run.HeadSHA}
+				waiting, out, err := restored.recoverStalls(f.sctx, provider, pr, nil, resumed)
+				state = restored.transientReruns.stalls[stall.Key]
+				if err != nil || !waiting || out != nil || state.MonitorHead != pr.HeadSHA || !state.At.Equal(resumed) || !state.RemedySpent {
+					t.Fatalf("replacement grace=%v %#v err=%v state=%#v", waiting, out, err, state)
+				}
+				_, out, err = restored.recoverStalls(f.sctx, provider, pr, nil, resumed.Add(stallReplacementGrace+time.Second))
+				if err != nil || out == nil || !out.NeedsApproval || provider.calls != 0 || f.localHead(t) != pr.HeadSHA {
+					t.Fatalf("replacement handoff=%#v err=%v calls=%d", out, err, provider.calls)
+				}
+			})
+		}
 	}
 }

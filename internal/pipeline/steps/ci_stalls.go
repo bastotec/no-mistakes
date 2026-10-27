@@ -25,6 +25,8 @@ type stallRecoveryState struct {
 	Affected    []string    `json:"affected,omitempty"`
 	Detail      string      `json:"detail,omitempty"`
 	MonitorHead string      `json:"monitor_head,omitempty"`
+	RemedySpent bool        `json:"remedy_spent,omitempty"`
+	Retained    bool        `json:"retained,omitempty"`
 }
 
 func (s *CIStep) saveStall(sctx *pipeline.StepContext, key string, state stallRecoveryState) error {
@@ -102,7 +104,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 		return true, nil, err
 	}
 	for key, state := range s.transientReruns.stalls {
-		if state.Phase != "remedy" && state.Phase != "human-repair" {
+		if state.Phase != "remedy" && state.Phase != "human-repair" && state.Phase != "replacement" {
 			continue
 		}
 		published, err := publishedBranchHead(sctx)
@@ -124,7 +126,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 	currentStalls := make([]scm.CIStall, 0, len(inspection.Stalls))
 	for _, stall := range inspection.Stalls {
 		state := s.transientReruns.stalls[stall.Key]
-		if state.MonitorHead != "" && stall.HeadSHA != state.MonitorHead {
+		if (state.Phase == "remedy" || state.Phase == "human-repair" || state.Phase == "replacement") && state.MonitorHead != "" && stall.HeadSHA != state.MonitorHead {
 			continue
 		}
 		currentStalls = append(currentStalls, stall)
@@ -149,6 +151,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 			}
 		}
 		if resolved {
+			state.RemedySpent = state.RemedySpent || state.Phase == "remedy" || state.Phase == "remedy-reserved" || state.Phase == "human-repair"
 			state.Phase = "recovered"
 			state.Detail += "; current-head replacement executed conclusively"
 			if err := s.saveStall(sctx, key, state); err != nil {
@@ -264,7 +267,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 			continue
 		}
 		canRemedy := stall.Class == "queued-no-runner" || stall.Class == "provider-no-start"
-		if canRemedy && (state.Phase == "rerun" || state.Phase == "rerun-reserved" || state.Phase == "recovered" || state.Phase == "remedy-requested") {
+		if canRemedy && !state.RemedySpent && (state.Phase == "rerun" || state.Phase == "rerun-reserved" || state.Phase == "recovered" || state.Phase == "replacement" || state.Phase == "remedy-requested") {
 			state.Stall = stall
 			state.Phase = "remedy-requested"
 			state.Detail += "; workload runner repair required"
@@ -337,7 +340,7 @@ func (s *CIStep) withoutHandedOffStallChecks(checks []scm.Check) []scm.Check {
 	return remaining
 }
 
-func (s *CIStep) monitorSelectedStallRepairs(sctx *pipeline.StepContext, findings Findings) error {
+func (s *CIStep) retainSelectedStallRepairs(sctx *pipeline.StepContext, findings Findings) error {
 	for _, finding := range findings.Items {
 		if !strings.HasPrefix(finding.ID, workloadFindingPrefix) {
 			continue
@@ -347,10 +350,46 @@ func (s *CIStep) monitorSelectedStallRepairs(sctx *pipeline.StepContext, finding
 		if !ok || state.Phase != "handed-off" {
 			continue
 		}
-		state.Phase = "human-repair"
+		state.Retained = true
+		if err := s.saveStall(sctx, key, state); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *CIStep) settleStallRepairs(sctx *pipeline.StepContext) error {
+	if len(s.transientReruns.stalls) == 0 {
+		return nil
+	}
+	findings, err := types.ParseFindingsJSON(sctx.PreviousFindings)
+	if err != nil && sctx.PreviousFindings != "" {
+		return err
+	}
+	selected := map[string]bool{}
+	for _, finding := range findings.Items {
+		if strings.HasPrefix(finding.ID, workloadFindingPrefix) {
+			selected[strings.TrimPrefix(finding.ID, workloadFindingPrefix)] = true
+		}
+	}
+	for key, state := range s.transientReruns.stalls {
+		switch {
+		case state.Phase == "remedy-reserved":
+			state.Phase = "remedy"
+			state.RemedySpent = true
+			state.Detail += "; workload runner repair committed"
+		case state.Phase == "handed-off" && (state.Retained || selected[key]):
+			state.Phase = "human-repair"
+			state.RemedySpent = true
+			state.Detail += "; selected repair committed, awaiting replacement monitoring"
+		case state.Phase == "recovered" || state.Phase == "rerun" || state.Phase == "rerun-reserved" || state.Phase == "remedy-requested":
+			state.Phase = "replacement"
+		case state.Phase != "remedy" && state.Phase != "human-repair" && state.Phase != "replacement":
+			continue
+		}
+		state.Retained = false
 		state.MonitorHead = ""
 		state.At = time.Time{}
-		state.Detail += "; selected repair committed, awaiting replacement monitoring"
 		if err := s.saveStall(sctx, key, state); err != nil {
 			return err
 		}
@@ -504,6 +543,7 @@ func (s *CIStep) workloadRepair(sctx *pipeline.StepContext, host scm.Host, pr *s
 			return ciRepairResult{}, true, err
 		}
 		state.Phase = "remedy-reserved"
+		state.RemedySpent = true
 		state.At = time.Now()
 		state.Detail += "; one workload repair reserved"
 		if err := s.saveStall(sctx, key, state); err != nil {
@@ -522,12 +562,6 @@ func (s *CIStep) workloadRepair(sctx *pipeline.StepContext, host scm.Host, pr *s
 			return ciRepairResult{}, true, err
 		}
 		repair, err := s.commitRepair(sctx, "move stalled CI job to workload runner")
-		if err != nil {
-			return repair, true, err
-		}
-		state.Phase = "remedy"
-		state.Detail += "; workload runner repair committed"
-		err = s.saveStall(sctx, key, state)
 		return repair, true, err
 	}
 	return ciRepairResult{}, false, nil

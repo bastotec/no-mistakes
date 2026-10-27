@@ -89,6 +89,9 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	fixCompletedAt := completionTimesForTargets(s.observedCompletedAt, targets.Checks)
 	repair, err := s.autoFixCI(sctx, host, pr, targets)
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
+		if err := s.retainSelectedStallRepairs(sctx, targets.Findings); err != nil {
+			return nil, err
+		}
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}
 	if outcome := ciFixAgentBudgetOutcome(sctx, issueDesc, err); outcome != nil {
@@ -109,9 +112,6 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		return nil, nil
 	}
 	if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
-		if err := s.monitorSelectedStallRepairs(sctx, targets.Findings); err != nil {
-			return nil, err
-		}
 		s.lastFixedChecks = fixKey
 		s.lastFixedCompletedAt = fixCompletedAt
 		s.pendingFixSummary = repair.Summary
@@ -688,14 +688,20 @@ func ciRepairPolicyDescription(sctx *pipeline.StepContext) string {
 // the two paths differ in whether the repair is published now or held until
 // Review has approved it.
 func (s *CIStep) recordRepair(sctx *pipeline.StepContext, headSHA string) (ciRepairResult, error) {
+	var repair ciRepairResult
+	var err error
 	if ciRevalidatesRepairs(sctx) {
-		return s.recordLocalRepair(sctx, headSHA)
-	}
-	if reason := ciRepairContinuityGap(sctx, headSHA); reason != "" {
+		repair, err = s.recordLocalRepair(sctx, headSHA)
+	} else if reason := ciRepairContinuityGap(sctx, headSHA); reason != "" {
 		sctx.Log(fmt.Sprintf("cannot prove the repaired head continues the reviewed head: %s; revalidating from Review instead of publishing", reason))
-		return s.recordLocalRepair(sctx, headSHA)
+		repair, err = s.recordLocalRepair(sctx, headSHA)
+	} else {
+		repair, err = s.publishRepair(sctx, headSHA)
 	}
-	return s.publishRepair(sctx, headSHA)
+	if err == nil && repair.HeadAdvanced {
+		err = s.settleStallRepairs(sctx)
+	}
+	return repair, err
 }
 
 // ciRepairContinuityGap returns why the repaired head cannot be proven to
