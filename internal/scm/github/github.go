@@ -161,19 +161,10 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	// Only this read-only probe is retried. Reuse the host and command factory
-	// (including its selected forge account/environment); never switch accounts
-	// or invoke an auth flow to recover a network failure.
-	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-	defer cancel()
-	for attempt := 0; ; attempt++ {
-		cmd := h.cmd(ctx, "gh", authArgs...)
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		err := cmd.Run()
-		if err == nil {
-			return nil
-		}
+	cmd := h.cmd(ctx, "gh", authArgs...)
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
 		// Keep timeout / missing-binary failures distinct from auth failure so a
 		// cancelled reconcile context is not reported as "log in again".
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -186,19 +177,8 @@ func (h *Host) Available(ctx context.Context) error {
 			return fmt.Errorf("gh CLI is not on PATH: %w", err)
 		}
 		detail := strings.TrimSpace(stderr.String())
-		transient := ghAuthTransportFailure(detail)
-		if transient && attempt < 2 {
-			timer := time.NewTimer(200 * time.Millisecond)
-			select {
-			case <-ctx.Done():
-				timer.Stop()
-				return fmt.Errorf("gh auth status interrupted: %w", ctx.Err())
-			case <-timer.C:
-				continue
-			}
-		}
 		label := "gh auth status failed"
-		if transient {
+		if ghAuthTransportFailure(detail) {
 			label = "gh auth status transport failure"
 		} else if ghAuthRejected(detail) {
 			label = "gh CLI is not authenticated"
@@ -208,6 +188,7 @@ func (h *Host) Available(ctx context.Context) error {
 		}
 		return fmt.Errorf("%s: %w", label, err)
 	}
+	return nil
 }
 
 // gh can print "Failed to log in" for network errors too, alongside successful
