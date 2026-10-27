@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"path"
@@ -207,8 +208,18 @@ func (h *Host) noStartAnnotation(ctx context.Context, run stallRun, check scm.Ch
 // CIStalls reads structural execution/runner facts and provider-authored
 // annotations, never repository log prose. Workflow bytes are pinned to the
 // execution's head, not a moving default branch.
-func (h *Host) CIStalls(ctx context.Context, checks []scm.Check, now time.Time) ([]scm.CIStall, error) {
-	var result []scm.CIStall
+func (h *Host) CIStalls(ctx context.Context, checks []scm.Check, now time.Time) (scm.CIStallInspection, error) {
+	var result scm.CIStallInspection
+	type runMetadata struct {
+		run  stallRun
+		jobs []stallJob
+	}
+	type workflowMetadata struct {
+		workflow stallWorkflow
+		err      error
+	}
+	runs := map[string]runMetadata{}
+	workflows := map[string]workflowMetadata{}
 	for _, check := range checks {
 		if check.Bucket == scm.CheckBucketPass || check.Bucket == scm.CheckBucketSkip || check.Bucket == scm.CheckBucketAwaitingApproval {
 			continue
@@ -217,14 +228,19 @@ func (h *Host) CIStalls(ctx context.Context, checks []scm.Check, now time.Time) 
 		if !ok {
 			continue
 		}
-		var run stallRun
-		if err := h.stallAPI(ctx, "repos/"+h.repoSlug()+"/actions/runs/"+runID, &run); err != nil {
-			return nil, err
+		metadata, seen := runs[runID]
+		if !seen {
+			if err := h.stallAPI(ctx, "repos/"+h.repoSlug()+"/actions/runs/"+runID, &metadata.run); err != nil {
+				return result, err
+			}
+			var err error
+			metadata.jobs, err = h.stallJobs(ctx, runID)
+			if err != nil {
+				return result, err
+			}
+			runs[runID] = metadata
 		}
-		jobs, err := h.stallJobs(ctx, runID)
-		if err != nil {
-			return nil, err
-		}
+		run, jobs := metadata.run, metadata.jobs
 		var job *stallJob
 		for i := range jobs {
 			if (jobID != "" && strconv.FormatInt(jobs[i].ID, 10) == jobID) || (jobID == "" && jobs[i].Name == check.Name) {
@@ -238,13 +254,19 @@ func (h *Host) CIStalls(ctx context.Context, checks []scm.Check, now time.Time) 
 		if job == nil || len(job.Steps) == 0 {
 			noStart, err := h.noStartAnnotation(ctx, run, check, job)
 			if err != nil {
-				return nil, err
+				return result, err
 			}
 			if noStart {
 				class = "provider-no-start"
 			}
 		}
-		workflow, workflowErr := h.stallWorkflow(ctx, run)
+		workflowKey := run.Path + "@" + run.HeadSHA
+		cachedWorkflow, seen := workflows[workflowKey]
+		if !seen {
+			cachedWorkflow.workflow, cachedWorkflow.err = h.stallWorkflow(ctx, run)
+			workflows[workflowKey] = cachedWorkflow
+		}
+		workflow, workflowErr := cachedWorkflow.workflow, cachedWorkflow.err
 		if job != nil {
 			var budget time.Duration
 			if workflowErr == nil {
@@ -261,12 +283,24 @@ func (h *Host) CIStalls(ctx context.Context, checks []scm.Check, now time.Time) 
 				jobKey = id
 			}
 		}
+		stall := scm.CIStall{Key: run.Path + "/" + check.Name, Class: class, Reason: class, Check: check, WorkflowPath: run.Path, JobKey: jobKey, HeadSHA: run.HeadSHA, Active: run.Status != "completed"}
 		if class == "" {
+			if job != nil && job.Status == "completed" && job.Conclusion == "failure" {
+				for _, raw := range job.Steps {
+					var step struct {
+						Number     int    `json:"number"`
+						Status     string `json:"status"`
+						Conclusion string `json:"conclusion"`
+					}
+					if json.Unmarshal(raw, &step) == nil && step.Number > 1 && step.Status == "completed" && (step.Conclusion == "success" || step.Conclusion == "failure") {
+						result.Executed = append(result.Executed, stall)
+						break
+					}
+				}
+			}
 			continue
 		}
-		// No-start workflows have no job link; rerun the failed workflow using the
-		// existing run-level fallback rather than inventing a job database id.
-		result = append(result, scm.CIStall{Key: run.Path + "/" + check.Name, Class: class, Reason: class, Check: check, WorkflowPath: run.Path, JobKey: jobKey, HeadSHA: run.HeadSHA, Active: run.Status != "completed"})
+		result.Stalls = append(result.Stalls, stall)
 	}
 	return result, nil
 }
@@ -289,51 +323,96 @@ func (h *Host) WorkloadRecoveryAllowed(ctx context.Context) (bool, error) {
 	return repo.Private && strings.EqualFold(repo.FullName, h.repoSlug()), nil
 }
 
-func (h *Host) RecoverCIStall(ctx context.Context, stall scm.CIStall, now time.Time) ([]string, error) {
-	runID, _, ok := h.actionsRerunTarget(stall.Check.Link)
+func (h *Host) PlanCIStallRecovery(ctx context.Context, stall scm.CIStall, now time.Time) ([]scm.CIStall, error) {
+	runID, selectedJobID, ok := h.actionsRerunTarget(stall.Check.Link)
 	if !ok {
 		return nil, fmt.Errorf("stalled job has no rerun target")
 	}
-	var affected []string
+	if !stall.Active {
+		return []scm.CIStall{stall}, nil
+	}
+	var run stallRun
+	if err := h.stallAPI(ctx, "repos/"+h.repoSlug()+"/actions/runs/"+runID, &run); err != nil {
+		return nil, err
+	}
+	if run.HeadSHA != stall.HeadSHA || run.Path != stall.WorkflowPath {
+		return nil, fmt.Errorf("workflow identity changed before cancellation")
+	}
+	jobs, err := h.stallJobs(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	workflow, err := h.stallWorkflow(ctx, run)
+	if err != nil {
+		return nil, err
+	}
+	if selectedJobID == "" {
+		return nil, fmt.Errorf("%w: active workflow requires an exact job target", scm.ErrCIRecoveryUnsafe)
+	}
+	affected := []scm.CIStall{stall}
+	activeJobs := 0
+	webHost := h.host
+	if webHost == "" {
+		webHost = "github.com"
+	}
+	for _, job := range jobs {
+		if job.Status == "completed" {
+			continue
+		}
+		jobKey, budget := workflowJob(workflow, job.Name)
+		class := classifyStalledJob(job, budget, now)
+		if class == "" {
+			return nil, fmt.Errorf("%w: %q", scm.ErrCIRecoveryUnsafe, job.Name)
+		}
+		check := scm.Check{Name: job.Name, WorkflowID: stall.Check.WorkflowID, Bucket: scm.CheckBucketPending, Link: fmt.Sprintf("https://%s/%s/actions/runs/%s/job/%d", webHost, h.repoSlug(), runID, job.ID)}
+		activeJobs++
+		if strconv.FormatInt(job.ID, 10) != selectedJobID {
+			affected = append(affected, scm.CIStall{Key: run.Path + "/" + job.Name, Class: class, Reason: class, Check: check, WorkflowPath: run.Path, JobKey: jobKey, HeadSHA: run.HeadSHA, Active: true})
+		}
+	}
+	if activeJobs == 0 {
+		return nil, fmt.Errorf("active workflow has no proven stalled jobs; not cancelling")
+	}
+	return affected, nil
+}
+
+func (h *Host) RecoverCIStall(ctx context.Context, plan []scm.CIStall, now time.Time) error {
+	if len(plan) == 0 {
+		return fmt.Errorf("empty CI recovery plan")
+	}
+	stall := plan[0]
+	runID, _, ok := h.actionsRerunTarget(stall.Check.Link)
+	if !ok {
+		return fmt.Errorf("stalled job has no rerun target")
+	}
 	if stall.Active {
-		var run stallRun
-		if err := h.stallAPI(ctx, "repos/"+h.repoSlug()+"/actions/runs/"+runID, &run); err != nil {
-			return nil, err
-		}
-		if run.HeadSHA != stall.HeadSHA {
-			return nil, fmt.Errorf("workflow head changed before cancellation")
-		}
-		jobs, err := h.stallJobs(ctx, runID)
+		fresh, err := h.PlanCIStallRecovery(ctx, stall, now)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		workflow, err := h.stallWorkflow(ctx, run)
-		if err != nil {
-			return nil, err
+		if len(fresh) != len(plan) {
+			return fmt.Errorf("%w: affected jobs changed", scm.ErrCIRecoveryUnsafe)
 		}
-		for _, job := range jobs {
-			if job.Status == "completed" {
-				continue
+		for _, current := range fresh {
+			found := false
+			for _, reserved := range plan {
+				if current.Key == reserved.Key && current.Check.Link == reserved.Check.Link && current.HeadSHA == reserved.HeadSHA {
+					found = true
+				}
 			}
-			_, budget := workflowJob(workflow, job.Name)
-			if classifyStalledJob(job, budget, now) == "" {
-				return nil, fmt.Errorf("%w: %q", scm.ErrCIRecoveryUnsafe, job.Name)
+			if !found {
+				return fmt.Errorf("%w: affected jobs changed", scm.ErrCIRecoveryUnsafe)
 			}
-			affected = append(affected, job.Name)
-		}
-		if len(affected) == 0 {
-			return nil, fmt.Errorf("active workflow has no proven stalled jobs; not cancelling")
 		}
 		args := append([]string{"run", "cancel", runID}, h.repoArgs()...)
 		if _, err := h.cmd(ctx, "gh", args...).CombinedOutput(); err != nil {
-			return nil, fmt.Errorf("cancel stalled workflow: %w", err)
+			return fmt.Errorf("cancel stalled workflow: %w", err)
 		}
-		// Cancellation is asynchronous. A bounded wait avoids a rejected rerun
-		// request racing the cancellation; a timeout hands off rather than retrying.
 		settled := false
 		for i := 0; i < 15; i++ {
+			var run stallRun
 			if err := h.stallAPI(ctx, "repos/"+h.repoSlug()+"/actions/runs/"+runID, &run); err != nil {
-				return affected, err
+				return err
 			}
 			if run.Status == "completed" {
 				settled = true
@@ -341,13 +420,19 @@ func (h *Host) RecoverCIStall(ctx context.Context, stall scm.CIStall, now time.T
 			}
 			select {
 			case <-ctx.Done():
-				return affected, ctx.Err()
+				return ctx.Err()
 			case <-time.After(time.Second):
 			}
 		}
 		if !settled {
-			return affected, fmt.Errorf("workflow cancellation did not settle before rerun")
+			return fmt.Errorf("workflow cancellation did not settle before rerun")
 		}
 	}
-	return affected, h.RerunCheck(ctx, nil, stall.Check)
+	var failures []error
+	for _, affected := range plan {
+		if err := h.RerunCheck(ctx, nil, affected.Check); err != nil {
+			failures = append(failures, err)
+		}
+	}
+	return errors.Join(failures...)
 }

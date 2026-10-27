@@ -81,9 +81,6 @@ func stallFinding(key string, state stallRecoveryState, action string) Finding {
 	if action == types.ActionAskUser {
 		severity = types.FindingSeverityWarning
 	}
-	if action == types.ActionAutoFix {
-		severity = types.FindingSeverityError
-	}
 	description := fmt.Sprintf("CI stall %s: %s (%s): %s", state.Stall.Class, state.Stall.Check.Name, state.Phase, state.Detail)
 	if len(state.Affected) > 0 {
 		description += "; workflow cancellation affected jobs: " + strings.Join(state.Affected, ", ")
@@ -91,47 +88,76 @@ func stallFinding(key string, state stallRecoveryState, action string) Finding {
 	return Finding{ID: workloadFindingPrefix + key, Severity: severity, Action: action, Category: types.FindingCategoryCICheck, Check: state.Stall.Check.Name, CheckID: state.Stall.Check.ProviderID, Description: description}
 }
 
-func stallOutcome(key string, state stallRecoveryState, action string) *pipeline.StepOutcome {
-	return ciObservationOutcome(Findings{Summary: "CI stall recovery: " + state.Phase, Items: []Finding{stallFinding(key, state, action)}})
-}
-
 // recoverStalls runs before ordinary failure classification. Its persisted
 // reservation is separate from configurable transient reruns: a stalled job
 // earns exactly one attempt, including across daemon restarts and new heads.
-func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, checks []scm.Check, now time.Time) (bool, *pipeline.StepOutcome, error) {
+func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *scm.PR, checks []scm.Check, now time.Time) (bool, *pipeline.StepOutcome, error) {
 	provider, ok := host.(scm.CIStallRecovery)
 	if !ok {
 		return false, nil, nil
 	}
-	stalls, err := provider.CIStalls(sctx.Ctx, checks, now)
+	inspection, err := provider.CIStalls(sctx.Ctx, checks, now)
 	if err != nil {
-		return false, nil, err
+		return true, nil, err
 	}
 	byKey := map[string]scm.CIStall{}
-	for _, stall := range stalls {
+	for _, stall := range inspection.Stalls {
 		byKey[stall.Key] = stall
 	}
-	// Recovery is only established by a green check from the current head,
-	// never by disappearance, cancellation, or an unrelated same-named sibling.
 	for key, state := range s.transientReruns.stalls {
+		if state.Phase == "recovered" {
+			continue
+		}
+		resolved := false
 		for _, check := range checks {
-			if check.Name == state.Stall.Check.Name && check.WorkflowID == state.Stall.Check.WorkflowID && check.Bucket == scm.CheckBucketPass && state.Phase != "recovered" && state.Phase != "handed-off" {
-				state.Phase = "recovered"
-				state.Detail += "; current-head check passed"
-				if err := s.saveStall(sctx, key, state); err != nil {
-					return false, nil, err
-				}
+			if check.Name == state.Stall.Check.Name && check.WorkflowID == state.Stall.Check.WorkflowID && check.Bucket == scm.CheckBucketPass {
+				resolved = true
+			}
+		}
+		for _, executed := range inspection.Executed {
+			previous, current := state.Stall.Check, executed.Check
+			changed := current.Link != previous.Link || executed.HeadSHA != state.Stall.HeadSHA || current.CompletedAt.After(previous.CompletedAt) || (current.ExecutionID != "" && previous.ExecutionID != "" && current.ExecutionID != previous.ExecutionID)
+			if executed.Key == key && executed.HeadSHA == sctx.Run.HeadSHA && changed {
+				resolved = true
+			}
+		}
+		if resolved {
+			state.Phase = "recovered"
+			state.Detail += "; current-head replacement executed conclusively"
+			if err := s.saveStall(sctx, key, state); err != nil {
+				return true, nil, err
 			}
 		}
 	}
-	for _, stall := range stalls {
+	for key, state := range s.transientReruns.stalls {
+		if _, present := byKey[key]; present || state.Phase == "recovered" || state.Phase == "handed-off" || now.Sub(state.At) < stallReplacementGrace {
+			continue
+		}
+		pending := false
+		for _, check := range checks {
+			if check.Name == state.Stall.Check.Name && check.WorkflowID == state.Stall.Check.WorkflowID && check.Bucket == scm.CheckBucketPending {
+				pending = true
+			}
+		}
+		if !pending {
+			inspection.Stalls = append(inspection.Stalls, state.Stall)
+			byKey[key] = state.Stall
+		}
+	}
+	processed := map[string]bool{}
+	waiting := false
+	var handoffs []Finding
+	for _, stall := range inspection.Stalls {
+		if processed[stall.Key] {
+			continue
+		}
 		state, spent := s.transientReruns.stalls[stall.Key]
 		if !spent && s.transientReruns.used(stall.Check.Name) > 0 {
 			state = stallRecoveryState{Stall: stall, Phase: "rerun", At: now, Detail: "existing transient rerun consumed this job's one automatic retry"}
 			if err := s.saveStall(sctx, stall.Key, state); err != nil {
 				return true, nil, err
 			}
-			return true, nil, nil
+			spent = true
 		}
 		if !spent {
 			published, err := publishedBranchHead(sctx)
@@ -141,54 +167,91 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, checks
 			if published != sctx.Run.HeadSHA || stall.HeadSHA != published {
 				return true, ciRerunHeadMismatchOutcome(sctx.Run.HeadSHA, published), nil
 			}
-			state = stallRecoveryState{Stall: stall, Phase: "rerun-reserved", At: now, Detail: "one targeted rerun reserved"}
-			if err := s.saveStall(sctx, stall.Key, state); err != nil {
-				return true, nil, err
+			plan, planErr := provider.PlanCIStallRecovery(sctx.Ctx, stall, now)
+			if planErr == nil && len(plan) == 0 {
+				planErr = fmt.Errorf("provider returned an empty recovery plan")
 			}
-			affected, err := provider.RecoverCIStall(sctx.Ctx, stall, now)
-			state.Affected = affected
-			if err != nil {
-				state.Detail = "targeted rerun failed: " + err.Error()
-			} else {
-				state.Detail = "one targeted rerun requested"
+			for _, affected := range plan {
+				if _, used := s.transientReruns.stalls[affected.Key]; used || s.transientReruns.used(affected.Check.Name) > 0 {
+					planErr = fmt.Errorf("affected job %q has already spent its retry", affected.Check.Name)
+				}
+				if affected.HeadSHA != published {
+					planErr = fmt.Errorf("affected job head changed")
+				}
 			}
-			state.Phase = "rerun"
-			if errors.Is(err, scm.ErrCIRecoveryUnsafe) {
-				state.Phase = "handed-off"
-			}
-			if err := s.saveStall(sctx, stall.Key, state); err != nil {
-				return true, nil, err
-			}
-			sctx.Log(stallFinding(stall.Key, state, types.ActionNoOp).Description)
-			if state.Phase == "handed-off" {
-				return true, stallOutcome(stall.Key, state, types.ActionAskUser), nil
-			}
-			// Even a rejected rerun spent its budget. Do not try again on this poll.
-			return true, nil, nil
-		}
-		if state.Phase == "recovered" { // A later stall shares the already-spent allowance.
-			state.Stall = stall
-		}
-		if state.Phase == "handed-off" {
-			return true, stallOutcome(stall.Key, state, types.ActionAskUser), nil
-		}
-		if now.Sub(state.At) < stallReplacementGrace {
-			return true, nil, nil
-		}
-		canRemedy := stall.Class == "queued-no-runner" || stall.Class == "provider-no-start"
-		if canRemedy && (state.Phase == "rerun" || state.Phase == "rerun-reserved" || state.Phase == "recovered" || state.Phase == "remedy-requested") {
-			allowed, err := provider.WorkloadRecoveryAllowed(sctx.Ctx)
-			if err != nil {
-				return true, nil, err
-			}
-			if allowed && stall.JobKey != "" {
-				state.Stall = stall
-				state.Phase = "remedy-requested"
-				state.Detail += "; workload runner repair required"
+			if planErr != nil {
+				state = stallRecoveryState{Stall: stall, Phase: "handed-off", At: now, Detail: "safe targeted rerun unavailable: " + planErr.Error()}
 				if err := s.saveStall(sctx, stall.Key, state); err != nil {
 					return true, nil, err
 				}
-				return true, stallOutcome(stall.Key, state, types.ActionAutoFix), nil
+				continue
+			}
+			var names []string
+			for _, affected := range plan {
+				names = append(names, affected.Check.Name)
+			}
+			for _, affected := range plan {
+				reservation := stallRecoveryState{Stall: affected, Phase: "rerun-reserved", At: now, Detail: "one targeted rerun reserved"}
+				if stall.Active {
+					reservation.Affected = names
+				}
+				if err := s.saveStall(sctx, affected.Key, reservation); err != nil {
+					return true, nil, err
+				}
+			}
+			recoveryErr := provider.RecoverCIStall(sctx.Ctx, plan, now)
+			for _, affected := range plan {
+				processed[affected.Key] = true
+				reservation := s.transientReruns.stalls[affected.Key]
+				reservation.Phase = "rerun"
+				reservation.Detail = "one targeted rerun requested"
+				if recoveryErr != nil {
+					reservation.Detail = "targeted rerun failed: " + recoveryErr.Error()
+				}
+				if errors.Is(recoveryErr, scm.ErrCIRecoveryUnsafe) {
+					reservation.Phase = "handed-off"
+				}
+				if err := s.saveStall(sctx, affected.Key, reservation); err != nil {
+					return true, nil, err
+				}
+				sctx.Log(stallFinding(affected.Key, reservation, types.ActionNoOp).Description)
+			}
+			waiting = true
+		}
+	}
+	for _, stall := range inspection.Stalls {
+		state := s.transientReruns.stalls[stall.Key]
+		if state.Phase == "handed-off" {
+			continue
+		}
+		if now.Sub(state.At) < stallReplacementGrace {
+			waiting = true
+			continue
+		}
+		canRemedy := stall.Class == "queued-no-runner" || stall.Class == "provider-no-start"
+		if canRemedy && (state.Phase == "rerun" || state.Phase == "rerun-reserved" || state.Phase == "recovered" || state.Phase == "remedy-requested") {
+			state.Stall = stall
+			state.Phase = "remedy-requested"
+			state.Detail += "; workload runner repair required"
+			if err := s.saveStall(sctx, stall.Key, state); err != nil {
+				return true, nil, err
+			}
+			findings := Findings{Items: []Finding{stallFinding(stall.Key, state, types.ActionNoOp)}}
+			repair, _, repairErr := s.workloadRepair(sctx, host, pr, findings)
+			if outcome := pipeline.ProtectedPathOutcome(repairErr); outcome != nil {
+				return true, outcome, nil
+			}
+			if repairErr == nil && repair.HeadAdvanced {
+				s.pendingFixSummary = repair.Summary
+				s.pendingRepairPublish = true
+				if repair.Revalidate {
+					return true, &pipeline.StepOutcome{RestartFrom: types.StepReview, Findings: sctx.DeferredFindings}, nil
+				}
+				return true, nil, nil
+			}
+			state = s.transientReruns.stalls[stall.Key]
+			if repairErr != nil {
+				state.Detail += "; workload repair failed: " + repairErr.Error()
 			}
 		}
 		state.Phase = "handed-off"
@@ -196,37 +259,28 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, checks
 		if err := s.saveStall(sctx, stall.Key, state); err != nil {
 			return true, nil, err
 		}
-		return true, stallOutcome(stall.Key, state, types.ActionAskUser), nil
 	}
-	// An accepted rerun can disappear from the rollup or finish cancelled rather
-	// than produce another detectable stall. Bound that wait too.
 	for key, state := range s.transientReruns.stalls {
-		if state.Phase == "recovered" || state.Phase == "handed-off" {
-			continue
-		}
-		if _, present := byKey[key]; present {
+		if _, present := byKey[key]; present || state.Phase == "recovered" || state.Phase == "handed-off" {
 			continue
 		}
 		if now.Sub(state.At) < stallReplacementGrace {
-			return true, nil, nil
+			waiting = true
 		}
-		pending := false
-		for _, check := range checks {
-			if check.Name == state.Stall.Check.Name && check.WorkflowID == state.Stall.Check.WorkflowID && check.Bucket == scm.CheckBucketPending {
-				pending = true
-			}
-		}
-		if pending {
-			continue
-		} // a newly running job is governed by its own budget
-		state.Phase = "handed-off"
-		state.Detail += "; no successful replacement observed after recovery"
-		if err := s.saveStall(sctx, key, state); err != nil {
-			return true, nil, err
-		}
-		return true, stallOutcome(key, state, types.ActionAskUser), nil
 	}
-	return false, nil, nil
+	if waiting {
+		return true, nil, nil
+	}
+	for key, state := range s.transientReruns.stalls {
+		if state.Phase == "handed-off" {
+			handoffs = append(handoffs, stallFinding(key, state, types.ActionAskUser))
+		}
+	}
+	if len(handoffs) > 0 {
+		sort.Slice(handoffs, func(i, j int) bool { return handoffs[i].ID < handoffs[j].ID })
+		return true, ciObservationOutcome(Findings{Summary: "CI stall recovery needs attention", Items: handoffs}), nil
+	}
+	return waiting, nil, nil
 }
 
 func (s *CIStep) appendStallFindings(outcome *pipeline.StepOutcome) {
@@ -324,7 +378,7 @@ func (s *CIStep) workloadRepair(sctx *pipeline.StepContext, host scm.Host, pr *s
 		key := strings.TrimPrefix(finding.ID, workloadFindingPrefix)
 		state, ok := s.transientReruns.stalls[key]
 		if !ok || state.Phase != "remedy-requested" {
-			return ciRepairResult{}, true, fmt.Errorf("workload recovery is not authorized by durable findings")
+			return ciRepairResult{}, false, nil
 		}
 		provider, ok := host.(scm.CIStallRecovery)
 		if !ok {
@@ -337,6 +391,10 @@ func (s *CIStep) workloadRepair(sctx *pipeline.StepContext, host scm.Host, pr *s
 		if err := historyConstraintRefusal(sctx, host, pr); err != nil {
 			return ciRepairResult{}, true, err
 		}
+		if err := sctx.DB.SetRunPushActive(sctx.Run.ID, true); err != nil {
+			return ciRepairResult{}, true, err
+		}
+		defer func() { _ = sctx.DB.SetRunPushActive(sctx.Run.ID, false) }()
 		published, err := publishedBranchHead(sctx)
 		if err != nil || published != sctx.Run.HeadSHA || state.Stall.HeadSHA != published {
 			return ciRepairResult{}, true, fmt.Errorf("workload recovery head changed")

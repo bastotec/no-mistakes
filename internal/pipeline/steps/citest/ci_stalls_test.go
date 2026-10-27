@@ -17,10 +17,11 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/types"
 )
 
-func TestCIStep_ProviderNoStartRetriesOnceThenReportsRecovery(t *testing.T) {
+func TestCIStep_ProviderNoStartRecoveryRestoresReadiness(t *testing.T) {
 	t.Parallel()
 	dir, upstream, base, head := setupCIRerunRepo(t)
 	env, logFile := stepstest.FakeCIGHLoggedSequence(t, "OPEN", []string{
+		`[{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/test/repo/actions/runs/900/job/900"}]`,
 		`[{"name":"build","state":"FAILURE","bucket":"fail","link":"https://github.com/test/repo/actions/runs/900/job/901"}]`,
 		`[{"name":"build","state":"SUCCESS","bucket":"pass","link":"https://github.com/test/repo/actions/runs/900/job/902"}]`,
 	}, "", "")
@@ -55,7 +56,15 @@ func TestCIStep_ProviderNoStartRetriesOnceThenReportsRecovery(t *testing.T) {
 	polls := 0
 	step := (&steps.CIStep{}).SetWaitForNextPoll(func(ctx context.Context, _ time.Duration) error {
 		polls++
-		if polls == 2 {
+		run, err := sctx.DB.GetRun(sctx.Run.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantReady := polls != 2
+		if (run.CIReadyAt != nil) != wantReady {
+			t.Fatalf("poll %d readiness=%v, want %v", polls, run.CIReadyAt, wantReady)
+		}
+		if polls == 3 {
 			cancel()
 			return ctx.Err()
 		}

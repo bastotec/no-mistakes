@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -65,7 +67,8 @@ func TestCIStallsProviderAnnotationsAndPinnedWorkflow(t *testing.T) {
 				"gh api repos/test/repo/contents/.github/workflows/ci.yml?ref=abc": {stdout: string(workflow)},
 			}
 			host := New(githubTestCmdFactory(responses), func() bool { return true }, "", "test/repo")
-			stalls, err := host.CIStalls(context.Background(), []scm.Check{{Name: "build", Bucket: scm.CheckBucketPending, Link: job.HTMLURL}}, now)
+			inspection, err := host.CIStalls(context.Background(), []scm.Check{{Name: "build", Bucket: scm.CheckBucketPending, Link: job.HTMLURL}}, now)
+			stalls := inspection.Stalls
 			if err != nil || len(stalls) != 1 {
 				t.Fatalf("stalls=%#v err=%v", stalls, err)
 			}
@@ -116,7 +119,7 @@ func TestRecoverCIStallNeverCancelsNonStalledSibling(t *testing.T) {
 		"gh api repos/test/repo/actions/runs/1/jobs?per_page=100&page=1":   {stdout: string(jobs)},
 		"gh api repos/test/repo/contents/.github/workflows/ci.yml?ref=abc": {stdout: string(workflow)},
 	}), func() bool { return true }, "", "test/repo")
-	_, err := host.RecoverCIStall(context.Background(), scm.CIStall{HeadSHA: "abc", Active: true, Check: scm.Check{Link: "https://github.com/test/repo/actions/runs/1/job/2"}}, now)
+	_, err := host.PlanCIStallRecovery(context.Background(), scm.CIStall{HeadSHA: "abc", WorkflowPath: ".github/workflows/ci.yml", Active: true, Check: scm.Check{Link: "https://github.com/test/repo/actions/runs/1/job/2"}}, now)
 	if !errors.Is(err, scm.ErrCIRecoveryUnsafe) {
 		t.Fatalf("unsafe cancellation err=%v", err)
 	}
@@ -132,5 +135,101 @@ func TestNoStartMessageOnlyProviderInfrastructurePhrases(t *testing.T) {
 		if noStartMessage(message) {
 			t.Fatal(message)
 		}
+	}
+}
+
+func TestCIStallsCachesMetadataPerInspectionAndRecognizesExecutedFailure(t *testing.T) {
+	now := time.Now()
+	jobs := []stallJob{}
+	checks := []scm.Check{}
+	for i := 2; i < 5; i++ {
+		link := fmt.Sprintf("https://github.com/test/repo/actions/runs/1/job/%d", i)
+		jobs = append(jobs, stallJob{ID: int64(i), Name: fmt.Sprintf("job%d", i), Status: "completed", Conclusion: "failure", HTMLURL: link, Steps: []json.RawMessage{json.RawMessage(`{"number":1,"status":"completed","conclusion":"success"}`), json.RawMessage(`{"number":2,"status":"completed","conclusion":"failure"}`)}})
+		checks = append(checks, scm.Check{Name: fmt.Sprintf("job%d", i), Link: link, Bucket: scm.CheckBucketFail})
+	}
+	payload, _ := json.Marshal(map[string]any{"jobs": jobs})
+	workflow, _ := json.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("jobs:\n  job2: {}\n  job3: {}\n  job4: {}\n"))})
+	responses := map[string]githubTestResponse{
+		"gh api repos/test/repo/actions/runs/1":                            {stdout: `{"head_sha":"abc","path":".github/workflows/ci.yml","status":"completed"}`},
+		"gh api repos/test/repo/actions/runs/1/jobs?per_page=100&page=1":   {stdout: string(payload)},
+		"gh api repos/test/repo/contents/.github/workflows/ci.yml?ref=abc": {stdout: string(workflow)},
+	}
+	counts := map[string]int{}
+	host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		counts[strings.Join(args, " ")]++
+		return githubTestCmdFactory(responses)(ctx, name, args...)
+	}, func() bool { return true }, "", "test/repo")
+	for round := 1; round <= 2; round++ {
+		inspection, err := host.CIStalls(context.Background(), checks, now)
+		if err != nil || len(inspection.Stalls) != 0 || len(inspection.Executed) != len(checks) {
+			t.Fatalf("inspection=%#v err=%v", inspection, err)
+		}
+		if len(counts) != 3 {
+			t.Fatalf("unexpected metadata reads: %#v", counts)
+		}
+		for key, count := range counts {
+			if count != round {
+				t.Fatalf("%s read %d times after %d inspections", key, count, round)
+			}
+		}
+	}
+}
+
+func TestRecoverCIStallCancelsOnceAndRetriesEveryReservedJob(t *testing.T) {
+	now := time.Now()
+	jobs, _ := json.Marshal(map[string]any{"jobs": []stallJob{
+		{ID: 2, Name: "build", Status: "queued", CreatedAt: now.Add(-time.Hour)},
+		{ID: 3, Name: "test", Status: "queued", CreatedAt: now.Add(-time.Hour)},
+	}})
+	workflow, _ := json.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("jobs:\n  build:\n    runs-on: ubuntu-latest\n  test:\n    runs-on: ubuntu-latest\n"))})
+	responses := map[string]githubTestResponse{
+		"gh api repos/test/repo/actions/runs/1":                            {stdout: `{"head_sha":"abc","path":".github/workflows/ci.yml","status":"in_progress"}`},
+		"gh api repos/test/repo/actions/runs/1/jobs?per_page=100&page=1":   {stdout: string(jobs)},
+		"gh api repos/test/repo/contents/.github/workflows/ci.yml?ref=abc": {stdout: string(workflow)},
+		"gh run cancel 1 --repo test/repo":                                 {},
+		"gh run rerun --job 2 --repo test/repo":                            {},
+		"gh run rerun --job 3 --repo test/repo":                            {},
+	}
+	var mutations []string
+	host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		key := strings.TrimSpace(name + " " + strings.Join(args, " "))
+		cmd := githubTestCmdFactory(responses)(ctx, name, args...)
+		if strings.HasPrefix(key, "gh run ") {
+			mutations = append(mutations, key)
+			if key == "gh run cancel 1 --repo test/repo" {
+				responses["gh api repos/test/repo/actions/runs/1"] = githubTestResponse{stdout: `{"head_sha":"abc","path":".github/workflows/ci.yml","status":"completed"}`}
+			}
+		}
+		return cmd
+	}, func() bool { return true }, "", "test/repo")
+	stall := scm.CIStall{HeadSHA: "abc", WorkflowPath: ".github/workflows/ci.yml", Active: true, Check: scm.Check{Name: "build", Link: "https://github.com/test/repo/actions/runs/1/job/2"}}
+	plan, err := host.PlanCIStallRecovery(context.Background(), stall, now)
+	if err != nil || len(plan) != 2 || len(mutations) != 0 {
+		t.Fatalf("plan=%#v err=%v mutations=%#v", plan, err, mutations)
+	}
+	if err := host.RecoverCIStall(context.Background(), plan, now); err != nil {
+		t.Fatal(err)
+	}
+	want := "gh run cancel 1 --repo test/repo\ngh run rerun --job 2 --repo test/repo\ngh run rerun --job 3 --repo test/repo"
+	if strings.Join(mutations, "\n") != want {
+		t.Fatalf("mutations=%#v", mutations)
+	}
+}
+
+func TestRecoverCIStallRevalidatesAffectedJobsBeforeCancellation(t *testing.T) {
+	now := time.Now()
+	jobs, _ := json.Marshal(map[string]any{"jobs": []stallJob{
+		{ID: 2, Name: "build", Status: "queued", CreatedAt: now.Add(-time.Hour)},
+		{ID: 3, Name: "test", Status: "queued", CreatedAt: now.Add(-time.Hour)},
+	}})
+	workflow, _ := json.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("jobs:\n  build: {}\n  test: {}\n"))})
+	host := New(githubTestCmdFactory(map[string]githubTestResponse{
+		"gh api repos/test/repo/actions/runs/1":                            {stdout: `{"head_sha":"abc","path":".github/workflows/ci.yml","status":"in_progress"}`},
+		"gh api repos/test/repo/actions/runs/1/jobs?per_page=100&page=1":   {stdout: string(jobs)},
+		"gh api repos/test/repo/contents/.github/workflows/ci.yml?ref=abc": {stdout: string(workflow)},
+	}), func() bool { return true }, "", "test/repo")
+	plan := []scm.CIStall{{Key: ".github/workflows/ci.yml/build", HeadSHA: "abc", WorkflowPath: ".github/workflows/ci.yml", Active: true, Check: scm.Check{Name: "build", Link: "https://github.com/test/repo/actions/runs/1/job/2"}}}
+	if err := host.RecoverCIStall(context.Background(), plan, now); !errors.Is(err, scm.ErrCIRecoveryUnsafe) {
+		t.Fatalf("incomplete reservations authorized cancellation: %v", err)
 	}
 }

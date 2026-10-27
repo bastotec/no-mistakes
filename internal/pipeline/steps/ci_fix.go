@@ -87,13 +87,7 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 	previousHeadSHA := sctx.Run.HeadSHA
 	fixKey := encodeLastFixedChecks(targets.Checks, targets.MergeConflict)
 	fixCompletedAt := completionTimesForTargets(s.observedCompletedAt, targets.Checks)
-	repair, workloadHandled, err := s.workloadRepair(sctx, host, pr, targets.Findings)
-	if !workloadHandled {
-		repair, err = s.autoFixCI(sctx, host, pr, targets)
-	}
-	if workloadHandled && err != nil && pipeline.ProtectedPathOutcome(err) == nil {
-		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
-	}
+	repair, err := s.autoFixCI(sctx, host, pr, targets)
 	if outcome := pipeline.ProtectedPathOutcome(err); outcome != nil {
 		return ciTerminalRepairOutcome(outcome, targets.Findings, sctx.DeferredFindings), nil
 	}

@@ -614,7 +614,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 		} else {
 			consecutiveCheckErrs = 0
 			if !mergeConflict {
-				waiting, recoveryOutcome, recoveryErr := s.recoverStalls(sctx, host, checks, now())
+				waiting, recoveryOutcome, recoveryErr := s.recoverStalls(sctx, host, pr, checks, now())
 				if recoveryErr != nil {
 					sctx.Log(fmt.Sprintf("warning: could not inspect CI stall recovery: %v", recoveryErr))
 				}
@@ -624,6 +624,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				}
 				if waiting {
 					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
 					if err := waitForPoll(); err != nil {
 						return nil, err
 					}
