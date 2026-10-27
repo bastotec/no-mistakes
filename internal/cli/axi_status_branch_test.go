@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -211,6 +212,93 @@ func TestAxiStatusForeignRunGateHelpCannotMutateCurrentBranch(t *testing.T) {
 	if strings.Contains(out, "axi respond") {
 		t.Fatalf("foreign-run gate status offered a branch-scoped mutation command:\n%s", out)
 	}
+}
+
+// runID := explicit --run <id> selection: the doc string above states the
+// explicitly selected gate for the run is inspection-only, because `axi
+// respond` has no --run selector; the operator must run it from a worktree
+// that is the run's own branch. Verify the commit exactly matches the
+// authoritative submitted head recorded by the run, and fail closed with a
+// refusals list when it does not. On a match the help prescribes the
+// approve response for this gate: approval is evidence-aware, never a plain
+// pass, and answering the CURRENT gate is how its stale rollup verdict
+// (e.g. cancelled checks later replaced provider-side at the same head)
+// gets reconciled and released.
+func TestAxiStatusExplicitRunStaleCIGatePrescribesHeadVerifiedApprove(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	run(t, repoDir, "git", "checkout", "-b", "feature/mine")
+	chdir(t, repoDir)
+	revHead := func() string {
+		t.Helper()
+		raw, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+		if err != nil {
+			t.Fatalf("rev-parse HEAD: %v", err)
+		}
+		return strings.TrimSpace(string(raw))
+	}
+	headSHA := revHead()
+
+	mine, err := database.InsertRun(repo.ID, "feature/mine", headSHA, "main")
+	if err != nil {
+		t.Fatalf("insert current-branch run: %v", err)
+	}
+	if err := database.UpdateRunStatus(mine.ID, types.RunRunning); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	if err := database.UpdateRunPRURL(mine.ID, "https://github.com/example/repo/pull/7"); err != nil {
+		t.Fatalf("record PR URL: %v", err)
+	}
+	ci, err := database.InsertStepResult(mine.ID, types.StepCI)
+	if err != nil {
+		t.Fatalf("insert ci step: %v", err)
+	}
+	if err := database.UpdateStepStatus(ci.ID, types.StepStatusFixReview); err != nil {
+		t.Fatalf("park ci step at fix_review: %v", err)
+	}
+	stale := findingsJSON(t, nil, "provider cancelled checks; rerunning")
+	if err := database.SetStepFindings(ci.ID, stale); err != nil {
+		t.Fatalf("set stale ci findings: %v", err)
+	}
+
+	out := axiStatusOutput(t, mine.ID)
+	for _, want := range []string{
+		"gate:",
+		"inspection-only",
+		"axi logs --run " + mine.ID + " --step ci --full",
+		"Worktree head equals the run's submitted head " + headSHA,
+		"run `no-mistakes axi respond --action approve` from the branch's own worktree",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("explicit stale-CI-gate status missing %q:\n%s", want, out)
+		}
+	}
+	if !strings.Contains(out, "inspection-only") {
+		t.Fatalf("gate lost its inspection-only label:\n%s", out)
+	}
+
+	// A mismatched worktree head must never learn the approve prescription.
+	t.Run("mismatch", func(t *testing.T) {
+		run(t, repoDir, "git", "commit", "--allow-empty", "-m", "advance")
+		mismatch := revHead()
+		if mismatch == headSHA {
+			t.Fatal("expected advanced head to differ")
+		}
+		dirty := axiStatusOutput(t, mine.ID)
+		for _, want := range []string{
+			"Worktree head " + mismatch + " does not match the run's submitted head " + headSHA,
+			"respond is refused until the heads match",
+		} {
+			if !strings.Contains(dirty, want) {
+				t.Fatalf("mismatched-head status missing %q:\n%s", want, dirty)
+			}
+		}
+		if strings.Contains(dirty, "respond --action approve") {
+			t.Fatalf("mismatched-head status prescribed approve:\n%s", dirty)
+		}
+		if !strings.Contains(dirty, "inspection-only") {
+			t.Fatalf("mismatched-head gate lost its inspection-only label:\n%s", dirty)
+		}
+	})
 }
 
 func TestAxiStatusExplicitOlderSameBranchRunGateIsInspectionOnly(t *testing.T) {

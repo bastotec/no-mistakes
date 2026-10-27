@@ -169,7 +169,7 @@ func TestIsolatedTestWorkerConfiguredPreparationUsesPrivateGit(t *testing.T) {
 		if got := gitCmd(t, work, "show", ":pending_test.go"); got != "staged bytes" {
 			t.Fatalf("preparation lost staged bytes: %q", got)
 		}
-		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"prepared","tested":["dependency check"],"testing_summary":"dependencies available","artifacts":[],"scenarios":[{"name":"configured command","result":"pass","live":true,"evidence":"dependency check","reason":""}],"verdict":"go"}`)}, nil
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"prepared","tested":["dependency check"],"testing_summary":"dependencies available","artifacts":[],"scenarios":[{"name":"configured command","result":"pass","live":true,"evidence":"dependency check","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, work, base, head, config.Commands{
 		Prepare: preparationCommand(), Test: dependencyExistsCommand() + " && echo baseline > .deps/baseline",
@@ -425,7 +425,7 @@ func TestTestStepOrdinaryRunKeepsAmbientEnvironment(t *testing.T) {
 	t.Setenv("NM_TEST_POSTGRES_ROOT", "")
 	dir, base, head := setupGitRepo(t)
 	ag := &mockAgent{name: "ordinary", runFn: func(context.Context, agent.RunOpts) (*agent.Result, error) {
-		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ordinary","tested":["baseline"],"testing_summary":"baseline","artifacts":[],"scenarios":[{"name":"ordinary","result":"pass","live":true,"evidence":"fixture","reason":""}],"verdict":"go"}`)}, nil
+		return &agent.Result{Output: json.RawMessage(`{"findings":[],"summary":"ordinary","tested":["baseline"],"testing_summary":"baseline","artifacts":[],"scenarios":[{"name":"ordinary","result":"pass","live":true,"evidence":"fixture","reason":""}],"verdict":"go","risk_level":"low","risk_rationale":"driven live at the tested head with nothing untested"}`)}, nil
 	}}
 	sctx := newTestContextWithDBRecords(t, ag, dir, base, head, config.Commands{Test: `test "$UNRECOGNIZED_CREDENTIAL" = ordinary-sentinel`})
 	outcome, err := (&TestStep{}).Execute(sctx)
