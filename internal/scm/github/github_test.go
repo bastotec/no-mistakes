@@ -1786,7 +1786,7 @@ func TestAvailableWrapsAuthFailureWithStderr(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh auth status": {stderr: "github.com\n  X Failed to log in\n", code: 1},
+		"gh auth status": {stderr: "github.com\n  X Failed to log in\n  - The token in default is invalid.\n", code: 1},
 	}), func() bool { return true }, "", "")
 
 	err := host.Available(context.Background())
@@ -1798,6 +1798,78 @@ func TestAvailableWrapsAuthFailureWithStderr(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "Failed to log in") {
 		t.Fatalf("Available() error = %v, want stderr detail", err)
+	}
+}
+
+func TestAvailableProbeFailureClassificationAndRetry(t *testing.T) {
+	t.Parallel()
+	const command = "gh auth status --hostname github.com"
+	const multiAccountTimeout = "github.com\n  ✓ Logged in to github.com account selected (keyring)\n  - Active account: true\n  X Failed to log in to github.com account secondary (keyring)\n  - Get https://api.github.com/: net/http: request canceled (Client.Timeout exceeded while awaiting headers)\n"
+	for _, tc := range []struct {
+		name, detail, want string
+		attempts           int
+		recover            bool
+	}{
+		{"multi-account timeout", multiAccountTimeout, "transport failure", 3, false},
+		{"timeout then success", multiAccountTimeout, "", 2, true},
+		{"connection reset", "read tcp: connection reset by peer", "transport failure", 3, false},
+		{"invalid token", "X Failed to log in\n- The token in default is invalid.", "not authenticated", 1, false},
+		{"not logged in", "You are not logged into any GitHub hosts.", "not authenticated", 1, false},
+		{"unknown failure", "error opening config", "auth status failed", 1, false},
+		{"heading is not proof", "X Failed to log in", "auth status failed", 1, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			calls := 0
+			host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+				calls++
+				response := githubTestResponse{stderr: tc.detail, code: 1}
+				if tc.recover && calls > 1 {
+					response = githubTestResponse{}
+				}
+				// Any host/account-changing command is rejected by the fake.
+				return githubTestCmdFactory(map[string]githubTestResponse{command: response})(ctx, name, args...)
+			}, nil, "github.com", "org/repo")
+			err := host.Available(context.Background())
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), strings.TrimSpace(tc.detail)) {
+				t.Fatalf("Available() = %v, want %q with original detail", err, tc.want)
+			}
+			if tc.want != "not authenticated" && err != nil && strings.Contains(err.Error(), "not authenticated") {
+				t.Fatalf("non-credential failure mislabeled: %v", err)
+			}
+			if calls != tc.attempts {
+				t.Fatalf("calls = %d, want %d", calls, tc.attempts)
+			}
+		})
+	}
+}
+
+func TestAvailableCancellationStopsTransportRetries(t *testing.T) {
+	t.Parallel()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := 0
+	host := New(func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		calls++
+		cmd := githubTestCmdFactory(map[string]githubTestResponse{
+			"gh auth status": {stderr: "TLS handshake timeout", code: 1},
+		})(ctx, name, args...)
+		return cmd
+	}, nil, "", "")
+	go func() {
+		time.Sleep(100 * time.Millisecond)
+		cancel()
+	}()
+	err := host.Available(ctx)
+	if !errors.Is(err, context.Canceled) || strings.Contains(err.Error(), "not authenticated") {
+		t.Fatalf("Available() = %v, want cancellation", err)
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1", calls)
 	}
 }
 

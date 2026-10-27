@@ -161,10 +161,19 @@ func (h *Host) Available(ctx context.Context) error {
 	if h.host != "" {
 		authArgs = append(authArgs, "--hostname", h.host)
 	}
-	cmd := h.cmd(ctx, "gh", authArgs...)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
+	// Only this read-only probe is retried. Reuse the host and command factory
+	// (including its selected forge account/environment); never switch accounts
+	// or invoke an auth flow to recover a network failure.
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	for attempt := 0; ; attempt++ {
+		cmd := h.cmd(ctx, "gh", authArgs...)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			return nil
+		}
 		// Keep timeout / missing-binary failures distinct from auth failure so a
 		// cancelled reconcile context is not reported as "log in again".
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -177,12 +186,64 @@ func (h *Host) Available(ctx context.Context) error {
 			return fmt.Errorf("gh CLI is not on PATH: %w", err)
 		}
 		detail := strings.TrimSpace(stderr.String())
-		if detail != "" {
-			return fmt.Errorf("gh CLI is not authenticated: %s: %w", detail, err)
+		transient := ghAuthTransportFailure(detail)
+		if transient && attempt < 2 {
+			timer := time.NewTimer(200 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return fmt.Errorf("gh auth status interrupted: %w", ctx.Err())
+			case <-timer.C:
+				continue
+			}
 		}
-		return fmt.Errorf("gh CLI is not authenticated: %w", err)
+		label := "gh auth status failed"
+		if transient {
+			label = "gh auth status transport failure"
+		} else if ghAuthRejected(detail) {
+			label = "gh CLI is not authenticated"
+		}
+		if detail != "" {
+			return fmt.Errorf("%s: %s: %w", label, detail, err)
+		}
+		return fmt.Errorf("%s: %w", label, err)
 	}
-	return nil
+}
+
+// gh can print "Failed to log in" for network errors too, alongside successful
+// accounts. That heading alone is not a credential rejection. Transport takes
+// precedence even when another account in the status output has an invalid token.
+func ghAuthTransportFailure(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, marker := range []string{
+		"timeout", "timed out", "context deadline exceeded", "connection reset",
+		"connection refused", "connection timed out", "temporary failure",
+		"no such host", "network is unreachable", "tls handshake", "unexpected eof",
+		"http 502", "http 503", "http 504",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+func ghAuthRejected(detail string) bool {
+	detail = strings.ToLower(detail)
+	for _, line := range strings.Split(detail, "\n") {
+		if strings.Contains(line, "the token in ") && strings.Contains(line, " is invalid") {
+			return true
+		}
+	}
+	for _, marker := range []string{
+		"not logged into", "not logged in", "token is invalid", "token invalid",
+		"invalid token", "bad credentials", "http 401",
+	} {
+		if strings.Contains(detail, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func isMissingExecutable(err error) bool {
