@@ -115,9 +115,134 @@ func stallMonitorContext(t *testing.T, checks string, fixture map[string]any) (*
 	return sctx, logFile
 }
 
+func updateStallMonitorInputs(t *testing.T, sctx *pipeline.StepContext, fixture map[string]any, checks string) {
+	t.Helper()
+	data, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range sctx.Env {
+		name, path, _ := strings.Cut(entry, "=")
+		var content []byte
+		switch name {
+		case "FAKE_CLI_STALL_API":
+			content = data
+		case "FAKE_CLI_CHECKS_PATH":
+			content = []byte(checks)
+		default:
+			continue
+		}
+		if err := os.WriteFile(path, content, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestCIStep_StallRetriesOnceAfterHealthySiblingCompletes(t *testing.T) {
+	t.Parallel()
+	checks := `[{"name":"build","state":"TIMED_OUT","bucket":"fail","link":"https://github.com/test/repo/actions/runs/900/job/901"},{"name":"test","state":"IN_PROGRESS","bucket":"pending","link":"https://github.com/test/repo/actions/runs/900/job/902"}]`
+	now := time.Now()
+	jobs := []map[string]any{
+		{"id": 901, "name": "build", "status": "completed", "conclusion": "timed_out", "steps": []any{map[string]any{"number": 2, "status": "completed", "conclusion": "failure"}}},
+		{"id": 902, "name": "test", "status": "in_progress", "runner_id": 42, "started_at": now.Add(-time.Minute)},
+	}
+	fixture := map[string]any{
+		"repos/test/repo/actions/runs/900/jobs?per_page=100&page=1": map[string]any{"jobs": jobs},
+	}
+	sctx, logFile := stallMonitorContext(t, checks, fixture)
+	fixture["repos/test/repo/actions/runs/900"] = map[string]any{"head_sha": sctx.Run.HeadSHA, "path": ".github/workflows/ci.yml", "status": "in_progress"}
+	fixture["repos/test/repo/contents/.github/workflows/ci.yml?ref="+sctx.Run.HeadSHA] = map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("jobs:\n  build: {}\n  test:\n    timeout-minutes: 30\n"))}
+	updateStallMonitorInputs(t, sctx, fixture, checks)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sctx.Ctx = ctx
+	polls := 0
+	step := (&steps.CIStep{}).SetNow(func() time.Time { return now }).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		polls++
+		if polls == 1 {
+			if strings.Contains(ghLog(t, logFile), "run rerun") || strings.Contains(ghLog(t, logFile), "run cancel") {
+				t.Fatal("healthy sibling allowed a mutation")
+			}
+			persisted, err := sctx.DB.GetRunCIRerunState(sctx.Run.ID)
+			var budget struct {
+				Stalls map[string]struct{ Phase string }
+			}
+			if err != nil || json.Unmarshal([]byte(persisted), &budget) != nil || budget.Stalls[".github/workflows/ci.yml/build"].Phase != "deferred" {
+				t.Fatalf("retry was not durably deferred: %s err=%v", persisted, err)
+			}
+			jobs[1]["status"], jobs[1]["conclusion"] = "completed", "success"
+			fixture["repos/test/repo/actions/runs/900"].(map[string]any)["status"] = "completed"
+			checks = strings.ReplaceAll(checks, `"state":"IN_PROGRESS","bucket":"pending"`, `"state":"SUCCESS","bucket":"pass"`)
+			updateStallMonitorInputs(t, sctx, fixture, checks)
+			now = now.Add(11 * time.Minute)
+		} else {
+			now = now.Add(time.Minute)
+		}
+		if polls == 3 {
+			cancel()
+			return ctx.Err()
+		}
+		return nil
+	})
+	if out, err := step.Execute(sctx); !errors.Is(err, context.Canceled) || out != nil || polls != 3 {
+		t.Fatalf("monitor out=%#v err=%v polls=%d", out, err, polls)
+	}
+	log := ghLog(t, logFile)
+	if strings.Count(log, "run rerun --job 901") != 1 || strings.Contains(log, "run cancel") || strings.Contains(log, "run rerun --job 902") {
+		t.Fatalf("unsafe or duplicated retry: %s", log)
+	}
+}
+
+func TestCIStep_AssignedRunnerSetupFailureRetiresNoStartDiagnosis(t *testing.T) {
+	t.Parallel()
+	checks := `[{"name":"build","state":"FAILURE","bucket":"fail","link":"https://github.com/test/repo/actions/runs/900/job/901"}]`
+	fixture := map[string]any{
+		"repos/test/repo/actions/runs/900/jobs?per_page=100&page=1": map[string]any{"jobs": []any{map[string]any{"id": 901, "name": "build", "status": "completed", "conclusion": "failure", "check_run_url": "https://api.github.com/repos/test/repo/check-runs/903"}}},
+		"repos/test/repo/check-runs/903/annotations?per_page=100":   []any{map[string]string{"message": "recent account payments have failed"}},
+	}
+	sctx, logFile := stallMonitorContext(t, checks, fixture)
+	fixture["repos/test/repo/contents/.github/workflows/ci.yml?ref="+sctx.Run.HeadSHA] = map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("jobs:\n  build:\n    runs-on: ubuntu-latest\n"))}
+	updateStallMonitorInputs(t, sctx, fixture, checks)
+	head := sctx.Run.HeadSHA
+	now := time.Now()
+	polls := 0
+	step := (&steps.CIStep{}).SetNow(func() time.Time { return now }).SetWaitForNextPoll(func(context.Context, time.Duration) error {
+		polls++
+		if polls > 1 {
+			return errors.New("setup failure did not reach ordinary classification")
+		}
+		fixture["repos/test/repo/actions/runs/900/jobs?per_page=100&page=1"] = map[string]any{"jobs": []any{map[string]any{"id": 904, "name": "build", "status": "completed", "conclusion": "failure", "runner_id": 42, "steps": []any{map[string]any{"number": 1, "status": "completed", "conclusion": "failure"}}, "html_url": "https://github.com/test/repo/actions/runs/900/job/904"}}}
+		checks = strings.ReplaceAll(checks, "job/901", "job/904")
+		updateStallMonitorInputs(t, sctx, fixture, checks)
+		now = now.Add(11 * time.Minute)
+		return nil
+	})
+	out, err := step.Execute(sctx)
+	if err != nil || out == nil || !out.AutoFixable || polls != 1 {
+		t.Fatalf("replacement failure out=%#v err=%v polls=%d", out, err, polls)
+	}
+	findings, err := types.ParseFindingsJSON(out.Findings)
+	if err != nil || len(findings.Items) != 2 || findings.Items[0].Action != types.ActionAutoFix || !strings.Contains(findings.Items[0].Description, "job/904") || findings.Items[1].Action != types.ActionNoOp {
+		t.Fatalf("ordinary failure findings=%#v err=%v", findings, err)
+	}
+	persisted, err := sctx.DB.GetRunCIRerunState(sctx.Run.ID)
+	var budget struct {
+		Stalls map[string]struct{ Phase string }
+	}
+	if err != nil || json.Unmarshal([]byte(persisted), &budget) != nil || budget.Stalls[".github/workflows/ci.yml/build"].Phase != "recovered" || sctx.Run.HeadSHA != head {
+		t.Fatalf("stale no-start diagnosis: %s head=%s err=%v", persisted, sctx.Run.HeadSHA, err)
+	}
+	if strings.Count(ghLog(t, logFile), "run rerun --job 901") != 1 || strings.Contains(ghLog(t, logFile), "run rerun --job 904") {
+		t.Fatalf("spent retry replenished: %s", ghLog(t, logFile))
+	}
+	if _, err := os.Stat(filepath.Join(sctx.WorkDir, ".github/workflows/ci.yml")); !os.IsNotExist(err) {
+		t.Fatalf("setup failure attempted a workload rewrite: %v", err)
+	}
+}
+
 func TestCIStep_StallInspectionFailureUsesBoundedReadBudget(t *testing.T) {
 	t.Parallel()
-	for _, endpoint := range []string{"jobs", "annotations"} {
+	for _, endpoint := range []string{"jobs", "annotations", "planning"} {
 		t.Run(endpoint, func(t *testing.T) {
 			fixture := map[string]any{
 				"repos/test/repo/actions/runs/900/jobs?per_page=100&page=1": map[string]any{"jobs": []any{map[string]any{"id": 901, "name": "build", "status": "completed", "conclusion": "failure", "check_run_url": "https://api.github.com/repos/test/repo/check-runs/903"}}},
@@ -127,6 +252,12 @@ func TestCIStep_StallInspectionFailureUsesBoundedReadBudget(t *testing.T) {
 				fixture["repos/test/repo/actions/runs/900/jobs?per_page=100&page=1"] = "provider unavailable"
 			}
 			sctx, _ := stallMonitorContext(t, `[{"name":"build","state":"FAILURE","bucket":"fail","link":"https://github.com/test/repo/actions/runs/900/job/901"}]`, fixture)
+			if endpoint == "planning" {
+				fixture["repos/test/repo/actions/runs/900"].(map[string]any)["status"] = "in_progress"
+				fixture["repos/test/repo/actions/runs/900/jobs?per_page=100&page=1"] = map[string]any{"jobs": []any{map[string]any{"id": 901, "name": "build", "status": "completed", "conclusion": "timed_out", "steps": []any{map[string]any{"number": 1, "status": "completed", "conclusion": "failure"}}}}}
+				fixture["repos/test/repo/contents/.github/workflows/ci.yml?ref="+sctx.Run.HeadSHA] = "provider unavailable"
+				updateStallMonitorInputs(t, sctx, fixture, `[{"name":"build","state":"TIMED_OUT","bucket":"fail","link":"https://github.com/test/repo/actions/runs/900/job/901"}]`)
+			}
 			sctx.DeferredFindings = `{"findings":[{"id":"deferred","severity":"warning","description":"retained decision","action":"ask-user"}]}`
 			polls := 0
 			step := (&steps.CIStep{}).SetWaitForNextPoll(func(context.Context, time.Duration) error {

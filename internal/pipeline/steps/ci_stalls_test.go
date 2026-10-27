@@ -2,7 +2,9 @@ package steps
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -12,6 +14,7 @@ import (
 
 	"github.com/kunchenguid/no-mistakes/internal/agent"
 	"github.com/kunchenguid/no-mistakes/internal/config"
+	"github.com/kunchenguid/no-mistakes/internal/db"
 	"github.com/kunchenguid/no-mistakes/internal/pipeline"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
@@ -23,6 +26,7 @@ type stallTestHost struct {
 	stalls        []scm.CIStall
 	executed      []scm.CIStall
 	plan          []scm.CIStall
+	planErr       error
 	beforeRecover func([]scm.CIStall)
 	allowed       bool
 	calls         int
@@ -33,6 +37,9 @@ func (h *stallTestHost) CIStalls(context.Context, []scm.Check, time.Time) (scm.C
 	return scm.CIStallInspection{Stalls: h.stalls, Executed: h.executed}, nil
 }
 func (h *stallTestHost) PlanCIStallRecovery(_ context.Context, stall scm.CIStall, _ time.Time) ([]scm.CIStall, error) {
+	if h.planErr != nil {
+		return nil, h.planErr
+	}
 	if h.plan != nil {
 		return h.plan, nil
 	}
@@ -95,19 +102,143 @@ func TestCIStallRecoveryDoesNotStarveIndependentWorkflows(t *testing.T) {
 	}
 }
 
-func TestCIStallUnsafeCancellationHandsOffWithoutRemedy(t *testing.T) {
+func TestCIStallUnsafeCancellationDefersWithoutSpendingRetry(t *testing.T) {
+	for _, boundary := range []string{"planning", "before-cancellation"} {
+		t.Run(boundary, func(t *testing.T) {
+			dir, base, head := setupGitRepo(t)
+			sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+			now := time.Now()
+			stall := scm.CIStall{Key: "ci/build", Class: "queued-no-runner", HeadSHA: head, JobKey: "build", Check: scm.Check{Name: "build"}}
+			host := &stallTestHost{stalls: []scm.CIStall{stall}, allowed: true}
+			if boundary == "planning" {
+				host.planErr = scm.ErrCIRecoveryUnsafe
+			} else {
+				host.err = scm.ErrCIRecoveryUnsafe
+			}
+			step := &CIStep{}
+			waiting, out, err := step.recoverStalls(sctx, host, &scm.PR{}, nil, now)
+			if err != nil || !waiting || out != nil {
+				t.Fatalf("unsafe recovery: waiting=%v out=%#v err=%v", waiting, out, err)
+			}
+			restored := &CIStep{}
+			restored.loadRerunBudget(sctx)
+			if state := restored.transientReruns.stalls[stall.Key]; state.Phase != "deferred" || state.RemedySpent {
+				t.Fatalf("deferred retry spent authority: %#v", state)
+			}
+			host.err, host.planErr = nil, nil
+			calls := host.calls
+			waiting, out, err = restored.recoverStalls(sctx, host, &scm.PR{}, nil, now.Add(2*stallReplacementGrace))
+			if err != nil || !waiting || out != nil || host.calls != calls+1 {
+				t.Fatalf("settled retry: waiting=%v out=%#v err=%v calls=%d", waiting, out, err, host.calls)
+			}
+			_, _, err = restored.recoverStalls(sctx, host, &scm.PR{}, nil, now.Add(2*stallReplacementGrace+time.Second))
+			if err != nil || host.calls != calls+1 {
+				t.Fatalf("retry duplicated: err=%v calls=%d", err, host.calls)
+			}
+		})
+	}
+}
+
+func TestCIStallPlanningMetadataFailureLeavesRetryUnspent(t *testing.T) {
 	dir, base, head := setupGitRepo(t)
 	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
-	now := time.Now()
-	stall := scm.CIStall{Key: "ci/build", Class: "queued-no-runner", HeadSHA: head, JobKey: "build", Check: scm.Check{Name: "build"}}
-	host := &stallTestHost{stalls: []scm.CIStall{stall}, allowed: true, err: scm.ErrCIRecoveryUnsafe}
+	stall := scm.CIStall{Key: "ci/build", Class: "running-past-timeout", HeadSHA: head, Check: scm.Check{Name: "build"}}
+	readErr := errors.New("provider metadata unavailable")
+	host := &stallTestHost{stalls: []scm.CIStall{stall}, planErr: readErr}
 	step := &CIStep{}
-	if _, _, err := step.recoverStalls(sctx, host, &scm.PR{}, nil, now); err != nil {
-		t.Fatal(err)
+	_, out, err := step.recoverStalls(sctx, host, &scm.PR{}, nil, time.Now())
+	if !errors.Is(err, readErr) || out != nil || host.calls != 0 || len(step.transientReruns.stalls) != 0 {
+		t.Fatalf("metadata failure: out=%#v err=%v calls=%d state=%#v", out, err, host.calls, step.transientReruns.stalls)
 	}
-	_, out, err := step.recoverStalls(sctx, host, &scm.PR{}, nil, now.Add(time.Second))
-	if err != nil || out == nil || !out.NeedsApproval || !strings.Contains(out.Findings, "non-stalled") {
-		t.Fatalf("unsafe: %#v %v", out, err)
+	host.planErr = nil
+	_, _, err = step.recoverStalls(sctx, host, &scm.PR{}, nil, time.Now())
+	if err != nil || host.calls != 1 {
+		t.Fatalf("retry after metadata recovery: err=%v calls=%d", err, host.calls)
+	}
+}
+
+func TestCIStallSettlementFailurePreservesRevalidation(t *testing.T) {
+	for _, workload := range []bool{false, true} {
+		t.Run(fmt.Sprintf("workload=%v", workload), func(t *testing.T) {
+			f := newCIRepairFixture(t, true, writeCIFix)
+			p := ".github/workflows/ci.yml"
+			if err := os.MkdirAll(filepath.Join(f.dir, ".github/workflows"), 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(f.dir, p), []byte("jobs:\n  build:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo test\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, f.dir, "add", p)
+			gitCmd(t, f.dir, "commit", "-m", "add workflow")
+			gitCmd(t, f.dir, "push", "origin", "feature")
+			head := f.localHead(t)
+			dbPath := filepath.Join(t.TempDir(), "settlement.db")
+			database, err := db.Open(dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = database.Close() })
+			repo, err := database.InsertRepo(f.dir, "https://github.com/test/repo", "main")
+			if err != nil {
+				t.Fatal(err)
+			}
+			run, err := database.InsertRun(repo.ID, "refs/heads/feature", head, f.sctx.Run.BaseSHA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := database.UpdateRunReviewApprovedHeadSHA(run.ID, head); err != nil {
+				t.Fatal(err)
+			}
+			run.ReviewApprovedHeadSHA = &head
+			f.sctx.DB, f.sctx.Repo, f.sctx.Run = database, repo, run
+			row, err := database.InsertStepResult(run.ID, types.StepCI)
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.sctx.StepResultID = row.ID
+			f.sctx.DeferredFindings = `{"findings":[{"id":"deferred","severity":"info","action":"no-op","description":"retain observation"}]}`
+			f.sctx.MarkRunning = func() error {
+				t.Fatal("unpublished repair resumed monitoring")
+				return nil
+			}
+			step := &CIStep{}
+			stall := scm.CIStall{Key: "ci/build", Class: "provider-no-start", HeadSHA: head, WorkflowPath: p, JobKey: "build", Check: scm.Check{Name: "build"}}
+			state := stallRecoveryState{Stall: stall, Phase: "handed-off", At: time.Now().Add(-time.Hour)}
+			if workload {
+				state.Phase = "rerun"
+			}
+			if err := step.saveStall(f.sctx, stall.Key, state); err != nil {
+				t.Fatal(err)
+			}
+			connection, err := sql.Open("sqlite", dbPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer connection.Close()
+			_, err = connection.Exec(`CREATE TRIGGER fail_stall_settlement BEFORE UPDATE OF findings_json ON step_results
+				WHEN (SELECT head_sha FROM runs WHERE id = NEW.run_id) <> '` + head + `'
+				BEGIN SELECT RAISE(FAIL, 'injected stall settlement failure'); END`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var out *pipeline.StepOutcome
+			if workload {
+				_, out, err = step.recoverStalls(f.sctx, &stallTestHost{allowed: true, stalls: []scm.CIStall{stall}}, &scm.PR{HeadSHA: head}, nil, time.Now())
+			} else {
+				f.sctx.PreviousFindings, _ = types.MarshalFindingsJSON(Findings{Items: []Finding{stallFinding(stall.Key, state, types.ActionAskUser)}})
+				out, err = step.repairFromFindings(f.sctx, &completionSnapshotHost{checks: []scm.Check{stall.Check}}, &scm.PR{Number: "42"})
+			}
+			if err != nil || out == nil || out.RestartFrom != types.StepReview || out.Findings != f.sctx.DeferredFindings {
+				t.Fatalf("partial repair outcome=%#v err=%v", out, err)
+			}
+			stored, err := database.GetRun(run.ID)
+			if err != nil || stored.HeadSHA == head || stored.HeadSHA != f.localHead(t) || stored.ReviewApprovedHeadSHA != nil || f.remoteHead(t) != head {
+				t.Fatalf("repair authority: run=%#v err=%v", stored, err)
+			}
+			if !strings.Contains(f.log(), "injected stall settlement failure") {
+				t.Fatalf("settlement did not fail: %s", f.log())
+			}
+		})
 	}
 }
 

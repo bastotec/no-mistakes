@@ -175,6 +175,36 @@ func TestCIStallsCachesMetadataPerInspectionAndRecognizesExecutedFailure(t *test
 	}
 }
 
+func TestCIStallsRecognizesAssignedRunnerSetupExecution(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		runner     int64
+		conclusion string
+		want       int
+	}{
+		{"setup-failed-on-runner", 42, "failure", 1},
+		{"setup-succeeded-on-runner", 42, "success", 1},
+		{"no-assigned-runner", 0, "failure", 0},
+		{"setup-skipped", 42, "skipped", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			link := "https://github.com/test/repo/actions/runs/1/job/2"
+			job := stallJob{ID: 2, Name: "build", Status: "completed", Conclusion: "failure", RunnerID: tc.runner, HTMLURL: link, Steps: []json.RawMessage{json.RawMessage(fmt.Sprintf(`{"number":1,"status":"completed","conclusion":%q}`, tc.conclusion))}}
+			payload, _ := json.Marshal(map[string]any{"jobs": []stallJob{job}})
+			workflow, _ := json.Marshal(map[string]string{"encoding": "base64", "content": base64.StdEncoding.EncodeToString([]byte("jobs:\n  build: {}\n"))})
+			host := New(githubTestCmdFactory(map[string]githubTestResponse{
+				"gh api repos/test/repo/actions/runs/1":                            {stdout: `{"head_sha":"abc","path":".github/workflows/ci.yml","status":"completed"}`},
+				"gh api repos/test/repo/actions/runs/1/jobs?per_page=100&page=1":   {stdout: string(payload)},
+				"gh api repos/test/repo/contents/.github/workflows/ci.yml?ref=abc": {stdout: string(workflow)},
+			}), func() bool { return true }, "", "test/repo")
+			inspection, err := host.CIStalls(context.Background(), []scm.Check{{Name: "build", Bucket: scm.CheckBucketFail, Link: link}}, time.Now())
+			if err != nil || len(inspection.Stalls) != 0 || len(inspection.Executed) != tc.want {
+				t.Fatalf("inspection=%#v err=%v", inspection, err)
+			}
+		})
+	}
+}
+
 func TestRecoverCIStallCancelsOnceAndRetriesEveryReservedJob(t *testing.T) {
 	now := time.Now()
 	jobs, _ := json.Marshal(map[string]any{"jobs": []stallJob{

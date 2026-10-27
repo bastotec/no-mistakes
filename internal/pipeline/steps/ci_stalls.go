@@ -160,7 +160,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 		}
 	}
 	for key, state := range s.transientReruns.stalls {
-		if _, present := byKey[key]; present || state.Phase == "recovered" || state.Phase == "handed-off" || now.Sub(state.At) < stallReplacementGrace {
+		if _, present := byKey[key]; present || state.Phase == "deferred" || state.Phase == "recovered" || state.Phase == "handed-off" || now.Sub(state.At) < stallReplacementGrace {
 			continue
 		}
 		pending := false
@@ -190,6 +190,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 			continue
 		}
 		state, spent := s.transientReruns.stalls[stall.Key]
+		spent = spent && state.Phase != "deferred"
 		if !spent && s.transientReruns.used(stall.Check.Name) > 0 {
 			state = stallRecoveryState{Stall: stall, Phase: "rerun", At: now, Detail: "existing transient rerun consumed this job's one automatic retry"}
 			if err := s.saveStall(sctx, stall.Key, state); err != nil {
@@ -206,11 +207,22 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 				return true, ciRerunHeadMismatchOutcome(sctx.Run.HeadSHA, published), nil
 			}
 			plan, planErr := provider.PlanCIStallRecovery(sctx.Ctx, stall, now)
-			if planErr == nil && len(plan) == 0 {
+			if errors.Is(planErr, scm.ErrCIRecoveryUnsafe) {
+				state = stallRecoveryState{Stall: stall, Phase: "deferred", At: now, Detail: "targeted rerun deferred: " + planErr.Error()}
+				if err := s.saveStall(sctx, stall.Key, state); err != nil {
+					return true, nil, err
+				}
+				waiting = true
+				continue
+			}
+			if planErr != nil {
+				return true, nil, planErr
+			}
+			if len(plan) == 0 {
 				planErr = fmt.Errorf("provider returned an empty recovery plan")
 			}
 			for _, affected := range plan {
-				if _, used := s.transientReruns.stalls[affected.Key]; used || s.transientReruns.used(affected.Check.Name) > 0 {
+				if saved, used := s.transientReruns.stalls[affected.Key]; (used && saved.Phase != "deferred") || s.transientReruns.used(affected.Check.Name) > 0 {
 					planErr = fmt.Errorf("affected job %q has already spent its retry", affected.Check.Name)
 				}
 				if affected.HeadSHA != published {
@@ -247,7 +259,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 					reservation.Detail = "targeted rerun failed: " + recoveryErr.Error()
 				}
 				if errors.Is(recoveryErr, scm.ErrCIRecoveryUnsafe) {
-					reservation.Phase = "handed-off"
+					reservation.Phase = "deferred"
 				}
 				if err := s.saveStall(sctx, affected.Key, reservation); err != nil {
 					return true, nil, err
@@ -259,7 +271,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 	}
 	for _, stall := range inspection.Stalls {
 		state := s.transientReruns.stalls[stall.Key]
-		if state.Phase == "handed-off" {
+		if state.Phase == "handed-off" || state.Phase == "deferred" {
 			continue
 		}
 		if now.Sub(state.At) < stallReplacementGrace {
@@ -279,11 +291,17 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 			if outcome := pipeline.ProtectedPathOutcome(repairErr); outcome != nil {
 				return true, outcome, nil
 			}
-			if repairErr == nil && repair.HeadAdvanced {
+			if repair.HeadAdvanced {
 				s.pendingFixSummary = repair.Summary
 				s.pendingRepairPublish = true
 				if repair.Revalidate {
+					if repairErr != nil {
+						sctx.Log(fmt.Sprintf("warning: CI repair recorded for revalidation with unsettled recovery state: %v", repairErr))
+					}
 					return true, &pipeline.StepOutcome{RestartFrom: types.StepReview, Findings: sctx.DeferredFindings}, nil
+				}
+				if repairErr != nil {
+					return true, nil, repairErr
 				}
 				return true, nil, nil
 			}
@@ -300,7 +318,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 		}
 	}
 	for key, state := range s.transientReruns.stalls {
-		if _, present := byKey[key]; present || state.Phase == "recovered" || state.Phase == "handed-off" {
+		if _, present := byKey[key]; present || state.Phase == "deferred" || state.Phase == "recovered" || state.Phase == "handed-off" {
 			continue
 		}
 		if now.Sub(state.At) < stallReplacementGrace {

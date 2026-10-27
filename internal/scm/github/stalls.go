@@ -292,7 +292,7 @@ func (h *Host) CIStalls(ctx context.Context, checks []scm.Check, now time.Time) 
 						Status     string `json:"status"`
 						Conclusion string `json:"conclusion"`
 					}
-					if json.Unmarshal(raw, &step) == nil && step.Number > 1 && step.Status == "completed" && (step.Conclusion == "success" || step.Conclusion == "failure") {
+					if json.Unmarshal(raw, &step) == nil && (step.Number > 1 || (job.RunnerID != 0 && step.Number > 0)) && step.Status == "completed" && (step.Conclusion == "success" || step.Conclusion == "failure") {
 						result.Executed = append(result.Executed, stall)
 						break
 					}

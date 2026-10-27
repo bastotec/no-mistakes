@@ -551,7 +551,7 @@ func (s *CIStep) rerunTransientChecks(sctx *pipeline.StepContext, host scm.Host,
 	for _, check := range candidates {
 		stallSpent := false
 		for _, state := range s.transientReruns.stalls {
-			if state.Stall.Check.Name == check.Name && state.Stall.Check.WorkflowID == check.WorkflowID {
+			if state.Phase != "deferred" && state.Stall.Check.Name == check.Name && state.Stall.Check.WorkflowID == check.WorkflowID {
 				stallSpent = true
 			}
 		}

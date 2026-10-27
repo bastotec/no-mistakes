@@ -104,7 +104,11 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		sctx.Log(fmt.Sprintf("CI repair push is not settled: %v", err))
 		return ciRepairParkOutcome(targets.Findings, sctx.DeferredFindings, err.Error()), nil
 	}
-	if err != nil {
+	if err != nil && repair.HeadAdvanced && repair.Revalidate {
+		sctx.Log(fmt.Sprintf("warning: CI repair recorded for revalidation with unsettled recovery state: %v", err))
+	} else if err != nil && repair.HeadAdvanced {
+		return nil, err
+	} else if err != nil {
 		// An ordinary fix failure is cheap to repeat and often works the next
 		// time: the next settled observation re-emits the findings and the
 		// executor retries while auto_fix.ci allows.
