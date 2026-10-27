@@ -109,6 +109,9 @@ func (s *CIStep) repairFromFindings(sctx *pipeline.StepContext, host scm.Host, p
 		return nil, nil
 	}
 	if repair.HeadAdvanced || sctx.Run.HeadSHA != previousHeadSHA {
+		if err := s.monitorSelectedStallRepairs(sctx, targets.Findings); err != nil {
+			return nil, err
+		}
 		s.lastFixedChecks = fixKey
 		s.lastFixedCompletedAt = fixCompletedAt
 		s.pendingFixSummary = repair.Summary

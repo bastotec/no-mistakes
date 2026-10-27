@@ -612,15 +612,34 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
 			}
 		} else {
-			consecutiveCheckErrs = 0
+			var stallFindings []Finding
 			if !mergeConflict {
 				waiting, recoveryOutcome, recoveryErr := s.recoverStalls(sctx, host, pr, checks, now())
 				if recoveryErr != nil {
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
 					sctx.Log(fmt.Sprintf("warning: could not inspect CI stall recovery: %v", recoveryErr))
+					consecutiveCheckErrs++
+					if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+						return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(recoveryErr), Findings{}, sctx.DeferredFindings), nil
+					}
+					if err := waitForPoll(); err != nil {
+						return nil, err
+					}
+					continue
 				}
+				consecutiveCheckErrs = 0
 				if recoveryOutcome != nil {
 					clearCIMonitorReady(sctx)
-					return recoveryOutcome, nil
+					if waiting {
+						return recoveryOutcome, nil
+					}
+					findings, err := types.ParseFindingsJSON(recoveryOutcome.Findings)
+					if err != nil {
+						return nil, err
+					}
+					stallFindings = findings.Items
+					checks = s.withoutHandedOffStallChecks(checks)
 				}
 				if waiting {
 					clearCIMonitorReady(sctx)
@@ -630,6 +649,8 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 					}
 					continue
 				}
+			} else {
+				consecutiveCheckErrs = 0
 			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
@@ -721,7 +742,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			sort.Strings(unresolvedCancelled)
 			sort.Strings(awaitingRerun)
 			hasFailures := len(failing) > 0
-			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0 || len(awaitingApproval) > 0
+			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0 || len(awaitingApproval) > 0 || len(stallFindings) > 0
 			// Checks held for approval never start on their own, so waiting
 			// for the rest to finish only delays the one thing a human can do.
 			// Anything the fix agent could repair still waits for the full set.
@@ -786,6 +807,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						awaitingApproval:    awaitingApproval,
 						forkPR:              strings.TrimSpace(sctx.Repo.ForkURL) != "",
 					})
+					findings.Items = append(findings.Items, stallFindings...)
+					if len(stallFindings) > 0 {
+						findings.Summary = strings.TrimPrefix(findings.Summary+"; CI stall recovery needs attention", "; ")
+					}
 					sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
 					return ciObservationOutcome(findings), nil
 				}

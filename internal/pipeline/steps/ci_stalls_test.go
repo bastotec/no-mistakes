@@ -3,6 +3,7 @@ package steps
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/kunchenguid/no-mistakes/internal/config"
 	"github.com/kunchenguid/no-mistakes/internal/scm"
 	"github.com/kunchenguid/no-mistakes/internal/types"
+	"gopkg.in/yaml.v3"
 )
 
 type stallTestHost struct {
@@ -115,7 +117,22 @@ func TestRewriteWorkloadRunnerOnlyChangesSelectedLine(t *testing.T) {
 	if err != nil || string(got) != want {
 		t.Fatalf("rewrite %q %v, want %q", got, err, want)
 	}
-	for _, runner := range []string{"\n      - ubuntu-latest", "${{ matrix.os }}", "&runner ubuntu-latest", "{group: private}", "[self-hosted, linux, workload]"} {
+	var workflow struct {
+		Jobs map[string]struct {
+			RunsOn any `yaml:"runs-on"`
+			Steps  []struct {
+				Run string `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(got, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	labels, ok := workflow.Jobs["build"].RunsOn.([]any)
+	if !ok || len(labels) != 3 || labels[0] != "self-hosted" || labels[1] != "linux" || labels[2] != "workload" || len(workflow.Jobs["build"].Steps) != 1 || workflow.Jobs["build"].Steps[0].Run != "go test ./..." || workflow.Jobs["other"].RunsOn != "windows-latest" {
+		t.Fatalf("workflow semantics changed: %#v", workflow)
+	}
+	for _, runner := range []string{"\n      - ubuntu-latest", "${{ matrix.os }}", "&runner ubuntu-latest", "{group: private}", "[self-hosted, linux, workload]", "|-\n      ubuntu-latest"} {
 		data := strings.Replace(original, "ubuntu-latest", runner, 1)
 		if _, err := rewriteWorkloadRunner([]byte(data), "build"); err == nil {
 			t.Fatalf("accepted unsupported runner %q", runner)
@@ -123,6 +140,47 @@ func TestRewriteWorkloadRunnerOnlyChangesSelectedLine(t *testing.T) {
 	}
 	if _, err := rewriteWorkloadRunner([]byte(original), "missing"); err == nil {
 		t.Fatal("accepted missing job")
+	}
+}
+
+func TestRewriteWorkloadRunnerRejectsFlowMappings(t *testing.T) {
+	for _, workflow := range []string{
+		"jobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: \"echo hello\"}]}\n",
+		"jobs: {build: {runs-on: ubuntu-latest, steps: [{run: \"echo hello\"}]}}\n",
+		"{jobs: {build: {runs-on: ubuntu-latest, steps: [{run: \"echo hello\"}]}}}\n",
+	} {
+		if result, err := rewriteWorkloadRunner([]byte(workflow), "build"); err == nil || result != nil {
+			t.Fatalf("unsafe rewrite returned %q, %v", result, err)
+		}
+	}
+}
+
+func TestWorkloadRepairRejectsFlowMappingWithoutMutation(t *testing.T) {
+	dir, base, _ := setupGitRepo(t)
+	p := ".github/workflows/ci.yml"
+	workflow := []byte("jobs:\n  build: {runs-on: ubuntu-latest, steps: [{run: \"echo hello\"}]}\n")
+	if err := os.MkdirAll(filepath.Join(dir, ".github/workflows"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, p), workflow, 0644); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, dir, "add", p)
+	gitCmd(t, dir, "commit", "-m", "flow workflow")
+	head := gitCmd(t, dir, "rev-parse", "HEAD")
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	step := &CIStep{}
+	state := stallRecoveryState{Phase: "remedy-requested", Stall: scm.CIStall{WorkflowPath: p, JobKey: "build", HeadSHA: head}}
+	if err := step.saveStall(sctx, "build", state); err != nil {
+		t.Fatal(err)
+	}
+	repair, handled, err := step.workloadRepair(sctx, &stallTestHost{allowed: true}, &scm.PR{}, Findings{Items: []Finding{{ID: workloadFindingPrefix + "build"}}})
+	if !handled || err == nil || repair.HeadAdvanced {
+		t.Fatalf("repair=%#v handled=%v err=%v", repair, handled, err)
+	}
+	got, err := os.ReadFile(filepath.Join(dir, p))
+	if err != nil || string(got) != string(workflow) || gitCmd(t, dir, "rev-parse", "HEAD") != head || gitStatusPorcelain(t, dir) != "" {
+		t.Fatalf("refused workflow was mutated: %q, %v", got, err)
 	}
 }
 
@@ -193,7 +251,12 @@ func TestCIStallMandatoryWorkloadRepairWithZeroCIBudget(t *testing.T) {
 		t.Fatal("remedy not persisted")
 	}
 	host.stalls[0].HeadSHA = sctx.Run.HeadSHA
-	_, out, err = step.recoverStalls(sctx, host, &scm.PR{}, nil, now.Add(2*stallReplacementGrace))
+	resumed := now.Add(2 * stallReplacementGrace)
+	_, out, err = step.recoverStalls(sctx, host, &scm.PR{}, nil, resumed)
+	if err != nil || out != nil || host.calls != 0 {
+		t.Fatalf("replacement grace=%#v err=%v calls=%d", out, err, host.calls)
+	}
+	_, out, err = step.recoverStalls(sctx, host, &scm.PR{}, nil, resumed.Add(stallReplacementGrace+time.Second))
 	if err != nil || out == nil || !out.NeedsApproval || host.calls != 0 {
 		t.Fatalf("handoff=%#v err=%v calls=%d", out, err, host.calls)
 	}
@@ -306,5 +369,90 @@ func TestCIStallHandedOffFindingAllowsHumanRepair(t *testing.T) {
 	out, err := step.repairFromFindings(sctx, host, &scm.PR{Number: "42"})
 	if err != nil || out == nil || len(ag.calls) != 1 || step.transientReruns.stalls[stall.Key].Phase != "handed-off" {
 		t.Fatalf("human repair out=%#v err=%v calls=%d", out, err, len(ag.calls))
+	}
+}
+
+func TestCIStallPublishedHumanRepairMonitorsSelectedReplacement(t *testing.T) {
+	for _, revalidate := range []bool{false, true} {
+		t.Run(fmt.Sprint(revalidate), func(t *testing.T) {
+			f := newCIRepairFixture(t, revalidate, writeCIFix)
+			sctx := f.sctx
+			now := time.Now()
+			stall := scm.CIStall{Key: "ci/test", Class: "queued-no-runner", HeadSHA: f.headSHA, Check: scm.Check{Name: "test", WorkflowID: 1}}
+			state := stallRecoveryState{Stall: stall, Phase: "handed-off", At: now.Add(-time.Hour), Detail: "automatic allowances exhausted"}
+			step := &CIStep{}
+			if err := step.saveStall(sctx, stall.Key, state); err != nil {
+				t.Fatal(err)
+			}
+			other := state
+			other.Stall.Key, other.Stall.Check.Name = "ci/other", "other"
+			if err := step.saveStall(sctx, other.Stall.Key, other); err != nil {
+				t.Fatal(err)
+			}
+			finding := stallFinding(stall.Key, state, types.ActionAskUser)
+			sctx.PreviousFindings, _ = types.MarshalFindingsJSON(Findings{Items: []Finding{finding}})
+			host := &completionSnapshotHost{checks: []scm.Check{stall.Check}}
+			out, err := step.repairFromFindings(sctx, host, &scm.PR{Number: "42"})
+			if err != nil || (revalidate && (out == nil || out.RestartFrom != types.StepReview)) || (!revalidate && out != nil) {
+				t.Fatalf("repair=%#v err=%v", out, err)
+			}
+			if revalidate {
+				gitCmd(t, f.dir, "push", "origin", "feature")
+			}
+			if f.remoteHead(t) != sctx.Run.HeadSHA || sctx.Run.HeadSHA == f.headSHA {
+				t.Fatal("replacement head not published")
+			}
+			restored := &CIStep{}
+			restored.loadRerunBudget(sctx)
+			if restored.transientReruns.stalls[stall.Key].Phase != "human-repair" || restored.transientReruns.stalls[other.Stall.Key].Phase != "handed-off" {
+				t.Fatalf("selected transition=%#v", restored.transientReruns.stalls)
+			}
+			pending := stall.Check
+			pending.Bucket = scm.CheckBucketPending
+			provider := &stallTestHost{allowed: true}
+			resumed := now.Add(time.Hour)
+			waiting, out, err := restored.recoverStalls(sctx, provider, &scm.PR{HeadSHA: sctx.Run.HeadSHA}, []scm.Check{pending}, resumed)
+			if err != nil || !waiting || out != nil || provider.calls != 0 {
+				t.Fatalf("replacement monitoring waiting=%v out=%#v err=%v", waiting, out, err)
+			}
+			provider.stalls = []scm.CIStall{stall}
+			provider.stalls[0].HeadSHA = sctx.Run.HeadSHA
+			_, out, err = restored.recoverStalls(sctx, provider, &scm.PR{HeadSHA: sctx.Run.HeadSHA}, []scm.Check{pending}, resumed.Add(stallReplacementGrace+time.Second))
+			if err != nil || out == nil || !out.NeedsApproval || provider.calls != 0 || restored.transientReruns.stalls[stall.Key].Phase != "handed-off" || gitCmd(t, f.dir, "rev-parse", "HEAD") != sctx.Run.HeadSHA {
+				t.Fatalf("spent allowances restored: out=%#v err=%v calls=%d", out, err, provider.calls)
+			}
+		})
+	}
+}
+
+func TestCIStallRevalidationArmsGraceOnCurrentPublishedHead(t *testing.T) {
+	dir, base, head := setupGitRepo(t)
+	sctx := newTestContextWithDBRecords(t, &mockAgent{name: "test"}, dir, base, head, config.Commands{})
+	now := time.Now()
+	stall := scm.CIStall{Key: "ci/build", Class: "provider-no-start", HeadSHA: base, Check: scm.Check{Name: "build", WorkflowID: 1}}
+	step := &CIStep{}
+	if err := step.saveStall(sctx, stall.Key, stallRecoveryState{Stall: stall, Phase: "remedy", At: now.Add(-time.Hour)}); err != nil {
+		t.Fatal(err)
+	}
+	host := &stallTestHost{stalls: []scm.CIStall{stall}, allowed: true}
+	pr := &scm.PR{HeadSHA: head}
+	waiting, out, err := step.recoverStalls(sctx, host, pr, nil, now)
+	if err != nil || !waiting || out != nil || host.calls != 0 {
+		t.Fatalf("resumed waiting=%v out=%#v err=%v", waiting, out, err)
+	}
+	restored := &CIStep{}
+	restored.loadRerunBudget(sctx)
+	state := restored.transientReruns.stalls[stall.Key]
+	if state.MonitorHead != head || !state.At.Equal(now) {
+		t.Fatalf("monitoring grace not pinned: %#v", state)
+	}
+	waiting, out, err = restored.recoverStalls(sctx, host, pr, nil, now.Add(time.Minute))
+	if err != nil || !waiting || out != nil {
+		t.Fatalf("restart lost grace: %v %#v %v", waiting, out, err)
+	}
+	host.stalls = nil
+	_, out, err = restored.recoverStalls(sctx, host, pr, nil, now.Add(stallReplacementGrace+time.Second))
+	if err != nil || out == nil || !out.NeedsApproval || host.calls != 0 || restored.transientReruns.stalls[stall.Key].Stall.HeadSHA != base {
+		t.Fatalf("registration failure=%#v err=%v calls=%d", out, err, host.calls)
 	}
 }

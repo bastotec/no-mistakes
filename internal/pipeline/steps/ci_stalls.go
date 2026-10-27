@@ -19,11 +19,12 @@ const stallReplacementGrace = 10 * time.Minute
 const workloadFindingPrefix = "ci-workload-"
 
 type stallRecoveryState struct {
-	Stall    scm.CIStall `json:"stall"`
-	Phase    string      `json:"phase"`
-	At       time.Time   `json:"at"`
-	Affected []string    `json:"affected,omitempty"`
-	Detail   string      `json:"detail,omitempty"`
+	Stall       scm.CIStall `json:"stall"`
+	Phase       string      `json:"phase"`
+	At          time.Time   `json:"at"`
+	Affected    []string    `json:"affected,omitempty"`
+	Detail      string      `json:"detail,omitempty"`
+	MonitorHead string      `json:"monitor_head,omitempty"`
 }
 
 func (s *CIStep) saveStall(sctx *pipeline.StepContext, key string, state stallRecoveryState) error {
@@ -100,10 +101,36 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 	if err != nil {
 		return true, nil, err
 	}
+	for key, state := range s.transientReruns.stalls {
+		if state.Phase != "remedy" && state.Phase != "human-repair" {
+			continue
+		}
+		published, err := publishedBranchHead(sctx)
+		if err != nil {
+			return true, nil, err
+		}
+		if published != sctx.Run.HeadSHA || (pr.HeadSHA != "" && pr.HeadSHA != published) {
+			return true, ciRerunHeadMismatchOutcome(sctx.Run.HeadSHA, published), nil
+		}
+		if state.MonitorHead != published {
+			state.MonitorHead = published
+			state.At = now
+			if err := s.saveStall(sctx, key, state); err != nil {
+				return true, nil, err
+			}
+		}
+	}
 	byKey := map[string]scm.CIStall{}
+	currentStalls := make([]scm.CIStall, 0, len(inspection.Stalls))
 	for _, stall := range inspection.Stalls {
+		state := s.transientReruns.stalls[stall.Key]
+		if state.MonitorHead != "" && stall.HeadSHA != state.MonitorHead {
+			continue
+		}
+		currentStalls = append(currentStalls, stall)
 		byKey[stall.Key] = stall
 	}
+	inspection.Stalls = currentStalls
 	for key, state := range s.transientReruns.stalls {
 		if state.Phase == "recovered" {
 			continue
@@ -140,6 +167,14 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 			}
 		}
 		if !pending {
+			if state.MonitorHead != "" {
+				state.Phase = "handed-off"
+				state.Detail += "; current-head replacement did not register within monitoring grace"
+				if err := s.saveStall(sctx, key, state); err != nil {
+					return true, nil, err
+				}
+				continue
+			}
 			inspection.Stalls = append(inspection.Stalls, state.Stall)
 			byKey[key] = state.Stall
 		}
@@ -254,6 +289,7 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 				state.Detail += "; workload repair failed: " + repairErr.Error()
 			}
 		}
+		state.Stall = stall
 		state.Phase = "handed-off"
 		state.Detail += "; automatic recovery exhausted or safe workload remedy unavailable"
 		if err := s.saveStall(sctx, stall.Key, state); err != nil {
@@ -278,9 +314,48 @@ func (s *CIStep) recoverStalls(sctx *pipeline.StepContext, host scm.Host, pr *sc
 	}
 	if len(handoffs) > 0 {
 		sort.Slice(handoffs, func(i, j int) bool { return handoffs[i].ID < handoffs[j].ID })
-		return true, ciObservationOutcome(Findings{Summary: "CI stall recovery needs attention", Items: handoffs}), nil
+		return false, ciObservationOutcome(Findings{Summary: "CI stall recovery needs attention", Items: handoffs}), nil
 	}
 	return waiting, nil, nil
+}
+
+func (s *CIStep) withoutHandedOffStallChecks(checks []scm.Check) []scm.Check {
+	var remaining []scm.Check
+	for _, check := range checks {
+		handedOff := false
+		for _, state := range s.transientReruns.stalls {
+			previous := state.Stall.Check
+			if state.Phase == "handed-off" && !check.AwaitingApproval() && check.Name == previous.Name && check.WorkflowID == previous.WorkflowID && (previous.ProviderID == "" || check.ProviderID == previous.ProviderID) {
+				handedOff = true
+				break
+			}
+		}
+		if !handedOff {
+			remaining = append(remaining, check)
+		}
+	}
+	return remaining
+}
+
+func (s *CIStep) monitorSelectedStallRepairs(sctx *pipeline.StepContext, findings Findings) error {
+	for _, finding := range findings.Items {
+		if !strings.HasPrefix(finding.ID, workloadFindingPrefix) {
+			continue
+		}
+		key := strings.TrimPrefix(finding.ID, workloadFindingPrefix)
+		state, ok := s.transientReruns.stalls[key]
+		if !ok || state.Phase != "handed-off" {
+			continue
+		}
+		state.Phase = "human-repair"
+		state.MonitorHead = ""
+		state.At = time.Time{}
+		state.Detail += "; selected repair committed, awaiting replacement monitoring"
+		if err := s.saveStall(sctx, key, state); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *CIStep) appendStallFindings(outcome *pipeline.StepOutcome) {
@@ -332,9 +407,13 @@ func rewriteWorkloadRunner(data []byte, jobKey string) ([]byte, error) {
 	if len(root.Content) != 1 {
 		return nil, fmt.Errorf("workflow document unavailable")
 	}
-	job := lookup(lookup(root.Content[0], "jobs"), jobKey)
+	jobs := lookup(root.Content[0], "jobs")
+	job := lookup(jobs, jobKey)
+	if root.Content[0].Style&yaml.FlowStyle != 0 || jobs == nil || jobs.Style&yaml.FlowStyle != 0 || job == nil || job.Style&yaml.FlowStyle != 0 {
+		return nil, fmt.Errorf("flow-style workflow mappings are not eligible")
+	}
 	runner := lookup(job, "runs-on")
-	if runner == nil || runner.Kind == yaml.AliasNode {
+	if runner == nil || runner.Kind == yaml.AliasNode || runner.Style&(yaml.LiteralStyle|yaml.FoldedStyle) != 0 {
 		return nil, fmt.Errorf("job has no supported runs-on")
 	}
 	lines := strings.Split(string(data), "\n")
@@ -344,7 +423,7 @@ func rewriteWorkloadRunner(data []byte, jobKey string) ([]byte, error) {
 	}
 	source := lines[line]
 	colon := strings.Index(source, "runs-on:")
-	if colon < 0 {
+	if colon < 0 || strings.TrimSpace(source[:colon]) != "" {
 		return nil, fmt.Errorf("runs-on must be on one line")
 	}
 	for _, child := range runner.Content {
@@ -366,6 +445,10 @@ func rewriteWorkloadRunner(data []byte, jobKey string) ([]byte, error) {
 	result := []byte(strings.Join(lines, "\n"))
 	if string(result) == string(data) {
 		return nil, fmt.Errorf("job already targets workload")
+	}
+	var validated map[string]any
+	if err := yaml.Unmarshal(result, &validated); err != nil {
+		return nil, fmt.Errorf("invalid rewritten workflow: %w", err)
 	}
 	return result, nil
 }
