@@ -157,7 +157,6 @@ const (
 	CheckKindStatus CheckKind = "status"
 )
 
-// Check is a single CI check result on a PR.
 // CIStall describes provider-proven work that stopped making progress. Key is
 // stable across attempts of the same workflow job; Check retains the exact
 // execution identity used for a targeted rerun.
@@ -186,6 +185,7 @@ type CIStallRecovery interface {
 	WorkloadRecoveryAllowed(context.Context) (bool, error)
 }
 
+// Check is a single CI check result on a PR.
 type Check struct {
 	Name       string
 	ProviderID string `json:"provider_id,omitempty"`

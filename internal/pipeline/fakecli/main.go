@@ -77,6 +77,24 @@ func handleFakeCLI(mode string) {
 		}
 	}
 
+	// Existing CI fixtures describe check rollups, not stalled executions.
+	// Keep their default metadata neutral, with the endpoint's actual wire
+	// shape; returning the paginated workflow-list array for a single run
+	// makes the stall inspector fail before ordinary rerun policy can run.
+	// Stall-specific tests override these responses through the fixture above.
+	if (mode == "ci-gh" || mode == "ci-gh-seq") && len(args) > 0 && args[0] == "api" {
+		if _, runPath, ok := strings.Cut(args[len(args)-1], "/actions/runs/"); ok {
+			if _, err := strconv.ParseInt(runPath, 10, 64); err == nil {
+				fmt.Println(`{}`)
+				os.Exit(0)
+			}
+			if parts := strings.Split(runPath, "/"); len(parts) == 2 && strings.HasPrefix(parts[1], "jobs?") {
+				fmt.Println(`{"jobs":[]}`)
+				os.Exit(0)
+			}
+		}
+	}
+
 	switch mode {
 	case "publication-refresh-gh":
 		fakePublicationRefreshGH(args)
