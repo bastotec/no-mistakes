@@ -301,6 +301,87 @@ func TestAxiStatusExplicitRunStaleCIGatePrescribesHeadVerifiedApprove(t *testing
 	})
 }
 
+func TestAxiStatusExplicitRunStaleCIGateWithholdsGuidanceOnForeignBranch(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	run(t, repoDir, "git", "checkout", "-b", "feature/mine")
+	chdir(t, repoDir)
+
+	// The inspected run belongs to another branch; the invoking worktree
+	// stays on feature/mine, so a branch-scoped respond would answer
+	// feature/mine's active run, never the inspected one.
+	other, err := database.InsertRun(repo.ID, "feature/other", "head-other", "base")
+	if err != nil {
+		t.Fatalf("insert other-branch run: %v", err)
+	}
+	if err := database.UpdateRunStatus(other.ID, types.RunRunning); err != nil {
+		t.Fatalf("start other-branch run: %v", err)
+	}
+	ci, err := database.InsertStepResult(other.ID, types.StepCI)
+	if err != nil {
+		t.Fatalf("insert ci step: %v", err)
+	}
+	if err := database.UpdateStepStatus(ci.ID, types.StepStatusFixReview); err != nil {
+		t.Fatalf("park ci step at fix_review: %v", err)
+	}
+	stale := findingsJSON(t, nil, "provider cancelled checks; rerunning")
+	if err := database.SetStepFindings(ci.ID, stale); err != nil {
+		t.Fatalf("set stale ci findings: %v", err)
+	}
+
+	out := axiStatusOutput(t, other.ID)
+	for _, want := range []string{
+		"other_branch_run:",
+		"inspection-only",
+		"axi respond answers the branch's current active run, not an explicit selection",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("foreign-branch stale-CI-gate status missing %q:\n%s", want, out)
+		}
+	}
+	if strings.Contains(out, "respond --action approve") {
+		t.Fatalf("foreign-branch gate prescribed a mutating response:\n%s", out)
+	}
+}
+
+func TestAxiStatusExplicitRunStaleCIGateNamesActiveRunConfirmation(t *testing.T) {
+	repoDir, _, database, repo := setupAxiQueryRepo(t)
+	run(t, repoDir, "git", "checkout", "-b", "feature/mine")
+	chdir(t, repoDir)
+	raw, err := exec.Command("git", "-C", repoDir, "rev-parse", "HEAD").Output()
+	if err != nil {
+		t.Fatalf("rev-parse HEAD: %v", err)
+	}
+	headSHA := strings.TrimSpace(string(raw))
+
+	mine, err := database.InsertRun(repo.ID, "feature/mine", headSHA, "main")
+	if err != nil {
+		t.Fatalf("insert current-branch run: %v", err)
+	}
+	if err := database.UpdateRunStatus(mine.ID, types.RunRunning); err != nil {
+		t.Fatalf("start run: %v", err)
+	}
+	ci, err := database.InsertStepResult(mine.ID, types.StepCI)
+	if err != nil {
+		t.Fatalf("insert ci step: %v", err)
+	}
+	if err := database.UpdateStepStatus(ci.ID, types.StepStatusFixReview); err != nil {
+		t.Fatalf("park ci step at fix_review: %v", err)
+	}
+	stale := findingsJSON(t, nil, "provider cancelled checks; rerunning")
+	if err := database.SetStepFindings(ci.ID, stale); err != nil {
+		t.Fatalf("set stale ci findings: %v", err)
+	}
+
+	out := axiStatusOutput(t, mine.ID)
+	for _, want := range []string{
+		"confirming the branch's active run is still " + mine.ID,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("matched-head status missing recipient confirmation %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestAxiStatusExplicitOlderSameBranchRunGateIsInspectionOnly(t *testing.T) {
 	repoDir, _, database, repo := setupAxiQueryRepo(t)
 	run(t, repoDir, "git", "checkout", "-b", "feature/mine")
