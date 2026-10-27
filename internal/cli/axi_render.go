@@ -627,7 +627,7 @@ func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView, branch str
 	// refusal line; only the proven case names the command, still requiring
 	// the operator to confirm the branch's active run is the inspected one.
 	if gate.Name == string(types.StepCI) && gate.Status == string(types.StepStatusFixReview) {
-		if head := rv.HeadSHA; strings.TrimSpace(head) != "" {
+		if head := rv.SubmittedHeadSHA; head != nil && strings.TrimSpace(*head) != "" {
 			observed := worktreeHead()
 			switch {
 			case branch != run.Branch:
@@ -636,12 +636,12 @@ func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView, branch str
 			case observed == "":
 				help = append(help,
 					fmt.Sprintf("Cannot read the invoking worktree's HEAD; no response guidance is offered - resolve the worktree state and re-check run %s", runID))
-			case observed == strings.TrimSpace(head):
+			case observed == strings.TrimSpace(*head):
 				help = append(help,
-					fmt.Sprintf("Worktree head equals the run's submitted head %s; this stale cancelled-checks gate may be reconciled by answering it: run `no-mistakes axi respond --action approve` from the branch's own worktree after confirming the branch's active run is still %s and re-checking the live rollup.", strings.TrimSpace(head), runID))
+					fmt.Sprintf("Worktree head equals the run's submitted head %s; this stale cancelled-checks gate may be reconciled by answering it: run `no-mistakes axi respond --action approve` from the branch's own worktree after confirming the branch's active run is still %s and re-checking the live rollup.", strings.TrimSpace(*head), runID))
 			default:
 				help = append(help,
-					fmt.Sprintf("Worktree head %s does not match the run's submitted head %s; respond is refused until the heads match - do not answer this gate from a mismatched worktree.", observed, strings.TrimSpace(head)))
+					fmt.Sprintf("Worktree head %s does not match the run's submitted head %s; respond is refused until the heads match - do not answer this gate from a mismatched worktree.", observed, strings.TrimSpace(*head)))
 			}
 		}
 	}
