@@ -276,7 +276,7 @@ Symptom: pipeline completes but the PR step shows `skipped`.
 Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requirements. Most common causes:
 
 - `gh`, `glab`, `forgejo-axi`, or `tea` not installed (or, for GitHub, not on `PATH`)
-- The provider CLI reports that it is not authenticated; on GitHub, a timed-out or interrupted `gh auth status` is reported separately from auth failure
+- The provider CLI's availability check fails; for GitHub, use the diagnostic distinctions below before changing credentials
 - Bitbucket env vars not set in the daemon's environment
 - Upstream is not one of the hosts listed in Provider Integration
 - Self-hosted GitHub Enterprise on a hostname that is not `github.com` isn't detected because `gh` isn't configured for the host; run `gh auth login --hostname your-ghe.example.com` so detection finds it. Once detection succeeds, the availability check is host-scoped (`gh auth status --hostname your-ghe.example.com`), so a stale token on `github.com` or any other configured gh host can no longer falsely mark the GHE repo as unauthenticated.
@@ -284,6 +284,8 @@ Check the [Provider Integration](/no-mistakes/guides/provider-integration/) requ
 - Self-hosted Gitea isn't detected because `tea` has no login configured for the host; run `tea logins add --url https://your-gitea.example.com --token <token> --name <name>` so detection finds it. See [Self-hosted Gitea](/no-mistakes/guides/provider-integration/#self-hosted-gitea).
 - A non-GitHub repo record has a fork URL set; fork MR/PR routing is currently GitHub-only
 - You pushed the PR base branch (this is the repository's default branch, or the configured [`pr.base_branch`](/no-mistakes/reference/repo-config/#prbase_branch) when set); the step skips there unless the branch is associated with an [explicit existing upstream PR](/no-mistakes/reference/cli/#explicit-existing-upstream-pr), whose target lives in another repository
+
+For GitHub, `gh CLI is not authenticated` means the probe reported a missing login or explicit credential rejection (such as HTTP 401 / Bad credentials). `gh auth status transport failure` instead identifies a network or upstream-service failure; check connectivity and the underlying diagnostic rather than assuming credentials need replacing. `gh auth status failed` leaves the cause unconfirmed: gh's “Failed to log in” or “The token in … is invalid” boilerplate alone does not prove a credential rejection. Caller-deadline timeouts and cancellation remain distinct. The probe runs once, without its own retry or deadline policy. An [explicit existing PR](/no-mistakes/reference/cli/#explicit-existing-upstream-pr) still fails validation when the probe fails; these diagnostics do not bypass validation.
 
 ## CI step stuck or timed out
 
