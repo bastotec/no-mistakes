@@ -209,16 +209,13 @@ func ghAuthTransportFailure(detail string) bool {
 	return false
 }
 
+// gh's "The token in ... is invalid" boilerplate also covers transport errors
+// whose causes it suppresses. Only explicit credential rejection or missing-login
+// diagnostics justify an authentication label; ambiguous failures stay neutral.
 func ghAuthRejected(detail string) bool {
 	detail = strings.ToLower(detail)
-	for _, line := range strings.Split(detail, "\n") {
-		if strings.Contains(line, "the token in ") && strings.Contains(line, " is invalid") {
-			return true
-		}
-	}
 	for _, marker := range []string{
-		"not logged into", "not logged in", "token is invalid", "token invalid",
-		"invalid token", "bad credentials", "http 401",
+		"not logged into", "not logged in", "bad credentials", "http 401",
 	} {
 		if strings.Contains(detail, marker) {
 			return true

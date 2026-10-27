@@ -1786,7 +1786,7 @@ func TestAvailableWrapsAuthFailureWithStderr(t *testing.T) {
 	t.Parallel()
 
 	host := New(githubTestCmdFactory(map[string]githubTestResponse{
-		"gh auth status": {stderr: "github.com\n  X Failed to log in\n  - The token in default is invalid.\n", code: 1},
+		"gh auth status": {stderr: "github.com\n  X Failed to log in\n  - HTTP 401: Bad credentials\n", code: 1},
 	}), func() bool { return true }, "", "")
 
 	err := host.Available(context.Background())
@@ -1811,7 +1811,12 @@ func TestAvailableProbeFailureClassification(t *testing.T) {
 		{"multi-account timeout", multiAccountTimeout, "transport failure"},
 		{"mixed transport and credential failure", multiAccountTimeout + "- The token in default is invalid.", "transport failure"},
 		{"connection reset", "read tcp: connection reset by peer", "transport failure"},
-		{"invalid token", "X Failed to log in\n- The token in default is invalid.", "not authenticated"},
+		{"ambiguous stored token failure", "X Failed to log in\n- The token in default is invalid.", "auth status failed"},
+		{"ambiguous environment token failure", "X Failed to log in to github.com using token (GH_TOKEN)\n- The token in GH_TOKEN is invalid.", "auth status failed"},
+		{"ambiguous invalid token", "token is invalid", "auth status failed"},
+		{"ambiguous token invalid", "token invalid", "auth status failed"},
+		{"ambiguous invalid token heading", "invalid token", "auth status failed"},
+		{"confirmed credential rejection", "HTTP 401: Bad credentials", "not authenticated"},
 		{"not logged in", "You are not logged into any GitHub hosts.", "not authenticated"},
 		{"unknown failure", "error opening config", "auth status failed"},
 		{"heading is not proof", "X Failed to log in", "auth status failed"},
