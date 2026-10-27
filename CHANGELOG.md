@@ -1,5 +1,60 @@
 # Changelog
 
+## [1.78.0](https://github.com/bastotec/no-mistakes/compare/v1.77.0...v1.78.0) (2026-10-27)
+
+
+### Features
+
+* **ci:** recover stalled jobs once with scoped workload remediation ([319bf37](https://github.com/bastotec/no-mistakes/commit/319bf37026db18d8195640f1e59303213440989e))
+* **daemon:** continue failed terminal PR publication without rerunning validation ([#57](https://github.com/bastotec/no-mistakes/issues/57)) ([997828e](https://github.com/bastotec/no-mistakes/commit/997828eddcc759c70c2b49f1999c65eb9e360c24))
+* **pipeline:** add opt-in isolation for the whole Test process tree ([#41](https://github.com/bastotec/no-mistakes/issues/41)) ([c2f7656](https://github.com/bastotec/no-mistakes/commit/c2f76564f834c85759b7ec21751b071de1c7a35f))
+* **pipeline:** add opt-in offline run confinement ([#59](https://github.com/bastotec/no-mistakes/issues/59)) ([12eab7e](https://github.com/bastotec/no-mistakes/commit/12eab7eceba67400a00c4840661ea12d51a9777c))
+* **pipeline:** automatically recover stalled GitHub CI jobs ([a43aac7](https://github.com/bastotec/no-mistakes/commit/a43aac799d0005b0dd286f8ca046816314806bb9))
+* **pipeline:** freeze exact-run monitoring without completing validation ([#52](https://github.com/bastotec/no-mistakes/issues/52)) ([6a236a2](https://github.com/bastotec/no-mistakes/commit/6a236a248657f41b73e606ddf80b4494e39c1fe2))
+* **pipeline:** publish run-owned PR previews before Test ([#38](https://github.com/bastotec/no-mistakes/issues/38)) ([2632828](https://github.com/bastotec/no-mistakes/commit/263282826a7ba9951b115a6933bf20dcb39ff665))
+* **pipeline:** refresh current-head repair disposition during CI monitoring ([#58](https://github.com/bastotec/no-mistakes/issues/58)) ([cfe7041](https://github.com/bastotec/no-mistakes/commit/cfe70418dc316504a40b2fef122e0bb6ea037fc7))
+
+
+### Bug Fixes
+
+* allow one explicit repair beyond automatic limits ([#34](https://github.com/bastotec/no-mistakes/issues/34)) ([12739f4](https://github.com/bastotec/no-mistakes/commit/12739f405ca73dc757db518b245d1cededd48b4c))
+* **branchsync:** allow guarded sync of published fixes after PR closure ([#40](https://github.com/bastotec/no-mistakes/issues/40)) ([1c6d8b5](https://github.com/bastotec/no-mistakes/commit/1c6d8b585b833bfe98576057287a036f7339715a))
+* **branchsync:** skip superseded preflight failures during sync selection ([#56](https://github.com/bastotec/no-mistakes/issues/56)) ([393895a](https://github.com/bastotec/no-mistakes/commit/393895acd02511e37bf3f8d7e0405e76abf19412))
+* **ci:** Fixed the Windows cleanup flake in TestRefreshPublication_RPCMonitorJourney/skipped. Plain cancellation triggered failed-run terminal-head Git reconciliation with its own five-second timeout, racing the fixture's five-second shutdown wait. The fixture now uses the existing daemon-shutdown cancellation cause and asserts that the worker returns ErrDaemonShutdown, avoiding unrelated terminalization work. Production behavior is unchanged. Verified the complete journey once normally and three times with the race detector; Windows amd64 test cross-compilation and git diff --check also passed. Windows runtime execution was unavailable locally ([1e5516f](https://github.com/bastotec/no-mistakes/commit/1e5516f597725dde37820b1beb10f522056582cf))
+* **cli:** bind explicit CI gate guidance to branch and submitted head ([3a058a7](https://github.com/bastotec/no-mistakes/commit/3a058a7988d2f834e770e8bf5de6597193fb78f9))
+* **cli:** withhold explicit-selection response guidance without recipient proof ([90cdda6](https://github.com/bastotec/no-mistakes/commit/90cdda640a4333b70319ecf15dd70e61b1e33c46))
+* **daemon:** preserve managed Test preview ownership across replacement launches ([#39](https://github.com/bastotec/no-mistakes/issues/39)) ([66876ce](https://github.com/bastotec/no-mistakes/commit/66876ceb66fe1f41e91a02cf5a383fc353cae699))
+* **db:** handle SQLite write contention without stranding runs ([#36](https://github.com/bastotec/no-mistakes/issues/36)) ([4c5f06d](https://github.com/bastotec/no-mistakes/commit/4c5f06d79437f173aee3a035f5d2203caaa2d35d))
+* **document:** Clarify bounded GitHub CI stall recovery ([4ee490a](https://github.com/bastotec/no-mistakes/commit/4ee490aa6c3a18e9a8d5630281434c9407685696))
+* **document:** Clarify explicit-run response guidance and submitted-head binding ([8b4282c](https://github.com/bastotec/no-mistakes/commit/8b4282ca8d164e74318f94cb49b389b0c0a99505))
+* **document:** Clarify GitHub auth probe failure diagnostics ([5f6767a](https://github.com/bastotec/no-mistakes/commit/5f6767a5663092c66818166740e41568bb3693fd))
+* **document:** Document head-bound Test risk provenance ([1ea8439](https://github.com/bastotec/no-mistakes/commit/1ea84393a192b407494e378ec826ee16be504394))
+* **github:** distinguish auth probe transport failures ([5f32ef8](https://github.com/bastotec/no-mistakes/commit/5f32ef85328b344be31db7412213f3718fcc51f2))
+* **pipeline:** align final review prose with repair disposition ([#42](https://github.com/bastotec/no-mistakes/issues/42)) ([ad93008](https://github.com/bastotec/no-mistakes/commit/ad930085ef2d7548f9d329dc09d240a7fefbf9e1))
+* **pipeline:** answer review findings on risk provenance contract ([c57e5a7](https://github.com/bastotec/no-mistakes/commit/c57e5a7fa771c81f1096b4b662ee596dc0e369be))
+* **pipeline:** distinguish fixed findings from current PR claims ([87180da](https://github.com/bastotec/no-mistakes/commit/87180dacffedd82f0691a2018e48037293fa054d))
+* **pipeline:** give review errors one extra round at the cap ([4f7970c](https://github.com/bastotec/no-mistakes/commit/4f7970c0faa33e9a11b6dd6c88b34376d5458107))
+* **pipeline:** preserve bounded approval context in PR publication ([#43](https://github.com/bastotec/no-mistakes/issues/43)) ([9a35b69](https://github.com/bastotec/no-mistakes/commit/9a35b6906c44abb935b25737092b94a1c2c14cb9))
+* **pipeline:** preserve interrupted repair work across fix rounds ([#20](https://github.com/bastotec/no-mistakes/issues/20)) ([6751307](https://github.com/bastotec/no-mistakes/commit/67513079ad2f06cd282f9ffd53895dc46613e1c1))
+* **pipeline:** preserve restored repair work in confined reviews ([#60](https://github.com/bastotec/no-mistakes/issues/60)) ([07c13f4](https://github.com/bastotec/no-mistakes/commit/07c13f41de14f2b1860f9a9380b0f4ef58c0f015))
+* **pipeline:** prevent unattended approval of red CI gates ([d6e1a2e](https://github.com/bastotec/no-mistakes/commit/d6e1a2ebf074d789ac1a478496da9c5ee2d2b9b3))
+* **pipeline:** prioritize carried findings in review risk rationale ([8d5ed10](https://github.com/bastotec/no-mistakes/commit/8d5ed10ce7517f4989cf2eb1344d9e5ad47cd646))
+* **pipeline:** require head-bound risk provenance on revalidating Test steps ([25494be](https://github.com/bastotec/no-mistakes/commit/25494bead33320e3c522e35b37cc3e8468c30cc1))
+* **pipeline:** require head-bound risk provenance on revalidating Test steps ([0f3df51](https://github.com/bastotec/no-mistakes/commit/0f3df517b5786a7a23a3537775437a9f6b9525b6))
+* **pipeline:** resume CI watches after daemon restarts ([45ab5a3](https://github.com/bastotec/no-mistakes/commit/45ab5a3422f20846cee033d1ebc405929a7e49de))
+* **pipeline:** sanitizes and retries PR text the publication guard rejects ([e6624fb](https://github.com/bastotec/no-mistakes/commit/e6624fb072e9e029d727948640e441e9474ac418))
+* **pipeline:** tolerate non-correctness finder timeouts ([#32](https://github.com/bastotec/no-mistakes/issues/32)) ([7f036a0](https://github.com/bastotec/no-mistakes/commit/7f036a0158b0e3fefc80c61435f6a2ed50bdf521))
+* **review:** Bind explicit-run guidance to submitted head; focused regressions pass ([50e9525](https://github.com/bastotec/no-mistakes/commit/50e952521473ff3401cceae8d650d2d3c69502bd))
+* **review:** Centralize stall repair transitions; verify targeted race regressions ([4ae2079](https://github.com/bastotec/no-mistakes/commit/4ae2079e47c8c02f1738a444f20e5042bf47984d))
+* **review:** Complete risk fixture migration with focused YAML contract verification ([b491079](https://github.com/bastotec/no-mistakes/commit/b491079409470be74206c77a12cde63527b18831))
+* **review:** Fix and race-test bounded CI stall recovery ([102890b](https://github.com/bastotec/no-mistakes/commit/102890bd5cb0e48c2dfe84316c447c7a3eae8b26))
+* **review:** Fix CI stall recovery with race-verified regressions ([61cfcf2](https://github.com/bastotec/no-mistakes/commit/61cfcf2dc0a02652153f637861e83e577067ac76))
+* **review:** Fix stall recovery safety; focused race regressions pass ([5d3d876](https://github.com/bastotec/no-mistakes/commit/5d3d876db5e7fded99eb6515043b7169bfccee4b))
+* **review:** Migrate analyzer failure fixtures; focused e2e verification passed ([6757e1e](https://github.com/bastotec/no-mistakes/commit/6757e1e31b27c393d93dfdc9e7562c4255b64366))
+* **review:** Remove auth probe retries and deadlines; preserve diagnostics ([908bd5a](https://github.com/bastotec/no-mistakes/commit/908bd5aedaf10d7cf27650bb06fd418e82d2d3ab))
+* **scm:** distinguish GitHub auth probe transport failures ([0e69662](https://github.com/bastotec/no-mistakes/commit/0e69662b98b25cb07d15e46d29dc3e100503be28))
+* **test:** Fix GitHub diagnostics; focused tests and real-gh reproduction pass ([c8a664e](https://github.com/bastotec/no-mistakes/commit/c8a664edd8e191a819e6bc654faa6e6053685d87))
+
 ## [1.77.0](https://github.com/bastotec/no-mistakes/compare/v1.76.0...v1.77.0) (2026-10-14)
 
 
