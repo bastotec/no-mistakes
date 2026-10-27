@@ -616,16 +616,13 @@ func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView, branch str
 	// durable repair for that stale-gate state is the gate's own approval:
 	// the CI step re-polls live checks through VerifyApprovalOverride at
 	// approval time and records any not-genuinely-green state as an override
-	// reason, so the approval can never read as a plain pass. Attach that
-	// prescription only behind recipient-binding proof the operator performs
-	// themselves. The response command stays out of the explicit selection
-	// (runAxiRespond is branch-scoped: it answers the branch's CURRENT active
-	// run and has no run selector), so the help must never hand a bare
-	// mutating command across an identity it has not verified: the invoking
-	// worktree must be on the run's own branch AND its head must equal the
-	// run's submitted head. Foreign branch or unreadable head earns the
-	// refusal line; only the proven case names the command, still requiring
-	// the operator to confirm the branch's active run is the inspected one.
+	// reason, so the approval can never read as a plain pass. runAxiRespond
+	// answers the branch's CURRENT active run and has no run selector. Before
+	// suggesting approval, require the invoking branch and immutable submitted
+	// head to match; the pipeline head may have advanced during repairs and
+	// cannot establish this binding. These checks still cannot prove which
+	// run is active when the operator responds, so conditional guidance must
+	// require confirmation that the active run is the inspected one.
 	if gate.Name == string(types.StepCI) && gate.Status == string(types.StepStatusFixReview) {
 		if head := rv.SubmittedHeadSHA; head != nil && strings.TrimSpace(*head) != "" {
 			observed := worktreeHead()
