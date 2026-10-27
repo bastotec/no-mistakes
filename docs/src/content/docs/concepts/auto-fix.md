@@ -39,7 +39,7 @@ Unresolved documentation findings and unresolved blocking lint findings pause fo
 
 ## Before the agent: deterministic CI reruns
 
-The CI step has one cheaper option than a fix round, and it tries it first.
+The CI step tries deterministic recovery before spending an agent fix round. GitHub's separate [proven-stall recovery](/no-mistakes/reference/pipeline-steps/#ci) runs first; the transient-rerun sequence below applies to the checks that remain.
 
 A check whose failure the provider attributes to itself rather than to your commit, such as a cancellation, is the provider telling you about itself. On GitHub, a positive transient rerun budget also enables structural detection of jobs that failed before any repository step ran. Handing a detected provider failure to the fix agent spends an agent round reading a run that never tested anything, and the fix it invents edits code that was never broken. So when every terminally failed check on the pull request is one of those and the configured budget authorizes a rerun, the CI step asks the provider to run those checks again for the same commit and keeps polling.
 
@@ -52,7 +52,7 @@ That deterministic rerun sits strictly before the agent rounds described above:
 
 [`ci.rerun_transient`](/no-mistakes/reference/repo-config/#cirerun_transient) owns the budget, the exact classification, and every case that skips the rerun.
 
-Nothing that survives a rerun falls into the agent loop either. A check the provider cancels again, or a detected GitHub setup failure that persists after its budget, is still not a verdict on the code, so it pauses for a decision instead of spending a fix round on a run that never tested anything. A cancellation no rerun is going to replace, including at the default budget of `0`, reaches that same decision directly: the provider has published its conclusion and will not replace it, so waiting on it would never end. A rerun costs another provider-side workflow run, so the budget is deliberately small and is spent when the rerun is requested, which bounds the loop by construction. Each rerun is announced in the step log, so a run that is waiting on one says so instead of looking stalled. Reruns never cross a head change: if the published branch head no longer matches the commit the run delivered, the step pauses with the expected and observed commits rather than re-running checks against a revision it never produced.
+A transient failure that survives its rerun does not fall into the agent loop either. A check the provider cancels again, or a detected GitHub setup failure that persists after its budget, is still not a verdict on the code, so it pauses for a decision instead of spending a fix round on a run that never tested anything. A cancellation no rerun is going to replace, including at the default budget of `0`, reaches that same decision directly: the provider has published its conclusion and will not replace it, so waiting on it would never end. A rerun costs another provider-side workflow run, so the budget is deliberately small and is spent when the rerun is requested, which bounds the loop by construction. Each rerun is announced in the step log, so a run that is waiting on one says so instead of looking stalled. Reruns never cross a head change: if the published branch head no longer matches the commit the run delivered, the step pauses with the expected and observed commits rather than re-running checks against a revision it never produced.
 
 ## Configuration
 

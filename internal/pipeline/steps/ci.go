@@ -55,6 +55,7 @@ type CIStep struct {
 	observedCompletedAt  map[string]checkFreshness // terminally failed check freshness at the observation whose findings a fix round may repair
 	pendingFixSummary    string                    // one-line summary of the repair this execution published, attached to the outcome it ends with
 	pendingRepairPublish bool
+	stallBudgetErr       error
 	transientReruns      checkRerunBudget // per-check rerun budget spent on provider-reported transient failures
 	pollIntervalOverride time.Duration    // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
@@ -269,6 +270,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// this re-entry is the retry of a retained repair a protected-path refusal
 	// interrupted: that repair is finished first and nothing new is requested.
 	repairRequested := sctx.Fixing && !retryRefusal
+	defer func() { s.appendStallFindings(outcome) }()
 	defer func() {
 		if outcome != nil {
 			if s.pendingFixSummary != "" {
@@ -610,7 +612,46 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 				return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(err), Findings{}, sctx.DeferredFindings), nil
 			}
 		} else {
-			consecutiveCheckErrs = 0
+			var stallFindings []Finding
+			if !mergeConflict {
+				waiting, recoveryOutcome, recoveryErr := s.recoverStalls(sctx, host, pr, checks, now())
+				if recoveryErr != nil {
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
+					sctx.Log(fmt.Sprintf("warning: could not inspect CI stall recovery: %v", recoveryErr))
+					consecutiveCheckErrs++
+					if consecutiveCheckErrs >= consecutiveCheckErrorLimit {
+						return ciTerminalRepairOutcome(ciCheckReadFailureOutcome(recoveryErr), Findings{}, sctx.DeferredFindings), nil
+					}
+					if err := waitForPoll(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+				consecutiveCheckErrs = 0
+				if recoveryOutcome != nil {
+					clearCIMonitorReady(sctx)
+					if waiting {
+						return recoveryOutcome, nil
+					}
+					findings, err := types.ParseFindingsJSON(recoveryOutcome.Findings)
+					if err != nil {
+						return nil, err
+					}
+					stallFindings = findings.Items
+					checks = s.withoutHandedOffStallChecks(checks)
+				}
+				if waiting {
+					clearCIMonitorReady(sctx)
+					lastMonitorLog = ""
+					if err := waitForPoll(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			} else {
+				consecutiveCheckErrs = 0
+			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before
@@ -701,7 +742,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			sort.Strings(unresolvedCancelled)
 			sort.Strings(awaitingRerun)
 			hasFailures := len(failing) > 0
-			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0 || len(awaitingApproval) > 0
+			hasIssues := hasFailures || mergeConflict || len(unresolvedCancelled) > 0 || len(awaitingApproval) > 0 || len(stallFindings) > 0
 			// Checks held for approval never start on their own, so waiting
 			// for the rest to finish only delays the one thing a human can do.
 			// Anything the fix agent could repair still waits for the full set.
@@ -766,6 +807,10 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 						awaitingApproval:    awaitingApproval,
 						forkPR:              strings.TrimSpace(sctx.Repo.ForkURL) != "",
 					})
+					findings.Items = append(findings.Items, stallFindings...)
+					if len(stallFindings) > 0 {
+						findings.Summary = strings.TrimPrefix(findings.Summary+"; CI stall recovery needs attention", "; ")
+					}
 					sctx.Log(fmt.Sprintf("issues detected: %s", findings.Summary))
 					return ciObservationOutcome(findings), nil
 				}
