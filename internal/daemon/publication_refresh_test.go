@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -167,13 +168,21 @@ func TestRefreshPublication_RPCMonitorJourney(t *testing.T) {
 			})
 			mgr := NewRunManager(d, p, nil)
 			mgr.executors[run.ID] = executor
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, stop := context.WithTimeout(context.Background(), 20*time.Second)
+			ctx, cancel := context.WithCancelCause(ctx)
 			done := make(chan error, 1)
 			go func() { done <- executor.Execute(ctx, run, repo, work) }()
 			t.Cleanup(func() {
-				cancel()
+				defer stop()
+				// Stop the monitor as a daemon shutdown, not a failed run. Plain
+				// cancellation starts terminal-head Git reconciliation with its
+				// own five-second budget, racing this join on Windows.
+				cancel(pipeline.ErrDaemonShutdown)
 				select {
-				case <-done:
+				case err := <-done:
+					if !errors.Is(err, pipeline.ErrDaemonShutdown) {
+						t.Errorf("fixture CI worker shutdown: %v", err)
+					}
 				case <-time.After(5 * time.Second):
 					t.Error("fixture CI worker did not stop")
 				}

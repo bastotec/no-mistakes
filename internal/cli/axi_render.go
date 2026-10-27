@@ -604,7 +604,7 @@ func gateFields(gate stepView) []toon.Field {
 	return gateFieldsWithHelp(gate, append(help, tail...))
 }
 
-func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView) []toon.Field {
+func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView, branch string) []toon.Field {
 	runID := run.ID
 	help := []string{
 		fmt.Sprintf("The explicitly selected gate for run %s is inspection-only; no run-scoped response command exists", runID),
@@ -616,20 +616,29 @@ func inspectionOnlyGateFields(gate stepView, run *db.Run, rv runView) []toon.Fie
 	// durable repair for that stale-gate state is the gate's own approval:
 	// the CI step re-polls live checks through VerifyApprovalOverride at
 	// approval time and records any not-genuinely-green state as an override
-	// reason, so the approval can never read as a plain pass. Attach that
-	// prescription only behind a worktree head equality check the operator
-	// performs themselves - the response command stays out of the explicit
-	// selection, the exact-head requirement keeps the response from landing
-	// on a run this worktree cannot answer, and a mismatched head is told to
-	// stop rather than guess.
+	// reason, so the approval can never read as a plain pass. runAxiRespond
+	// answers the branch's CURRENT active run and has no run selector. Before
+	// suggesting approval, require the invoking branch and immutable submitted
+	// head to match; the pipeline head may have advanced during repairs and
+	// cannot establish this binding. These checks still cannot prove which
+	// run is active when the operator responds, so conditional guidance must
+	// require confirmation that the active run is the inspected one.
 	if gate.Name == string(types.StepCI) && gate.Status == string(types.StepStatusFixReview) {
-		if head := rv.HeadSHA; strings.TrimSpace(head) != "" {
-			if observed := worktreeHead(); observed == strings.TrimSpace(head) {
+		if head := rv.SubmittedHeadSHA; head != nil && strings.TrimSpace(*head) != "" {
+			observed := worktreeHead()
+			switch {
+			case branch != run.Branch:
 				help = append(help,
-					fmt.Sprintf("Worktree head equals the run's submitted head %s; this stale cancelled-checks gate may be reconciled by answering it: run `no-mistakes axi respond --action approve` from the branch's own worktree after re-checking the live rollup.", strings.TrimSpace(head)))
-			} else {
+					fmt.Sprintf("Run %s is on branch %s but this worktree is on %s; axi respond answers the branch's current active run, not an explicit selection, so no response guidance is offered from here", runID, run.Branch, branch))
+			case observed == "":
 				help = append(help,
-					fmt.Sprintf("Worktree head %s does not match the run's submitted head %s; respond is refused until the heads match - do not answer this gate from a mismatched worktree.", observed, strings.TrimSpace(head)))
+					fmt.Sprintf("Cannot read the invoking worktree's HEAD; no response guidance is offered - resolve the worktree state and re-check run %s", runID))
+			case observed == strings.TrimSpace(*head):
+				help = append(help,
+					fmt.Sprintf("Worktree head equals the run's submitted head %s; this stale cancelled-checks gate may be reconciled by answering it: run `no-mistakes axi respond --action approve` from the branch's own worktree after confirming the branch's active run is still %s and re-checking the live rollup.", strings.TrimSpace(*head), runID))
+			default:
+				help = append(help,
+					fmt.Sprintf("Worktree head %s does not match the run's submitted head %s; respond is refused until the heads match - do not answer this gate from a mismatched worktree.", observed, strings.TrimSpace(*head)))
 			}
 		}
 	}
