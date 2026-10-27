@@ -62,6 +62,21 @@ func handleFakeCLI(mode string) {
 		os.Exit(0)
 	}
 
+	if fixture := os.Getenv("FAKE_CLI_STALL_API"); fixture != "" && len(args) > 0 && args[0] == "api" {
+		data, err := os.ReadFile(fixture)
+		if err != nil {
+			panic(err)
+		}
+		var responses map[string]json.RawMessage
+		if err := json.Unmarshal(data, &responses); err != nil {
+			panic(err)
+		}
+		if response, ok := responses[args[len(args)-1]]; ok {
+			fmt.Print(string(response))
+			os.Exit(0)
+		}
+	}
+
 	switch mode {
 	case "publication-refresh-gh":
 		fakePublicationRefreshGH(args)

@@ -111,6 +111,7 @@ type rerunRollupState struct {
 // key and therefore one budget. Selection must reserve against that shared key
 // (see transientRerunCandidates) or a single poll could spend it more than once.
 type checkRerunBudget struct {
+	stalls map[string]stallRecoveryState
 	spent  map[string]int
 	rollup map[string]rerunRollupState
 }
@@ -119,6 +120,7 @@ type checkRerunBudget struct {
 // named type rather than an inline literal so a field added here is a
 // compile-time decision about what must survive a restart.
 type persistedRerunBudget struct {
+	Stalls map[string]stallRecoveryState   `json:"stalls,omitempty"`
 	Spent  map[string]int                  `json:"spent,omitempty"`
 	Rollup map[string]persistedRollupState `json:"rollup,omitempty"`
 }
@@ -133,10 +135,10 @@ type persistedRollupState struct {
 // marshal renders the budget for persistence. An empty budget marshals to the
 // empty string so a run that never spent a rerun writes nothing.
 func (b *checkRerunBudget) marshal() (string, error) {
-	if len(b.spent) == 0 && len(b.rollup) == 0 {
+	if len(b.spent) == 0 && len(b.rollup) == 0 && len(b.stalls) == 0 {
 		return "", nil
 	}
-	payload := persistedRerunBudget{Spent: b.spent}
+	payload := persistedRerunBudget{Spent: b.spent, Stalls: b.stalls}
 	if len(b.rollup) > 0 {
 		payload.Rollup = make(map[string]persistedRollupState, len(b.rollup))
 		for name, state := range b.rollup {
@@ -170,6 +172,7 @@ func (b *checkRerunBudget) unmarshal(encoded string) error {
 	if err := json.Unmarshal([]byte(encoded), &payload); err != nil {
 		return fmt.Errorf("unmarshal rerun budget: %w", err)
 	}
+	b.stalls = payload.Stalls
 	b.spent = payload.Spent
 	if b.spent == nil {
 		b.spent = map[string]int{}
@@ -269,6 +272,7 @@ func (b *checkRerunBudget) retireResolvedReruns(checks []scm.Check, currentHead 
 		return false, nil
 	}
 	candidate := &checkRerunBudget{
+		stalls: b.stalls,
 		spent:  b.spent,
 		rollup: make(map[string]rerunRollupState, len(b.rollup)-len(retirable)),
 	}
@@ -498,10 +502,12 @@ func (s *CIStep) loadRerunBudget(sctx *pipeline.StepContext) {
 	}
 	encoded, err := sctx.DB.GetRunCIRerunState(sctx.Run.ID)
 	if err != nil {
+		s.stallBudgetErr = err
 		sctx.Log(fmt.Sprintf("warning: could not read the persisted rerun budget: %v", err))
 		return
 	}
 	if err := s.transientReruns.unmarshal(encoded); err != nil {
+		s.stallBudgetErr = err
 		sctx.Log(fmt.Sprintf("warning: could not restore the persisted rerun budget: %v", err))
 	}
 }
@@ -541,6 +547,19 @@ func (s *CIStep) rerunTransientChecks(sctx *pipeline.StepContext, host scm.Host,
 		return false, nil
 	}
 	candidates := transientRerunCandidates(checks, &s.transientReruns, limit)
+	kept := candidates[:0]
+	for _, check := range candidates {
+		stallSpent := false
+		for _, state := range s.transientReruns.stalls {
+			if state.Stall.Check.Name == check.Name && state.Stall.Check.WorkflowID == check.WorkflowID {
+				stallSpent = true
+			}
+		}
+		if !stallSpent {
+			kept = append(kept, check)
+		}
+	}
+	candidates = kept
 	if len(candidates) == 0 {
 		return false, nil
 	}

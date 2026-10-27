@@ -158,6 +158,28 @@ const (
 )
 
 // Check is a single CI check result on a PR.
+// CIStall describes provider-proven work that stopped making progress. Key is
+// stable across attempts of the same workflow job; Check retains the exact
+// execution identity used for a targeted rerun.
+type CIStall struct {
+	Key, Class, Reason   string
+	Check                Check
+	WorkflowPath, JobKey string
+	HeadSHA              string
+	Active               bool
+}
+
+var ErrCIRecoveryUnsafe = errors.New("workflow cancellation would affect a non-stalled active job")
+
+// CIStallRecovery is optional. Providers must not infer infrastructure failure
+// from a check's display name. Cancellation must refuse if any other active job
+// in the workflow has not itself exceeded its stall threshold.
+type CIStallRecovery interface {
+	CIStalls(context.Context, []Check, time.Time) ([]CIStall, error)
+	RecoverCIStall(context.Context, CIStall, time.Time) ([]string, error)
+	WorkloadRecoveryAllowed(context.Context) (bool, error)
+}
+
 type Check struct {
 	Name       string
 	ProviderID string `json:"provider_id,omitempty"`

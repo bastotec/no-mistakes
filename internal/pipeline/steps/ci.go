@@ -55,6 +55,7 @@ type CIStep struct {
 	observedCompletedAt  map[string]checkFreshness // terminally failed check freshness at the observation whose findings a fix round may repair
 	pendingFixSummary    string                    // one-line summary of the repair this execution published, attached to the outcome it ends with
 	pendingRepairPublish bool
+	stallBudgetErr       error
 	transientReruns      checkRerunBudget // per-check rerun budget spent on provider-reported transient failures
 	pollIntervalOverride time.Duration    // if set, overrides computed poll interval (for testing)
 	waitForNextPoll      func(context.Context, time.Duration) error
@@ -269,6 +270,7 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 	// this re-entry is the retry of a retained repair a protected-path refusal
 	// interrupted: that repair is finished first and nothing new is requested.
 	repairRequested := sctx.Fixing && !retryRefusal
+	defer func() { s.appendStallFindings(outcome) }()
 	defer func() {
 		if outcome != nil {
 			if s.pendingFixSummary != "" {
@@ -611,6 +613,23 @@ func (s *CIStep) Execute(sctx *pipeline.StepContext) (outcome *pipeline.StepOutc
 			}
 		} else {
 			consecutiveCheckErrs = 0
+			if !mergeConflict {
+				waiting, recoveryOutcome, recoveryErr := s.recoverStalls(sctx, host, checks, now())
+				if recoveryErr != nil {
+					sctx.Log(fmt.Sprintf("warning: could not inspect CI stall recovery: %v", recoveryErr))
+				}
+				if recoveryOutcome != nil {
+					clearCIMonitorReady(sctx)
+					return recoveryOutcome, nil
+				}
+				if waiting {
+					clearCIMonitorReady(sctx)
+					if err := waitForPoll(); err != nil {
+						return nil, err
+					}
+					continue
+				}
+			}
 			// A failure the provider produced before the repository's own steps
 			// ran (a setup/action-resolution outage) is infrastructure, not a
 			// verdict on the code. Re-bucket those into the transient path before
